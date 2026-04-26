@@ -11,20 +11,20 @@ uploaded_file = st.file_uploader("Upload your .DXF file", type=['dxf'])
 
 if uploaded_file is not None:
     try:
-        # 1. Convert the uploaded file into a text string
-        # This fixes the 'bytes-like object' error
-        file_content = uploaded_file.getvalue().decode("utf-8", errors="ignore")
-        text_stream = io.StringIO(file_content)
+        # --- THE MASTER KEY FIX ---
+        # We pass the RAW bytes directly to ezdxf. 
+        # It will automatically detect if it's Binary or ASCII and handle the encoding.
+        file_bytes = uploaded_file.read()
+        file_stream = io.BytesIO(file_bytes)
+        doc = ezdxf.read(file_stream)
         
-        # 2. Load the drawing
-        doc = ezdxf.read(text_stream)
-        
-        # 3. Get list of layers
+        # Get all layers
         all_layers = sorted([layer.dxf.name for layer in doc.layers])
         
         st.success(f"Successfully analyzed {uploaded_file.name}")
         
         st.markdown("---")
+        st.write("### 🛠️ Step 1: Select Layers to KEEP")
         layers_to_keep = st.multiselect(
             "Which layers should remain?",
             options=all_layers,
@@ -41,7 +41,7 @@ if uploaded_file is not None:
                     doc.modelspace().delete_entity(entity)
             
             # Prepare the final file for download
-            out_buffer = io.StringIO()
+            out_buffer = io.BytesIO()
             doc.write(out_buffer)
             
             st.balloons()
@@ -53,4 +53,6 @@ if uploaded_file is not None:
             )
 
     except Exception as e:
-        st.error(f"Error: {e}")
+        # If there's a specific encoding error, we catch it here
+        st.error(f"Analysis Error: {e}")
+        st.info("Tip: Try saving your drawing as 'AutoCAD 2018 DXF' or 'ASCII DXF' and re-uploading.")
