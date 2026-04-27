@@ -63,7 +63,7 @@ def clean_text(value):
 
 
 def euclidean(p1, p2):
-    return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+    return math.dist((p1[0], p1[1]), (p2[0], p2[1]))
 
 
 def is_vertical(x1, y1, x2, y2, tol=2.0):
@@ -118,8 +118,39 @@ def purge_layers_from_modelspace(doc, layers_to_keep):
 
 
 # =========================================================
-# TEXT / CIRCLE / LINE EXTRACTION
+# BLOCK / GEOMETRY HELPERS
 # =========================================================
+def get_insert_transform(insert_entity):
+    try:
+        ins = insert_entity.dxf.insert
+        sx = float(getattr(insert_entity.dxf, "xscale", 1.0) or 1.0)
+        sy = float(getattr(insert_entity.dxf, "yscale", 1.0) or 1.0)
+        rot = float(getattr(insert_entity.dxf, "rotation", 0.0) or 0.0)
+        return (float(ins.x), float(ins.y), sx, sy, rot)
+    except Exception:
+        return (0.0, 0.0, 1.0, 1.0, 0.0)
+
+
+def transform_block_point(local_point, insert_entity):
+    x, y = local_point
+    ix, iy, sx, sy, rot = get_insert_transform(insert_entity)
+
+    x *= sx
+    y *= sy
+
+    ang = math.radians(rot)
+    xr = x * math.cos(ang) - y * math.sin(ang)
+    yr = x * math.sin(ang) + y * math.cos(ang)
+
+    return (xr + ix, yr + iy)
+
+
+def transform_block_radius(local_radius, insert_entity):
+    _, _, sx, sy, _ = get_insert_transform(insert_entity)
+    avg_scale = (abs(sx) + abs(sy)) / 2.0
+    return float(local_radius) * avg_scale
+
+
 def get_text_point(entity):
     try:
         if entity.dxftype() == "TEXT":
@@ -129,7 +160,12 @@ def get_text_point(entity):
                     return (float(ap.x), float(ap.y))
             ins = entity.dxf.insert
             return (float(ins.x), float(ins.y))
+
         elif entity.dxftype() == "MTEXT":
+            ins = entity.dxf.insert
+            return (float(ins.x), float(ins.y))
+
+        elif entity.dxftype() == "ATTRIB":
             ins = entity.dxf.insert
             return (float(ins.x), float(ins.y))
     except Exception:
@@ -137,6 +173,31 @@ def get_text_point(entity):
     return (0.0, 0.0)
 
 
+def get_text_value(entity):
+    try:
+        if entity.dxftype() == "TEXT":
+            return clean_text(entity.dxf.text)
+        elif entity.dxftype() == "MTEXT":
+            return clean_text(entity.text)
+        elif entity.dxftype() == "ATTRIB":
+            return clean_text(entity.dxf.text)
+    except Exception:
+        pass
+    return ""
+
+
+def set_text_value(entity, new_value):
+    if entity.dxftype() == "TEXT":
+        entity.dxf.text = new_value
+    elif entity.dxftype() == "MTEXT":
+        entity.text = new_value
+    elif entity.dxftype() == "ATTRIB":
+        entity.dxf.text = new_value
+
+
+# =========================================================
+# TEXT / CIRCLE / LINE EXTRACTION
+# =========================================================
 def extract_texts(doc, layer_name):
     texts = []
     msp = doc.modelspace()
@@ -146,23 +207,53 @@ def extract_texts(doc, layer_name):
             if e.dxf.layer != layer_name:
                 continue
 
-            if e.dxftype() == "TEXT":
+            if e.dxftype() in ("TEXT", "MTEXT", "ATTRIB"):
                 texts.append({
                     "entity": e,
-                    "text": clean_text(e.dxf.text),
+                    "text": get_text_value(e),
                     "point": get_text_point(e),
                     "layer": e.dxf.layer,
-                    "type": "TEXT",
+                    "type": e.dxftype(),
+                    "source": "modelspace",
                 })
 
-            elif e.dxftype() == "MTEXT":
-                texts.append({
-                    "entity": e,
-                    "text": clean_text(e.text),
-                    "point": get_text_point(e),
-                    "layer": e.dxf.layer,
-                    "type": "MTEXT",
-                })
+            elif e.dxftype() == "INSERT":
+                # attached attributes directly on insert
+                for att in e.attribs:
+                    try:
+                        if e.dxf.layer != layer_name:
+                            continue
+                        texts.append({
+                            "entity": att,
+                            "text": get_text_value(att),
+                            "point": get_text_point(att),
+                            "layer": e.dxf.layer,
+                            "type": "ATTRIB",
+                            "source": "insert_attrib",
+                            "parent_insert": e,
+                        })
+                    except Exception:
+                        continue
+
+                # nested block text
+                if e.dxf.name in doc.blocks:
+                    block = doc.blocks[e.dxf.name]
+                    for be in block:
+                        try:
+                            if be.dxftype() in ("TEXT", "MTEXT"):
+                                local_point = get_text_point(be)
+                                world_point = transform_block_point(local_point, e)
+                                texts.append({
+                                    "entity": be,
+                                    "text": get_text_value(be),
+                                    "point": world_point,
+                                    "layer": e.dxf.layer,
+                                    "type": be.dxftype(),
+                                    "source": "block_text",
+                                    "parent_insert": e,
+                                })
+                        except Exception:
+                            continue
         except Exception:
             continue
 
@@ -175,18 +266,39 @@ def extract_circles(doc, layer_name):
 
     for e in msp:
         try:
-            if e.dxftype() != "CIRCLE":
-                continue
             if e.dxf.layer != layer_name:
                 continue
 
-            c = e.dxf.center
-            circles.append({
-                "entity": e,
-                "center": (float(c.x), float(c.y)),
-                "radius": float(e.dxf.radius),
-                "layer": e.dxf.layer,
-            })
+            if e.dxftype() == "CIRCLE":
+                c = e.dxf.center
+                circles.append({
+                    "entity": e,
+                    "center": (float(c.x), float(c.y)),
+                    "radius": float(e.dxf.radius),
+                    "layer": e.dxf.layer,
+                    "source": "modelspace",
+                })
+
+            elif e.dxftype() == "INSERT":
+                if e.dxf.name in doc.blocks:
+                    block = doc.blocks[e.dxf.name]
+                    for be in block:
+                        try:
+                            if be.dxftype() == "CIRCLE":
+                                c = be.dxf.center
+                                world_center = transform_block_point((float(c.x), float(c.y)), e)
+                                world_radius = transform_block_radius(float(be.dxf.radius), e)
+                                circles.append({
+                                    "entity": e,
+                                    "nested_entity": be,
+                                    "center": world_center,
+                                    "radius": world_radius,
+                                    "layer": e.dxf.layer,
+                                    "source": "block_circle",
+                                    "parent_insert": e,
+                                })
+                        except Exception:
+                            continue
         except Exception:
             continue
 
@@ -396,9 +508,12 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
                 "label": candidate_texts[0]["text"],
                 "text_entity": candidate_texts[0]["entity"],
                 "text_point": candidate_texts[0]["point"],
+                "text_source": candidate_texts[0].get("source", "unknown"),
+                "parent_insert": candidate_texts[0].get("parent_insert"),
                 "circle_entity": c["entity"],
                 "circle_center": circle_center,
                 "circle_radius": circle_radius,
+                "circle_source": c.get("source", "unknown"),
                 "line_entity": best_line["entity"],
                 "orientation": best_line["orientation"],
                 "coord": best_line["coord"],
@@ -413,12 +528,13 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
                 "text_matches": len(candidate_texts),
                 "line_matches": len(candidate_lines),
                 "candidate_texts": [t["text"] for t in candidate_texts[:10]],
+                "circle_source": c.get("source", "unknown"),
                 "reason": (
                     "No valid text and no valid line"
                     if len(candidate_texts) == 0 and len(candidate_lines) == 0
-                    else "Multiple texts in circle"
+                    else "Multiple texts in marker"
                     if len(candidate_texts) > 1
-                    else "No valid text in circle"
+                    else "No valid text in marker"
                     if len(candidate_texts) == 0
                     else "No attached line"
                 ),
@@ -532,17 +648,10 @@ def apply_arch_labels_to_structural_markers(arch_markers, struc_markers):
         entity = marker["text_entity"]
 
         try:
-            if entity.dxftype() == "TEXT":
-                old = clean_text(entity.dxf.text)
-                if old != new_label:
-                    entity.dxf.text = new_label
-                    changed += 1
-
-            elif entity.dxftype() == "MTEXT":
-                old = clean_text(entity.text)
-                if old != new_label:
-                    entity.text = new_label
-                    changed += 1
+            old = get_text_value(entity)
+            if old != new_label:
+                set_text_value(entity, new_label)
+                changed += 1
         except Exception:
             continue
 
@@ -666,9 +775,9 @@ elif tool_choice == "2. Grid Label Sync":
     with c1:
         tolerance = st.slider("Tolerance (mm)", 0.0, 500.0, 10.0, 0.5)
     with c2:
-        text_gap = st.slider("Text-in-Circle Gap (mm)", 20.0, 1500.0, 180.0, 10.0)
+        text_gap = st.slider("Text-in-Marker Gap (mm)", 20.0, 1500.0, 180.0, 10.0)
     with c3:
-        attach_gap = st.slider("Line-to-Circle Attach Gap (mm)", 20.0, 1500.0, 180.0, 10.0)
+        attach_gap = st.slider("Line-to-Marker Attach Gap (mm)", 20.0, 1500.0, 180.0, 10.0)
 
     min_grid_length = 1000.0
 
@@ -718,7 +827,7 @@ elif tool_choice == "2. Grid Label Sync":
             arch_circle_default = pick_default_layer(arch_layers, ["S-GRID-IDEN"])
 
             struc_line_default = pick_default_layer(struc_layers, ["GRIDLINELAYER", "S-GRID"])
-            struc_text_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-STRS-IDEN"])
+            struc_text_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-STRS-IDEN", "S-GRID-IDEN"])
             struc_circle_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-GRID-IDEN"])
 
             st.markdown("### Layer Setup")
@@ -912,7 +1021,7 @@ elif tool_choice == "2. Grid Label Sync":
                 st.write("#### Architectural Detection")
                 st.write({
                     "texts_on_selected_text_layer": len(arch_det.get("texts", [])),
-                    "circles_on_selected_circle_layer": len(arch_det.get("circles", [])),
+                    "circles_or_block_markers_on_selected_circle_layer": len(arch_det.get("circles", [])),
                     "axis_lines_on_selected_line_layer": len(arch_det.get("lines", [])),
                     "trusted_markers_found": len(arch_det.get("trusted_markers", [])),
                     "rejected_markers": len(arch_det.get("rejected_markers", [])),
@@ -924,7 +1033,7 @@ elif tool_choice == "2. Grid Label Sync":
                 st.write("#### Structural Detection")
                 st.write({
                     "texts_on_selected_text_layer": len(struc_det.get("texts", [])),
-                    "circles_on_selected_circle_layer": len(struc_det.get("circles", [])),
+                    "circles_or_block_markers_on_selected_circle_layer": len(struc_det.get("circles", [])),
                     "axis_lines_on_selected_line_layer": len(struc_det.get("lines", [])),
                     "trusted_markers_found": len(struc_det.get("trusted_markers", [])),
                     "rejected_markers": len(struc_det.get("rejected_markers", [])),
@@ -938,8 +1047,9 @@ elif tool_choice == "2. Grid Label Sync":
                     st.dataframe(st.session_state.geometry_issues, use_container_width=True)
 
                 st.caption(
-                    "If trusted markers are zero, the issue is usually one of these: wrong layer selection, "
-                    "text insertion point offset, line-to-circle attachment too strict, or marker geometry not matching the expected circle-text-line pattern."
+                    "This tool now checks both normal circles and block-reference markers. "
+                    "If trusted markers are still zero, the usual causes are: wrong layer selection, "
+                    "marker text stored differently than expected, or line-to-marker attachment still too strict for this drawing."
                 )
     else:
         st.info("Please upload both the Architectural DXF and Structural DXF.")
