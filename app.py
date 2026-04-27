@@ -85,6 +85,16 @@ def probable_grid_label(text):
     return any(re.match(p, text) for p in patterns)
 
 
+def is_numeric_label(text):
+    text = clean_text(text)
+    return bool(re.match(r"^\d{1,3}[A-Z]?$", text))
+
+
+def is_alpha_label(text):
+    text = clean_text(text)
+    return bool(re.match(r"^[A-Z]{1,3}'?$", text))
+
+
 def get_layer_names(doc):
     return sorted([layer.dxf.name for layer in doc.layers])
 
@@ -218,11 +228,8 @@ def extract_texts(doc, layer_name):
                 })
 
             elif e.dxftype() == "INSERT":
-                # attached attributes directly on insert
                 for att in e.attribs:
                     try:
-                        if e.dxf.layer != layer_name:
-                            continue
                         texts.append({
                             "entity": att,
                             "text": get_text_value(att),
@@ -235,7 +242,6 @@ def extract_texts(doc, layer_name):
                     except Exception:
                         continue
 
-                # nested block text
                 if e.dxf.name in doc.blocks:
                     block = doc.blocks[e.dxf.name]
                     for be in block:
@@ -561,9 +567,58 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
 
 
 # =========================================================
-# GEOMETRY QA
+# FAMILY INFERENCE / QA / MAPPING
 # =========================================================
-def build_spacings(markers, orientation):
+def classify_family(markers):
+    numeric = [m for m in markers if is_numeric_label(m["label"])]
+    alpha = [m for m in markers if is_alpha_label(m["label"])]
+    other = [m for m in markers if m not in numeric and m not in alpha]
+    return numeric, alpha, other
+
+
+def infer_arch_families(arch_detection):
+    """
+    Use architectural reference to determine which orientation is numeric family
+    and which is alphabetic family.
+    """
+    vertical = arch_detection.get("vertical", [])
+    horizontal = arch_detection.get("horizontal", [])
+
+    v_num = len([m for m in vertical if is_numeric_label(m["label"])])
+    v_alpha = len([m for m in vertical if is_alpha_label(m["label"])])
+    h_num = len([m for m in horizontal if is_numeric_label(m["label"])])
+    h_alpha = len([m for m in horizontal if is_alpha_label(m["label"])])
+
+    # Decide numeric family orientation from arch labels
+    if v_num >= h_num and h_alpha >= v_alpha:
+        numeric_orientation = "vertical"
+        alpha_orientation = "horizontal"
+    elif h_num >= v_num and v_alpha >= h_alpha:
+        numeric_orientation = "horizontal"
+        alpha_orientation = "vertical"
+    else:
+        # fallback: strongest signal
+        if (v_num - v_alpha) >= (h_num - h_alpha):
+            numeric_orientation = "vertical"
+            alpha_orientation = "horizontal"
+        else:
+            numeric_orientation = "horizontal"
+            alpha_orientation = "vertical"
+
+    numeric_arch = sorted(arch_detection.get(numeric_orientation, []), key=lambda x: x["coord"])
+    alpha_arch = sorted(arch_detection.get(alpha_orientation, []), key=lambda x: x["coord"])
+
+    return {
+        "numeric_orientation": numeric_orientation,
+        "alpha_orientation": alpha_orientation,
+        "numeric_arch": numeric_arch,
+        "alpha_arch": alpha_arch,
+        "vertical_counts": {"numeric": v_num, "alpha": v_alpha},
+        "horizontal_counts": {"numeric": h_num, "alpha": h_alpha},
+    }
+
+
+def build_spacings(markers, family_name):
     data = []
     if len(markers) < 2:
         return data
@@ -573,7 +628,7 @@ def build_spacings(markers, orientation):
         b = markers[i + 1]
         spacing = round(abs(b["coord"] - a["coord"]), 3)
         data.append({
-            "orientation": orientation,
+            "family": family_name,
             "label_a": a["label"],
             "label_b": b["label"],
             "coord_a": a["coord"],
@@ -583,9 +638,9 @@ def build_spacings(markers, orientation):
     return data
 
 
-def compare_spacings(arch_markers, struc_markers, orientation, tolerance):
-    arch_sp = build_spacings(arch_markers, orientation)
-    struc_sp = build_spacings(struc_markers, orientation)
+def compare_spacings(arch_markers, struc_markers, family_name, tolerance):
+    arch_sp = build_spacings(arch_markers, family_name)
+    struc_sp = build_spacings(struc_markers, family_name)
 
     pair_count = min(len(arch_sp), len(struc_sp))
     issues = []
@@ -597,7 +652,7 @@ def compare_spacings(arch_markers, struc_markers, orientation, tolerance):
         status = "PASS" if diff <= tolerance else "FAIL"
 
         issues.append({
-            "orientation": orientation,
+            "family": family_name,
             "span_position": i + 1,
             "arch_span": f"{a['label_a']}-{a['label_b']}",
             "struc_span": f"{s['label_a']}-{s['label_b']}",
@@ -617,16 +672,13 @@ def summarize_geometry_issues(all_issues):
     return passes, fails
 
 
-# =========================================================
-# MAPPING / RENAME
-# =========================================================
-def build_mapping_by_position(arch_markers, struc_markers, orientation):
+def build_mapping_by_position(arch_markers, struc_markers, family_name):
     preview = []
     count = min(len(arch_markers), len(struc_markers))
 
     for i in range(count):
         preview.append({
-            "orientation": orientation,
+            "family": family_name,
             "position": i + 1,
             "arch_label": arch_markers[i]["label"],
             "struc_old_label": struc_markers[i]["label"],
@@ -677,6 +729,11 @@ def init_sync_state():
         "arch_sig": None,
         "struc_sig": None,
         "last_apply_message": "",
+        "family_summary": {},
+        "numeric_arch": [],
+        "numeric_struc": [],
+        "alpha_arch": [],
+        "alpha_struc": [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -699,6 +756,11 @@ def reset_sync_state():
         "arch_sig",
         "struc_sig",
         "last_apply_message",
+        "family_summary",
+        "numeric_arch",
+        "numeric_struc",
+        "alpha_arch",
+        "alpha_struc",
     ]
     for key in keys:
         if key in st.session_state:
@@ -713,6 +775,11 @@ def clear_sync_outputs():
     st.session_state.apply_ready = False
     st.session_state.labels_changed_count = 0
     st.session_state.last_apply_message = ""
+    st.session_state.family_summary = {}
+    st.session_state.numeric_arch = []
+    st.session_state.numeric_struc = []
+    st.session_state.alpha_arch = []
+    st.session_state.alpha_struc = []
 
 
 def uploaded_file_signature(uploaded_file):
@@ -900,27 +967,43 @@ elif tool_choice == "2. Grid Label Sync":
                         st.session_state.arch_detection = arch_detection
                         st.session_state.struc_detection = struc_detection
 
+                        fam = infer_arch_families(arch_detection)
+                        st.session_state.family_summary = fam
+
+                        numeric_orientation = fam["numeric_orientation"]
+                        alpha_orientation = fam["alpha_orientation"]
+
+                        numeric_arch = sorted(arch_detection.get(numeric_orientation, []), key=lambda x: x["coord"])
+                        alpha_arch = sorted(arch_detection.get(alpha_orientation, []), key=lambda x: x["coord"])
+
+                        numeric_struc = sorted(struc_detection.get(numeric_orientation, []), key=lambda x: x["coord"])
+                        alpha_struc = sorted(struc_detection.get(alpha_orientation, []), key=lambda x: x["coord"])
+
+                        st.session_state.numeric_arch = numeric_arch
+                        st.session_state.numeric_struc = numeric_struc
+                        st.session_state.alpha_arch = alpha_arch
+                        st.session_state.alpha_struc = alpha_struc
+
                         mapping_preview = []
                         mapping_preview.extend(build_mapping_by_position(
-                            arch_detection["vertical"], struc_detection["vertical"], "vertical"
+                            numeric_arch, numeric_struc, "numeric"
                         ))
                         mapping_preview.extend(build_mapping_by_position(
-                            arch_detection["horizontal"], struc_detection["horizontal"], "horizontal"
+                            alpha_arch, alpha_struc, "alphabetic"
                         ))
-
                         st.session_state.mapping_preview = mapping_preview
 
                         issues = []
                         issues.extend(compare_spacings(
-                            arch_detection["vertical"],
-                            struc_detection["vertical"],
-                            "vertical",
+                            numeric_arch,
+                            numeric_struc,
+                            "numeric",
                             tolerance
                         ))
                         issues.extend(compare_spacings(
-                            arch_detection["horizontal"],
-                            struc_detection["horizontal"],
-                            "horizontal",
+                            alpha_arch,
+                            alpha_struc,
+                            "alphabetic",
                             tolerance
                         ))
                         st.session_state.geometry_issues = issues
@@ -939,6 +1022,15 @@ elif tool_choice == "2. Grid Label Sync":
                 if st.button("🧹 Reset Tool 2"):
                     reset_sync_state()
                     st.rerun()
+
+            if st.session_state.family_summary:
+                st.markdown("### Family Detection Summary")
+                fam = st.session_state.family_summary
+                st.info(
+                    f"Architectural reference indicates: "
+                    f"Numeric family = {fam['numeric_orientation']} markers, "
+                    f"Alphabetic family = {fam['alpha_orientation']} markers."
+                )
 
             st.markdown("---")
             st.markdown("### Sync Preview")
@@ -962,12 +1054,12 @@ elif tool_choice == "2. Grid Label Sync":
                     try:
                         changed = 0
                         changed += apply_arch_labels_to_structural_markers(
-                            st.session_state.arch_detection.get("vertical", []),
-                            st.session_state.struc_detection.get("vertical", [])
+                            st.session_state.numeric_arch,
+                            st.session_state.numeric_struc
                         )
                         changed += apply_arch_labels_to_structural_markers(
-                            st.session_state.arch_detection.get("horizontal", []),
-                            st.session_state.struc_detection.get("horizontal", [])
+                            st.session_state.alpha_arch,
+                            st.session_state.alpha_struc
                         )
 
                         st.session_state.labels_changed_count = changed
@@ -1014,7 +1106,7 @@ elif tool_choice == "2. Grid Label Sync":
                     mime="application/dxf"
                 )
 
-            with st.expander("Why nothing was found?"):
+            with st.expander("Detection details"):
                 arch_det = st.session_state.arch_detection or {}
                 struc_det = st.session_state.struc_detection or {}
 
@@ -1027,9 +1119,6 @@ elif tool_choice == "2. Grid Label Sync":
                     "rejected_markers": len(arch_det.get("rejected_markers", [])),
                 })
 
-                if arch_det.get("rejected_markers"):
-                    st.dataframe(arch_det["rejected_markers"], use_container_width=True)
-
                 st.write("#### Structural Detection")
                 st.write({
                     "texts_on_selected_text_layer": len(struc_det.get("texts", [])),
@@ -1039,7 +1128,12 @@ elif tool_choice == "2. Grid Label Sync":
                     "rejected_markers": len(struc_det.get("rejected_markers", [])),
                 })
 
+                if st.session_state.family_summary:
+                    st.write("#### Architectural Family Inference")
+                    st.write(st.session_state.family_summary)
+
                 if struc_det.get("rejected_markers"):
+                    st.write("#### Rejected Structural Markers")
                     st.dataframe(struc_det["rejected_markers"], use_container_width=True)
 
                 if st.session_state.geometry_issues:
@@ -1047,9 +1141,8 @@ elif tool_choice == "2. Grid Label Sync":
                     st.dataframe(st.session_state.geometry_issues, use_container_width=True)
 
                 st.caption(
-                    "This tool now checks both normal circles and block-reference markers. "
-                    "If trusted markers are still zero, the usual causes are: wrong layer selection, "
-                    "marker text stored differently than expected, or line-to-marker attachment still too strict for this drawing."
+                    "This sync now uses the architectural drawing to infer which marker family is numeric "
+                    "and which is alphabetic, instead of assuming the family from orientation alone."
                 )
     else:
         st.info("Please upload both the Architectural DXF and Structural DXF.")
