@@ -458,32 +458,6 @@ def line_attached_to_circle(line, circle_center, circle_radius, attach_gap=180.0
     return False
 
 
-def deduplicate_markers(markers, tol=5.0):
-    if not markers:
-        return []
-
-    markers = sorted(markers, key=lambda x: x["coord"])
-    result = []
-    current = [markers[0]]
-
-    for item in markers[1:]:
-        if abs(item["coord"] - current[-1]["coord"]) <= tol:
-            current.append(item)
-        else:
-            result.append(resolve_marker_group(current))
-            current = [item]
-
-    result.append(resolve_marker_group(current))
-    return result
-
-
-def resolve_marker_group(group):
-    best = max(group, key=lambda x: x.get("line_length", 0.0))
-    out = dict(best)
-    out["coord"] = round(sum(g["coord"] for g in group) / len(group), 3)
-    return out
-
-
 def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_length, text_gap, attach_gap):
     texts = extract_texts(doc, text_layer)
     circles = extract_circles(doc, circle_layer)
@@ -546,50 +520,70 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
                 ),
             })
 
-    vertical = sorted(
-        deduplicate_markers([m for m in trusted_markers if m["orientation"] == "vertical"]),
-        key=lambda x: x["coord"]
-    )
-    horizontal = sorted(
-        deduplicate_markers([m for m in trusted_markers if m["orientation"] == "horizontal"]),
-        key=lambda x: x["coord"]
-    )
-
     return {
         "texts": texts,
         "circles": circles,
         "lines": lines,
         "trusted_markers": trusted_markers,
         "rejected_markers": rejected,
-        "vertical": vertical,
-        "horizontal": horizontal,
     }
 
 
 # =========================================================
-# FAMILY INFERENCE / QA / MAPPING
+# AXIS GROUPING / FAMILY / QA / APPLY
 # =========================================================
-def classify_family(markers):
-    numeric = [m for m in markers if is_numeric_label(m["label"])]
-    alpha = [m for m in markers if is_alpha_label(m["label"])]
-    other = [m for m in markers if m not in numeric and m not in alpha]
-    return numeric, alpha, other
+def group_markers_by_axis(markers, tol=5.0):
+    if not markers:
+        return {"vertical": [], "horizontal": []}
+
+    grouped = {"vertical": [], "horizontal": []}
+
+    for orientation in ["vertical", "horizontal"]:
+        subset = sorted(
+            [m for m in markers if m["orientation"] == orientation],
+            key=lambda x: x["coord"]
+        )
+
+        if not subset:
+            continue
+
+        current = [subset[0]]
+        for item in subset[1:]:
+            if abs(item["coord"] - current[-1]["coord"]) <= tol:
+                current.append(item)
+            else:
+                grouped[orientation].append(resolve_axis_group(current, orientation))
+                current = [item]
+        grouped[orientation].append(resolve_axis_group(current, orientation))
+
+    return grouped
 
 
-def infer_arch_families(arch_detection):
-    """
-    Use architectural reference to determine which orientation is numeric family
-    and which is alphabetic family.
-    """
-    vertical = arch_detection.get("vertical", [])
-    horizontal = arch_detection.get("horizontal", [])
+def resolve_axis_group(group, orientation):
+    coord = round(sum(m["coord"] for m in group) / len(group), 3)
+    labels = [m["label"] for m in group if clean_text(m["label"])]
+    label = labels[0] if labels else ""
+    representative = max(group, key=lambda x: x.get("line_length", 0.0))
 
-    v_num = len([m for m in vertical if is_numeric_label(m["label"])])
-    v_alpha = len([m for m in vertical if is_alpha_label(m["label"])])
-    h_num = len([m for m in horizontal if is_numeric_label(m["label"])])
-    h_alpha = len([m for m in horizontal if is_alpha_label(m["label"])])
+    return {
+        "orientation": orientation,
+        "coord": coord,
+        "label": label,
+        "markers": group,
+        "marker_count": len(group),
+        "representative": representative,
+    }
 
-    # Decide numeric family orientation from arch labels
+
+def infer_arch_families(arch_groups):
+    vertical = arch_groups.get("vertical", [])
+    horizontal = arch_groups.get("horizontal", [])
+
+    v_num = len([g for g in vertical if is_numeric_label(g["label"])])
+    v_alpha = len([g for g in vertical if is_alpha_label(g["label"])])
+    h_num = len([g for g in horizontal if is_numeric_label(g["label"])])
+    h_alpha = len([g for g in horizontal if is_alpha_label(g["label"])])
+
     if v_num >= h_num and h_alpha >= v_alpha:
         numeric_orientation = "vertical"
         alpha_orientation = "horizontal"
@@ -597,7 +591,6 @@ def infer_arch_families(arch_detection):
         numeric_orientation = "horizontal"
         alpha_orientation = "vertical"
     else:
-        # fallback: strongest signal
         if (v_num - v_alpha) >= (h_num - h_alpha):
             numeric_orientation = "vertical"
             alpha_orientation = "horizontal"
@@ -605,8 +598,8 @@ def infer_arch_families(arch_detection):
             numeric_orientation = "horizontal"
             alpha_orientation = "vertical"
 
-    numeric_arch = sorted(arch_detection.get(numeric_orientation, []), key=lambda x: x["coord"])
-    alpha_arch = sorted(arch_detection.get(alpha_orientation, []), key=lambda x: x["coord"])
+    numeric_arch = sorted(arch_groups.get(numeric_orientation, []), key=lambda x: x["coord"])
+    alpha_arch = sorted(arch_groups.get(alpha_orientation, []), key=lambda x: x["coord"])
 
     return {
         "numeric_orientation": numeric_orientation,
@@ -618,14 +611,14 @@ def infer_arch_families(arch_detection):
     }
 
 
-def build_spacings(markers, family_name):
+def build_spacings(axis_groups, family_name):
     data = []
-    if len(markers) < 2:
+    if len(axis_groups) < 2:
         return data
 
-    for i in range(len(markers) - 1):
-        a = markers[i]
-        b = markers[i + 1]
+    for i in range(len(axis_groups) - 1):
+        a = axis_groups[i]
+        b = axis_groups[i + 1]
         spacing = round(abs(b["coord"] - a["coord"]), 3)
         data.append({
             "family": family_name,
@@ -638,9 +631,9 @@ def build_spacings(markers, family_name):
     return data
 
 
-def compare_spacings(arch_markers, struc_markers, family_name, tolerance):
-    arch_sp = build_spacings(arch_markers, family_name)
-    struc_sp = build_spacings(struc_markers, family_name)
+def compare_spacings(arch_groups, struc_groups, family_name, tolerance):
+    arch_sp = build_spacings(arch_groups, family_name)
+    struc_sp = build_spacings(struc_groups, family_name)
 
     pair_count = min(len(arch_sp), len(struc_sp))
     issues = []
@@ -672,40 +665,43 @@ def summarize_geometry_issues(all_issues):
     return passes, fails
 
 
-def build_mapping_by_position(arch_markers, struc_markers, family_name):
+def build_axis_mapping_preview(arch_axis_groups, struc_axis_groups, family_name):
     preview = []
-    count = min(len(arch_markers), len(struc_markers))
+    count = min(len(arch_axis_groups), len(struc_axis_groups))
 
     for i in range(count):
         preview.append({
             "family": family_name,
             "position": i + 1,
-            "arch_label": arch_markers[i]["label"],
-            "struc_old_label": struc_markers[i]["label"],
-            "arch_coord": arch_markers[i]["coord"],
-            "struc_coord": struc_markers[i]["coord"],
-            "difference": round(abs(arch_markers[i]["coord"] - struc_markers[i]["coord"]), 3),
+            "arch_label": arch_axis_groups[i]["label"],
+            "struc_old_label": struc_axis_groups[i]["label"],
+            "arch_coord": arch_axis_groups[i]["coord"],
+            "struc_coord": struc_axis_groups[i]["coord"],
+            "difference": round(abs(arch_axis_groups[i]["coord"] - struc_axis_groups[i]["coord"]), 3),
+            "arch_visible_markers": arch_axis_groups[i]["marker_count"],
+            "struc_visible_markers": struc_axis_groups[i]["marker_count"],
         })
 
     return preview
 
 
-def apply_arch_labels_to_structural_markers(arch_markers, struc_markers):
-    count = min(len(arch_markers), len(struc_markers))
+def apply_axis_group_labels(arch_axis_groups, struc_axis_groups):
+    count = min(len(arch_axis_groups), len(struc_axis_groups))
     changed = 0
 
     for i in range(count):
-        new_label = arch_markers[i]["label"]
-        marker = struc_markers[i]
-        entity = marker["text_entity"]
+        new_label = arch_axis_groups[i]["label"]
+        struc_group = struc_axis_groups[i]
 
-        try:
-            old = get_text_value(entity)
-            if old != new_label:
-                set_text_value(entity, new_label)
-                changed += 1
-        except Exception:
-            continue
+        for marker in struc_group["markers"]:
+            entity = marker["text_entity"]
+            try:
+                old = get_text_value(entity)
+                if old != new_label:
+                    set_text_value(entity, new_label)
+                    changed += 1
+            except Exception:
+                continue
 
     return changed
 
@@ -722,6 +718,8 @@ def init_sync_state():
         "struc_name": "",
         "arch_detection": {},
         "struc_detection": {},
+        "arch_axis_groups": {},
+        "struc_axis_groups": {},
         "mapping_preview": [],
         "geometry_issues": [],
         "apply_ready": False,
@@ -730,10 +728,10 @@ def init_sync_state():
         "struc_sig": None,
         "last_apply_message": "",
         "family_summary": {},
-        "numeric_arch": [],
-        "numeric_struc": [],
-        "alpha_arch": [],
-        "alpha_struc": [],
+        "numeric_arch_groups": [],
+        "numeric_struc_groups": [],
+        "alpha_arch_groups": [],
+        "alpha_struc_groups": [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -749,6 +747,8 @@ def reset_sync_state():
         "struc_name",
         "arch_detection",
         "struc_detection",
+        "arch_axis_groups",
+        "struc_axis_groups",
         "mapping_preview",
         "geometry_issues",
         "apply_ready",
@@ -757,10 +757,10 @@ def reset_sync_state():
         "struc_sig",
         "last_apply_message",
         "family_summary",
-        "numeric_arch",
-        "numeric_struc",
-        "alpha_arch",
-        "alpha_struc",
+        "numeric_arch_groups",
+        "numeric_struc_groups",
+        "alpha_arch_groups",
+        "alpha_struc_groups",
     ]
     for key in keys:
         if key in st.session_state:
@@ -770,16 +770,18 @@ def reset_sync_state():
 def clear_sync_outputs():
     st.session_state.arch_detection = {}
     st.session_state.struc_detection = {}
+    st.session_state.arch_axis_groups = {}
+    st.session_state.struc_axis_groups = {}
     st.session_state.mapping_preview = []
     st.session_state.geometry_issues = []
     st.session_state.apply_ready = False
     st.session_state.labels_changed_count = 0
     st.session_state.last_apply_message = ""
     st.session_state.family_summary = {}
-    st.session_state.numeric_arch = []
-    st.session_state.numeric_struc = []
-    st.session_state.alpha_arch = []
-    st.session_state.alpha_struc = []
+    st.session_state.numeric_arch_groups = []
+    st.session_state.numeric_struc_groups = []
+    st.session_state.alpha_arch_groups = []
+    st.session_state.alpha_struc_groups = []
 
 
 def uploaded_file_signature(uploaded_file):
@@ -967,42 +969,48 @@ elif tool_choice == "2. Grid Label Sync":
                         st.session_state.arch_detection = arch_detection
                         st.session_state.struc_detection = struc_detection
 
-                        fam = infer_arch_families(arch_detection)
+                        arch_axis_groups = group_markers_by_axis(arch_detection["trusted_markers"])
+                        struc_axis_groups = group_markers_by_axis(struc_detection["trusted_markers"])
+
+                        st.session_state.arch_axis_groups = arch_axis_groups
+                        st.session_state.struc_axis_groups = struc_axis_groups
+
+                        fam = infer_arch_families(arch_axis_groups)
                         st.session_state.family_summary = fam
 
                         numeric_orientation = fam["numeric_orientation"]
                         alpha_orientation = fam["alpha_orientation"]
 
-                        numeric_arch = sorted(arch_detection.get(numeric_orientation, []), key=lambda x: x["coord"])
-                        alpha_arch = sorted(arch_detection.get(alpha_orientation, []), key=lambda x: x["coord"])
+                        numeric_arch_groups = sorted(arch_axis_groups.get(numeric_orientation, []), key=lambda x: x["coord"])
+                        alpha_arch_groups = sorted(arch_axis_groups.get(alpha_orientation, []), key=lambda x: x["coord"])
 
-                        numeric_struc = sorted(struc_detection.get(numeric_orientation, []), key=lambda x: x["coord"])
-                        alpha_struc = sorted(struc_detection.get(alpha_orientation, []), key=lambda x: x["coord"])
+                        numeric_struc_groups = sorted(struc_axis_groups.get(numeric_orientation, []), key=lambda x: x["coord"])
+                        alpha_struc_groups = sorted(struc_axis_groups.get(alpha_orientation, []), key=lambda x: x["coord"])
 
-                        st.session_state.numeric_arch = numeric_arch
-                        st.session_state.numeric_struc = numeric_struc
-                        st.session_state.alpha_arch = alpha_arch
-                        st.session_state.alpha_struc = alpha_struc
+                        st.session_state.numeric_arch_groups = numeric_arch_groups
+                        st.session_state.numeric_struc_groups = numeric_struc_groups
+                        st.session_state.alpha_arch_groups = alpha_arch_groups
+                        st.session_state.alpha_struc_groups = alpha_struc_groups
 
                         mapping_preview = []
-                        mapping_preview.extend(build_mapping_by_position(
-                            numeric_arch, numeric_struc, "numeric"
+                        mapping_preview.extend(build_axis_mapping_preview(
+                            numeric_arch_groups, numeric_struc_groups, "numeric"
                         ))
-                        mapping_preview.extend(build_mapping_by_position(
-                            alpha_arch, alpha_struc, "alphabetic"
+                        mapping_preview.extend(build_axis_mapping_preview(
+                            alpha_arch_groups, alpha_struc_groups, "alphabetic"
                         ))
                         st.session_state.mapping_preview = mapping_preview
 
                         issues = []
                         issues.extend(compare_spacings(
-                            numeric_arch,
-                            numeric_struc,
+                            numeric_arch_groups,
+                            numeric_struc_groups,
                             "numeric",
                             tolerance
                         ))
                         issues.extend(compare_spacings(
-                            alpha_arch,
-                            alpha_struc,
+                            alpha_arch_groups,
+                            alpha_struc_groups,
                             "alphabetic",
                             tolerance
                         ))
@@ -1011,7 +1019,7 @@ elif tool_choice == "2. Grid Label Sync":
                         st.session_state.apply_ready = len(mapping_preview) > 0
 
                         if len(mapping_preview) > 0:
-                            st.success(f"{len(mapping_preview)} safe sync pairs prepared.")
+                            st.success(f"{len(mapping_preview)} safe axis sync pairs prepared.")
                         else:
                             st.warning("No safe sync pairs were found. Check the optional diagnostic section below.")
 
@@ -1024,12 +1032,10 @@ elif tool_choice == "2. Grid Label Sync":
                     st.rerun()
 
             if st.session_state.family_summary:
-                st.markdown("### Family Detection Summary")
                 fam = st.session_state.family_summary
                 st.info(
-                    f"Architectural reference indicates: "
-                    f"Numeric family = {fam['numeric_orientation']} markers, "
-                    f"Alphabetic family = {fam['alpha_orientation']} markers."
+                    f"Numeric family = {fam['numeric_orientation']} axes, "
+                    f"Alphabetic family = {fam['alpha_orientation']} axes."
                 )
 
             st.markdown("---")
@@ -1053,13 +1059,13 @@ elif tool_choice == "2. Grid Label Sync":
                 if st.button("✍️ Apply Label Sync"):
                     try:
                         changed = 0
-                        changed += apply_arch_labels_to_structural_markers(
-                            st.session_state.numeric_arch,
-                            st.session_state.numeric_struc
+                        changed += apply_axis_group_labels(
+                            st.session_state.numeric_arch_groups,
+                            st.session_state.numeric_struc_groups
                         )
-                        changed += apply_arch_labels_to_structural_markers(
-                            st.session_state.alpha_arch,
-                            st.session_state.alpha_struc
+                        changed += apply_axis_group_labels(
+                            st.session_state.alpha_arch_groups,
+                            st.session_state.alpha_struc_groups
                         )
 
                         st.session_state.labels_changed_count = changed
@@ -1076,7 +1082,7 @@ elif tool_choice == "2. Grid Label Sync":
 
                             if pair_count == 0:
                                 st.session_state.last_apply_message = (
-                                    "No trusted marker pairs were prepared, so no labels could be changed."
+                                    "No trusted axis pairs were prepared, so no labels could be changed."
                                 )
                                 st.warning(st.session_state.last_apply_message)
                             elif arch_count == 0 or struc_count == 0:
@@ -1109,6 +1115,8 @@ elif tool_choice == "2. Grid Label Sync":
             with st.expander("Detection details"):
                 arch_det = st.session_state.arch_detection or {}
                 struc_det = st.session_state.struc_detection or {}
+                arch_groups = st.session_state.arch_axis_groups or {}
+                struc_groups = st.session_state.struc_axis_groups or {}
 
                 st.write("#### Architectural Detection")
                 st.write({
@@ -1117,6 +1125,8 @@ elif tool_choice == "2. Grid Label Sync":
                     "axis_lines_on_selected_line_layer": len(arch_det.get("lines", [])),
                     "trusted_markers_found": len(arch_det.get("trusted_markers", [])),
                     "rejected_markers": len(arch_det.get("rejected_markers", [])),
+                    "vertical_axes_grouped": len(arch_groups.get("vertical", [])),
+                    "horizontal_axes_grouped": len(arch_groups.get("horizontal", [])),
                 })
 
                 st.write("#### Structural Detection")
@@ -1126,6 +1136,8 @@ elif tool_choice == "2. Grid Label Sync":
                     "axis_lines_on_selected_line_layer": len(struc_det.get("lines", [])),
                     "trusted_markers_found": len(struc_det.get("trusted_markers", [])),
                     "rejected_markers": len(struc_det.get("rejected_markers", [])),
+                    "vertical_axes_grouped": len(struc_groups.get("vertical", [])),
+                    "horizontal_axes_grouped": len(struc_groups.get("horizontal", [])),
                 })
 
                 if st.session_state.family_summary:
@@ -1141,8 +1153,9 @@ elif tool_choice == "2. Grid Label Sync":
                     st.dataframe(st.session_state.geometry_issues, use_container_width=True)
 
                 st.caption(
-                    "This sync now uses the architectural drawing to infer which marker family is numeric "
-                    "and which is alphabetic, instead of assuming the family from orientation alone."
+                    "This sync groups trusted markers into axis bands. One axis may contain multiple visible marker texts "
+                    "(for example both ends of the same grid line). When applying sync, all trusted structural text entities "
+                    "in that axis group are renamed."
                 )
     else:
         st.info("Please upload both the Architectural DXF and Structural DXF.")
