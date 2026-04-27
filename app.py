@@ -42,6 +42,19 @@ def safe_remove_file(path):
         pass
 
 
+def write_doc_to_temp_bytes(doc):
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf")
+    tmp_path = tmp.name
+    tmp.close()
+
+    try:
+        doc.saveas(tmp_path)
+        with open(tmp_path, "rb") as f:
+            return f.read()
+    finally:
+        safe_remove_file(tmp_path)
+
+
 # =========================================================
 # GENERAL HELPERS
 # =========================================================
@@ -66,10 +79,10 @@ def is_horizontal(x1, y1, x2, y2, tol=1.0):
 def probable_grid_label(text):
     text = clean_text(text)
     patterns = [
-        r"^[A-Z]{1,2}$",       # A, B, AA
-        r"^\d{1,2}$",          # 1, 2, 10
-        r"^[A-Z]{1,2}'$",      # A'
-        r"^\d{1,2}[A-Z]?$",    # 1A / 2A / 1
+        r"^[A-Z]{1,2}$",
+        r"^\d{1,2}$",
+        r"^[A-Z]{1,2}'$",
+        r"^\d{1,2}[A-Z]?$",
     ]
     return any(re.match(p, text) for p in patterns)
 
@@ -112,12 +125,15 @@ def purge_layers_from_modelspace(doc, layers_to_keep):
 # =========================================================
 # ENTITY EXTRACTION
 # =========================================================
-def extract_texts(doc):
+def extract_texts(doc, layer_name=None):
     texts = []
     msp = doc.modelspace()
 
     for e in msp:
         try:
+            if layer_name and e.dxf.layer != layer_name:
+                continue
+
             if e.dxftype() == "TEXT":
                 txt = clean_text(e.dxf.text)
                 ins = e.dxf.insert
@@ -128,6 +144,7 @@ def extract_texts(doc):
                     "layer": e.dxf.layer,
                     "type": "TEXT",
                 })
+
             elif e.dxftype() == "MTEXT":
                 txt = clean_text(e.text)
                 ins = e.dxf.insert
@@ -150,16 +167,18 @@ def extract_circles(doc, layer_name=None):
 
     for e in msp:
         try:
-            if e.dxftype() == "CIRCLE":
-                if layer_name and e.dxf.layer != layer_name:
-                    continue
-                c = e.dxf.center
-                circles.append({
-                    "entity": e,
-                    "center": (float(c.x), float(c.y)),
-                    "radius": float(e.dxf.radius),
-                    "layer": e.dxf.layer,
-                })
+            if e.dxftype() != "CIRCLE":
+                continue
+            if layer_name and e.dxf.layer != layer_name:
+                continue
+
+            c = e.dxf.center
+            circles.append({
+                "entity": e,
+                "center": (float(c.x), float(c.y)),
+                "radius": float(e.dxf.radius),
+                "layer": e.dxf.layer,
+            })
         except Exception:
             continue
 
@@ -269,68 +288,86 @@ def resolve_line_group(group):
 
 
 # =========================================================
-# GRID BUBBLE / LABEL DETECTION
+# GRID DETECTION ENGINE
 # =========================================================
-def detect_grid_bubbles(doc, grid_layer=None, min_grid_length=1000.0, text_circle_gap=150.0):
-    texts = extract_texts(doc)
-    circles = extract_circles(doc, layer_name=grid_layer)
-    lines = extract_axis_lines(doc, layer_name=grid_layer, min_length=min_grid_length)
+def match_text_to_circle(texts, circles, center_factor=1.2, absolute_gap=300.0):
+    matched = []
 
-    bubbles = []
     for c in circles:
         best_text = None
-        best_dist = None
+        best_score = None
 
         for t in texts:
             if not probable_grid_label(t["text"]):
                 continue
 
             d = euclidean(c["center"], t["point"])
-            if d <= max(c["radius"] * 0.9, text_circle_gap):
-                if best_dist is None or d < best_dist:
-                    best_dist = d
+            allowance = max(c["radius"] * center_factor, absolute_gap)
+
+            if d <= allowance:
+                if best_score is None or d < best_score:
+                    best_score = d
                     best_text = t
 
         if best_text:
-            bubbles.append({
+            matched.append({
                 "label": best_text["text"],
-                "center": c["center"],
-                "radius": c["radius"],
-                "circle_entity": c["entity"],
                 "text_entity": best_text["entity"],
-                "layer": c["layer"],
+                "text_point": best_text["point"],
+                "circle_entity": c["entity"],
+                "circle_center": c["center"],
+                "circle_radius": c["radius"],
             })
 
+    return matched
+
+
+def attach_bubbles_to_lines(bubbles, lines, line_gap=600.0):
     vertical_grids = []
     horizontal_grids = []
 
     for bubble in bubbles:
-        bx, by = bubble["center"]
-        nearest_line = None
-        nearest_dist = None
+        bx, by = bubble["circle_center"]
+
+        best_vertical = None
+        best_vertical_d = None
+        best_horizontal = None
+        best_horizontal_d = None
 
         for line in lines:
             if line["orientation"] == "vertical":
                 d = abs(bx - line["coord"])
-            else:
+                if d <= line_gap and (best_vertical_d is None or d < best_vertical_d):
+                    best_vertical_d = d
+                    best_vertical = line
+
+            elif line["orientation"] == "horizontal":
                 d = abs(by - line["coord"])
+                if d <= line_gap and (best_horizontal_d is None or d < best_horizontal_d):
+                    best_horizontal_d = d
+                    best_horizontal = line
 
-            if nearest_dist is None or d < nearest_dist:
-                nearest_dist = d
-                nearest_line = line
+        chosen = None
+        if best_vertical and best_horizontal:
+            chosen = best_vertical if best_vertical_d <= best_horizontal_d else best_horizontal
+        elif best_vertical:
+            chosen = best_vertical
+        elif best_horizontal:
+            chosen = best_horizontal
 
-        if nearest_line:
+        if chosen:
             record = {
                 "label": bubble["label"],
-                "coord": nearest_line["coord"],
-                "center": bubble["center"],
-                "radius": bubble["radius"],
+                "coord": chosen["coord"],
+                "center": bubble["circle_center"],
+                "radius": bubble["circle_radius"],
                 "text_entity": bubble["text_entity"],
                 "circle_entity": bubble["circle_entity"],
-                "line_entity": nearest_line["entity"],
+                "line_entity": chosen["entity"],
+                "orientation": chosen["orientation"],
             }
 
-            if nearest_line["orientation"] == "vertical":
+            if chosen["orientation"] == "vertical":
                 vertical_grids.append(record)
             else:
                 horizontal_grids.append(record)
@@ -338,7 +375,7 @@ def detect_grid_bubbles(doc, grid_layer=None, min_grid_length=1000.0, text_circl
     vertical_grids = sorted(deduplicate_grids(vertical_grids), key=lambda x: x["coord"])
     horizontal_grids = sorted(deduplicate_grids(horizontal_grids), key=lambda x: x["coord"])
 
-    return vertical_grids, horizontal_grids, lines
+    return vertical_grids, horizontal_grids
 
 
 def deduplicate_grids(grids, tol=5.0):
@@ -360,8 +397,36 @@ def deduplicate_grids(grids, tol=5.0):
     return result
 
 
+def detect_grids(doc, line_layer, text_layer, circle_layer, min_grid_length, text_circle_gap, line_gap):
+    texts = extract_texts(doc, layer_name=text_layer)
+    circles = extract_circles(doc, layer_name=circle_layer)
+    lines = extract_axis_lines(doc, layer_name=line_layer, min_length=min_grid_length)
+
+    matched_bubbles = match_text_to_circle(
+        texts,
+        circles,
+        center_factor=1.2,
+        absolute_gap=text_circle_gap
+    )
+
+    vertical, horizontal = attach_bubbles_to_lines(
+        matched_bubbles,
+        lines,
+        line_gap=line_gap
+    )
+
+    return {
+        "texts": texts,
+        "circles": circles,
+        "lines": lines,
+        "matched_bubbles": matched_bubbles,
+        "vertical": vertical,
+        "horizontal": horizontal,
+    }
+
+
 # =========================================================
-# GEOMETRY CHECK / SPACING CHECK
+# GEOMETRY QA
 # =========================================================
 def build_spacings(grids, orientation):
     data = []
@@ -509,47 +574,46 @@ def apply_mapping_to_structural_texts(doc, vertical_map, horizontal_map):
 # =========================================================
 # VISUALIZATION
 # =========================================================
-def draw_preview(title, grids_v, grids_h, lines, issues=None):
+def draw_preview(title, detection_result, issues=None, color_v="blue", color_h="green"):
     fig, ax = plt.subplots(figsize=(8, 8))
 
-    # draw grid lines
-    for line in lines:
+    for line in detection_result["lines"]:
         x1, y1 = line["start"]
         x2, y2 = line["end"]
         ax.plot([x1, x2], [y1, y2], color="lightgray", linewidth=0.8)
 
-    # draw vertical grid bubbles
-    for g in grids_v:
-        cx, cy = g["center"]
-        r = max(g.get("radius", 150.0), 50.0)
-        circ = MplCircle((cx, cy), r, fill=False, color="blue", linewidth=1.5)
+    for c in detection_result["circles"]:
+        cx, cy = c["center"]
+        circ = MplCircle((cx, cy), c["radius"], fill=False, color="silver", linewidth=0.8)
         ax.add_patch(circ)
-        ax.text(cx, cy, g["label"], ha="center", va="center", color="blue", fontsize=8)
 
-    # draw horizontal grid bubbles
-    for g in grids_h:
+    for t in detection_result["texts"]:
+        tx, ty = t["point"]
+        ax.text(tx, ty, t["text"], fontsize=7, color="black")
+
+    for g in detection_result["vertical"]:
         cx, cy = g["center"]
-        r = max(g.get("radius", 150.0), 50.0)
-        circ = MplCircle((cx, cy), r, fill=False, color="green", linewidth=1.5)
+        circ = MplCircle((cx, cy), g["radius"], fill=False, color=color_v, linewidth=1.8)
         ax.add_patch(circ)
-        ax.text(cx, cy, g["label"], ha="center", va="center", color="green", fontsize=8)
+        ax.text(cx, cy, g["label"], ha="center", va="center", color=color_v, fontsize=8)
 
-    # highlight failed spacing issues
+    for g in detection_result["horizontal"]:
+        cx, cy = g["center"]
+        circ = MplCircle((cx, cy), g["radius"], fill=False, color=color_h, linewidth=1.8)
+        ax.add_patch(circ)
+        ax.text(cx, cy, g["label"], ha="center", va="center", color=color_h, fontsize=8)
+
     if issues:
         for issue in issues:
             if issue["status"] != "FAIL":
                 continue
 
             if issue["orientation"] == "vertical":
-                x1 = issue["coord_a_struc"]
-                x2 = issue["coord_b_struc"]
-                ax.axvline(x=x1, color="red", linestyle="--", linewidth=1)
-                ax.axvline(x=x2, color="red", linestyle="--", linewidth=1)
+                ax.axvline(issue["coord_a_struc"], color="red", linestyle="--", linewidth=1)
+                ax.axvline(issue["coord_b_struc"], color="red", linestyle="--", linewidth=1)
             elif issue["orientation"] == "horizontal":
-                y1 = issue["coord_a_struc"]
-                y2 = issue["coord_b_struc"]
-                ax.axhline(y=y1, color="red", linestyle="--", linewidth=1)
-                ax.axhline(y=y2, color="red", linestyle="--", linewidth=1)
+                ax.axhline(issue["coord_a_struc"], color="red", linestyle="--", linewidth=1)
+                ax.axhline(issue["coord_b_struc"], color="red", linestyle="--", linewidth=1)
 
     ax.set_title(title)
     ax.set_aspect("equal", adjustable="box")
@@ -567,6 +631,8 @@ def init_sync_state():
         "struc_doc": None,
         "arch_name": "",
         "struc_name": "",
+        "arch_detection": {},
+        "struc_detection": {},
         "vertical_map": {},
         "horizontal_map": {},
         "vertical_preview": [],
@@ -575,12 +641,6 @@ def init_sync_state():
         "geometry_continue": False,
         "apply_ready": False,
         "labels_changed_count": 0,
-        "arch_vertical": [],
-        "arch_horizontal": [],
-        "struc_vertical": [],
-        "struc_horizontal": [],
-        "arch_lines": [],
-        "struc_lines": [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -594,6 +654,8 @@ def reset_sync_state():
         "struc_doc",
         "arch_name",
         "struc_name",
+        "arch_detection",
+        "struc_detection",
         "vertical_map",
         "horizontal_map",
         "vertical_preview",
@@ -602,12 +664,6 @@ def reset_sync_state():
         "geometry_continue",
         "apply_ready",
         "labels_changed_count",
-        "arch_vertical",
-        "arch_horizontal",
-        "struc_vertical",
-        "struc_horizontal",
-        "arch_lines",
-        "struc_lines",
     ]
     for key in keys:
         if key in st.session_state:
@@ -636,15 +692,13 @@ if tool_choice == "1. DXF Smart Purger":
 
             if st.button("🔥 Purge and Prepare Download"):
                 deleted_count = purge_layers_from_modelspace(doc, layers_to_keep)
-
-                out_buffer = io.StringIO()
-                doc.write(out_buffer)
+                dxf_bytes = write_doc_to_temp_bytes(doc)
 
                 st.success(f"Deleted {deleted_count} modelspace entities.")
                 st.download_button(
                     "📥 Download Cleaned DXF",
-                    out_buffer.getvalue().encode("utf-8"),
-                    f"CLEANED_{uploaded_file.name}",
+                    data=dxf_bytes,
+                    file_name=f"CLEANED_{uploaded_file.name}",
                     mime="application/dxf"
                 )
 
@@ -655,24 +709,26 @@ if tool_choice == "1. DXF Smart Purger":
 
 
 # =========================================================
-# TOOL 2: GRID LABEL SYNC + GEOMETRY QA + VISUAL PREVIEW
+# TOOL 2: GRID LABEL SYNC (LAYER-GUIDED)
 # =========================================================
 elif tool_choice == "2. Grid Label Sync":
-    st.subheader("Tool 2: Grid Label Sync + Geometry QA + Visual Preview")
+    st.subheader("Tool 2: Layer-Guided Grid Label Sync")
     st.caption(
-        "Uses architectural grid naming as source of truth, checks structural spacing against tolerance, "
-        "and provides visual confirmation before relabeling the structural DXF."
+        "Choose separate line, text, and circle layers for both Architectural and Structural drawings. "
+        "The tool then detects grid bubbles, compares spacing with tolerance, shows visual preview, and relabels the Structural DXF."
     )
 
     init_sync_state()
 
-    c_cfg1, c_cfg2, c_cfg3 = st.columns(3)
-    with c_cfg1:
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
         tolerance = st.slider("Tolerance (mm)", 0.0, 50.0, 10.0, 0.5)
-    with c_cfg2:
-        min_grid_length = st.slider("Minimum Grid Line Length (mm)", 100.0, 20000.0, 1000.0, 100.0)
-    with c_cfg3:
-        text_circle_gap = st.slider("Text-to-Circle Capture Gap (mm)", 20.0, 500.0, 150.0, 10.0)
+    with c2:
+        min_grid_length = st.slider("Min Grid Line Length (mm)", 100.0, 20000.0, 1000.0, 100.0)
+    with c3:
+        text_circle_gap = st.slider("Text-Circle Match Gap (mm)", 20.0, 1000.0, 300.0, 10.0)
+    with c4:
+        line_gap = st.slider("Bubble-Line Match Gap (mm)", 50.0, 2000.0, 600.0, 50.0)
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -684,7 +740,6 @@ elif tool_choice == "2. Grid Label Sync":
         if not st.session_state.docs_loaded:
             arch_tmp = None
             struc_tmp = None
-
             try:
                 arch_tmp = save_uploaded_to_temp(arch_file)
                 struc_tmp = save_uploaded_to_temp(struc_file)
@@ -694,7 +749,6 @@ elif tool_choice == "2. Grid Label Sync":
                 st.session_state.arch_name = arch_file.name
                 st.session_state.struc_name = struc_file.name
                 st.session_state.docs_loaded = True
-
             except Exception as e:
                 st.error(f"Failed to load DXF files: {e}")
             finally:
@@ -705,51 +759,59 @@ elif tool_choice == "2. Grid Label Sync":
             arch_layers = get_layer_names(st.session_state.arch_doc)
             struc_layers = get_layer_names(st.session_state.struc_doc)
 
-            l1, l2 = st.columns(2)
-            with l1:
-                arch_grid_layer = st.selectbox(
-                    "Architectural Grid Layer",
-                    options=["<ALL LAYERS>"] + arch_layers,
-                    index=0
-                )
-            with l2:
-                struc_grid_layer = st.selectbox(
-                    "Structural Grid Layer",
-                    options=["<ALL LAYERS>"] + struc_layers,
-                    index=0
-                )
+            st.markdown("### Architectural Layer Setup")
+            a1, a2, a3 = st.columns(3)
+            with a1:
+                arch_line_layer = st.selectbox("Arch Grid Line Layer", arch_layers, index=0)
+            with a2:
+                arch_text_layer = st.selectbox("Arch Grid Text Layer", arch_layers, index=0)
+            with a3:
+                arch_circle_layer = st.selectbox("Arch Grid Circle Layer", arch_layers, index=0)
 
-            arch_grid_layer_val = None if arch_grid_layer == "<ALL LAYERS>" else arch_grid_layer
-            struc_grid_layer_val = None if struc_grid_layer == "<ALL LAYERS>" else struc_grid_layer
+            st.markdown("### Structural Layer Setup")
+            s1, s2, s3 = st.columns(3)
+            with s1:
+                struc_line_layer = st.selectbox("Struc Grid Line Layer", struc_layers, index=0)
+            with s2:
+                struc_text_layer = st.selectbox("Struc Grid Text Layer", struc_layers, index=0)
+            with s3:
+                struc_circle_layer = st.selectbox("Struc Grid Circle Layer", struc_layers, index=0)
 
             b1, b2 = st.columns(2)
-
             with b1:
                 if st.button("🚀 Analyze, Check, and Preview"):
                     try:
-                        arch_vertical, arch_horizontal, arch_lines = detect_grid_bubbles(
+                        arch_detection = detect_grids(
                             st.session_state.arch_doc,
-                            grid_layer=arch_grid_layer_val,
+                            line_layer=arch_line_layer,
+                            text_layer=arch_text_layer,
+                            circle_layer=arch_circle_layer,
                             min_grid_length=min_grid_length,
-                            text_circle_gap=text_circle_gap
+                            text_circle_gap=text_circle_gap,
+                            line_gap=line_gap,
                         )
 
-                        struc_vertical, struc_horizontal, struc_lines = detect_grid_bubbles(
+                        struc_detection = detect_grids(
                             st.session_state.struc_doc,
-                            grid_layer=struc_grid_layer_val,
+                            line_layer=struc_line_layer,
+                            text_layer=struc_text_layer,
+                            circle_layer=struc_circle_layer,
                             min_grid_length=min_grid_length,
-                            text_circle_gap=text_circle_gap
+                            text_circle_gap=text_circle_gap,
+                            line_gap=line_gap,
                         )
 
-                        st.session_state.arch_vertical = arch_vertical
-                        st.session_state.arch_horizontal = arch_horizontal
-                        st.session_state.struc_vertical = struc_vertical
-                        st.session_state.struc_horizontal = struc_horizontal
-                        st.session_state.arch_lines = arch_lines
-                        st.session_state.struc_lines = struc_lines
+                        st.session_state.arch_detection = arch_detection
+                        st.session_state.struc_detection = struc_detection
 
-                        vertical_map, vertical_preview = build_mapping_by_position(arch_vertical, struc_vertical)
-                        horizontal_map, horizontal_preview = build_mapping_by_position(arch_horizontal, struc_horizontal)
+                        vertical_map, vertical_preview = build_mapping_by_position(
+                            arch_detection["vertical"],
+                            struc_detection["vertical"]
+                        )
+                        horizontal_map, horizontal_preview = build_mapping_by_position(
+                            arch_detection["horizontal"],
+                            struc_detection["horizontal"]
+                        )
 
                         st.session_state.vertical_map = vertical_map
                         st.session_state.horizontal_map = horizontal_map
@@ -757,12 +819,22 @@ elif tool_choice == "2. Grid Label Sync":
                         st.session_state.horizontal_preview = horizontal_preview
 
                         issues = []
-                        issues.extend(compare_spacings(arch_vertical, struc_vertical, "vertical", tolerance))
-                        issues.extend(compare_spacings(arch_horizontal, struc_horizontal, "horizontal", tolerance))
+                        issues.extend(compare_spacings(
+                            arch_detection["vertical"],
+                            struc_detection["vertical"],
+                            "vertical",
+                            tolerance
+                        ))
+                        issues.extend(compare_spacings(
+                            arch_detection["horizontal"],
+                            struc_detection["horizontal"],
+                            "horizontal",
+                            tolerance
+                        ))
 
                         st.session_state.geometry_issues = issues
-
                         _, fails = summarize_geometry_issues(issues)
+
                         if not fails:
                             st.session_state.geometry_continue = True
                             st.session_state.apply_ready = True
@@ -770,7 +842,7 @@ elif tool_choice == "2. Grid Label Sync":
                             st.session_state.geometry_continue = False
                             st.session_state.apply_ready = False
 
-                        st.success("Analysis complete. Check mapping, geometry, and visual preview tabs.")
+                        st.success("Detection complete. Review mapping, QA, and preview tabs.")
 
                     except Exception as e:
                         st.error(f"Analysis failed: {e}")
@@ -780,11 +852,16 @@ elif tool_choice == "2. Grid Label Sync":
                     reset_sync_state()
                     st.rerun()
 
+            arch_v = len(st.session_state.arch_detection.get("vertical", []))
+            arch_h = len(st.session_state.arch_detection.get("horizontal", []))
+            struc_v = len(st.session_state.struc_detection.get("vertical", []))
+            struc_h = len(st.session_state.struc_detection.get("horizontal", []))
+
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Arch Vertical", len(st.session_state.arch_vertical))
-            m2.metric("Arch Horizontal", len(st.session_state.arch_horizontal))
-            m3.metric("Struc Vertical", len(st.session_state.struc_vertical))
-            m4.metric("Struc Horizontal", len(st.session_state.struc_horizontal))
+            m1.metric("Arch Vertical", arch_v)
+            m2.metric("Arch Horizontal", arch_h)
+            m3.metric("Struc Vertical", struc_v)
+            m4.metric("Struc Horizontal", struc_h)
 
             tabs = st.tabs(["Grid Mapping", "Geometry Check", "Visual Preview", "Apply Labels", "Download"])
 
@@ -811,16 +888,16 @@ elif tool_choice == "2. Grid Label Sync":
                     if fails:
                         st.error(f"Outside tolerance: {len(fails)}")
                         st.warning(
-                            "Some structural spans differ from architectural spans beyond the allowed tolerance."
+                            "Some structural grid spacings differ from the architectural reference beyond tolerance."
                         )
 
                         continue_choice = st.radio(
-                            "What do you want to do?",
-                            ["Go back and review", "Continue anyway and apply labels"],
+                            "Do you want to continue anyway?",
+                            ["No, go back and review", "Yes, continue and apply labels"],
                             key="qa_gate"
                         )
 
-                        if continue_choice == "Continue anyway and apply labels":
+                        if continue_choice == "Yes, continue and apply labels":
                             st.session_state.geometry_continue = True
                             st.session_state.apply_ready = True
                         else:
@@ -834,30 +911,23 @@ elif tool_choice == "2. Grid Label Sync":
                     st.info("Run analysis first.")
 
             with tabs[2]:
-                st.write("### Visual Preview")
-
                 pv1, pv2 = st.columns(2)
 
                 with pv1:
-                    if st.session_state.arch_lines:
+                    if st.session_state.arch_detection:
                         fig_arch = draw_preview(
-                            "Architectural Grid Detection",
-                            st.session_state.arch_vertical,
-                            st.session_state.arch_horizontal,
-                            st.session_state.arch_lines,
-                            issues=None
+                            "Architectural Detection",
+                            st.session_state.arch_detection
                         )
                         st.pyplot(fig_arch)
                     else:
                         st.info("No architectural preview yet.")
 
                 with pv2:
-                    if st.session_state.struc_lines:
+                    if st.session_state.struc_detection:
                         fig_struc = draw_preview(
-                            "Structural Grid Detection + Fail Highlights",
-                            st.session_state.struc_vertical,
-                            st.session_state.struc_horizontal,
-                            st.session_state.struc_lines,
+                            "Structural Detection + Fails",
+                            st.session_state.struc_detection,
                             issues=st.session_state.geometry_issues
                         )
                         st.pyplot(fig_struc)
@@ -865,9 +935,8 @@ elif tool_choice == "2. Grid Label Sync":
                         st.info("No structural preview yet.")
 
                 st.caption(
-                    "Blue circles = detected vertical-grid bubble labels. "
-                    "Green circles = detected horizontal-grid bubble labels. "
-                    "Red dashed lines = structural spans failing tolerance."
+                    "Use the preview to confirm the correct line/text/circle layers are selected. "
+                    "Detected vertical and horizontal grids should appear clearly."
                 )
 
             with tabs[3]:
@@ -883,7 +952,7 @@ elif tool_choice == "2. Grid Label Sync":
                                 st.session_state.horizontal_map
                             )
                             st.session_state.labels_changed_count = changed
-                            st.success(f"Label sync applied successfully. {changed} text entities updated.")
+                            st.success(f"Label sync applied. {changed} text entities updated.")
                         except Exception as e:
                             st.error(f"Failed to apply label sync: {e}")
                 else:
@@ -893,13 +962,11 @@ elif tool_choice == "2. Grid Label Sync":
                 st.write("### Download Modified Structural DXF")
                 if st.session_state.struc_doc is not None:
                     st.info(f"Updated text entities: {st.session_state.labels_changed_count}")
-
-                    out_buffer = io.StringIO()
-                    st.session_state.struc_doc.write(out_buffer)
+                    dxf_bytes = write_doc_to_temp_bytes(st.session_state.struc_doc)
 
                     st.download_button(
                         "📥 Download Relabeled Structural DXF",
-                        data=out_buffer.getvalue().encode("utf-8"),
+                        data=dxf_bytes,
                         file_name=f"RELABELED_{st.session_state.struc_name}",
                         mime="application/dxf"
                     )
