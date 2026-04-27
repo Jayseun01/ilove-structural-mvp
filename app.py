@@ -1,6 +1,5 @@
 import streamlit as st
 import ezdxf
-import io
 import os
 import tempfile
 import math
@@ -46,7 +45,6 @@ def write_doc_to_temp_bytes(doc):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf")
     tmp_path = tmp.name
     tmp.close()
-
     try:
         doc.saveas(tmp_path)
         with open(tmp_path, "rb") as f:
@@ -87,17 +85,6 @@ def probable_grid_label(text):
     return any(re.match(p, text) for p in patterns)
 
 
-def probable_grid_ref(text):
-    text = clean_text(text)
-    patterns = [
-        r"^[A-Z]{1,2}\-[A-Z]{1,2}$",
-        r"^\d{1,2}\-\d{1,2}$",
-        r"^[A-Z]{1,2}\-\d{1,2}$",
-        r"^\d{1,2}\-[A-Z]{1,2}$",
-    ]
-    return any(re.match(p, text) for p in patterns)
-
-
 def get_layer_names(doc):
     return sorted([layer.dxf.name for layer in doc.layers])
 
@@ -125,13 +112,13 @@ def purge_layers_from_modelspace(doc, layers_to_keep):
 # =========================================================
 # ENTITY EXTRACTION
 # =========================================================
-def extract_texts(doc, layer_name=None):
+def extract_texts(doc, layer_name):
     texts = []
     msp = doc.modelspace()
 
     for e in msp:
         try:
-            if layer_name and e.dxf.layer != layer_name:
+            if e.dxf.layer != layer_name:
                 continue
 
             if e.dxftype() == "TEXT":
@@ -161,7 +148,7 @@ def extract_texts(doc, layer_name=None):
     return texts
 
 
-def extract_circles(doc, layer_name=None):
+def extract_circles(doc, layer_name):
     circles = []
     msp = doc.modelspace()
 
@@ -169,7 +156,7 @@ def extract_circles(doc, layer_name=None):
         try:
             if e.dxftype() != "CIRCLE":
                 continue
-            if layer_name and e.dxf.layer != layer_name:
+            if e.dxf.layer != layer_name:
                 continue
 
             c = e.dxf.center
@@ -185,13 +172,13 @@ def extract_circles(doc, layer_name=None):
     return circles
 
 
-def extract_axis_lines(doc, layer_name=None, min_length=1000.0):
+def extract_axis_lines(doc, layer_name, min_length=1000.0):
     lines = []
     msp = doc.modelspace()
 
     for e in msp:
         try:
-            if layer_name and e.dxf.layer != layer_name:
+            if e.dxf.layer != layer_name:
                 continue
 
             if e.dxftype() == "LINE":
@@ -288,105 +275,124 @@ def resolve_line_group(group):
 
 
 # =========================================================
-# GRID DETECTION ENGINE
+# TWO-WAY AUTHENTICATED MARKER DETECTION
 # =========================================================
-def match_text_to_circle(texts, circles, center_factor=1.2, absolute_gap=300.0):
-    matched = []
+def text_inside_circle(text_point, circle_center, circle_radius, extra_gap=120.0):
+    d = euclidean(text_point, circle_center)
+    return d <= (circle_radius + extra_gap)
+
+
+def line_attached_to_circle(line, circle_center, circle_radius, attach_gap=120.0):
+    """
+    Check if one endpoint of the line is near the circle boundary and aligned with the circle center.
+    """
+    cx, cy = circle_center
+    x1, y1 = line["start"]
+    x2, y2 = line["end"]
+
+    if line["orientation"] == "vertical":
+        # x alignment to circle center
+        if abs(line["coord"] - cx) > attach_gap:
+            return False
+
+        d1 = abs(euclidean((x1, y1), circle_center) - circle_radius)
+        d2 = abs(euclidean((x2, y2), circle_center) - circle_radius)
+        return min(d1, d2) <= attach_gap
+
+    elif line["orientation"] == "horizontal":
+        # y alignment to circle center
+        if abs(line["coord"] - cy) > attach_gap:
+            return False
+
+        d1 = abs(euclidean((x1, y1), circle_center) - circle_radius)
+        d2 = abs(euclidean((x2, y2), circle_center) - circle_radius)
+        return min(d1, d2) <= attach_gap
+
+    return False
+
+
+def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_length, text_gap, attach_gap):
+    """
+    Two-way authentication:
+    1. Layer authentication
+    2. Pattern authentication
+    Only trusted markers are returned.
+    """
+    texts = extract_texts(doc, text_layer)
+    circles = extract_circles(doc, circle_layer)
+    lines = extract_axis_lines(doc, line_layer, min_length=min_grid_length)
+
+    trusted_markers = []
+    rejected = []
 
     for c in circles:
-        best_text = None
-        best_score = None
+        circle_center = c["center"]
+        circle_radius = c["radius"]
 
+        candidate_texts = []
         for t in texts:
             if not probable_grid_label(t["text"]):
                 continue
+            if text_inside_circle(t["point"], circle_center, circle_radius, extra_gap=text_gap):
+                candidate_texts.append(t)
 
-            d = euclidean(c["center"], t["point"])
-            allowance = max(c["radius"] * center_factor, absolute_gap)
+        candidate_lines = []
+        for line in lines:
+            if line_attached_to_circle(line, circle_center, circle_radius, attach_gap=attach_gap):
+                candidate_lines.append(line)
 
-            if d <= allowance:
-                if best_score is None or d < best_score:
-                    best_score = d
-                    best_text = t
+        if len(candidate_texts) == 1 and len(candidate_lines) >= 1:
+            # choose nearest attached line
+            best_line = min(
+                candidate_lines,
+                key=lambda ln: abs(ln["coord"] - circle_center[0]) if ln["orientation"] == "vertical"
+                else abs(ln["coord"] - circle_center[1])
+            )
 
-        if best_text:
-            matched.append({
-                "label": best_text["text"],
-                "text_entity": best_text["entity"],
-                "text_point": best_text["point"],
+            trusted_markers.append({
+                "label": candidate_texts[0]["text"],
+                "text_entity": candidate_texts[0]["entity"],
+                "text_point": candidate_texts[0]["point"],
                 "circle_entity": c["entity"],
-                "circle_center": c["center"],
-                "circle_radius": c["radius"],
+                "circle_center": circle_center,
+                "circle_radius": circle_radius,
+                "line_entity": best_line["entity"],
+                "orientation": best_line["orientation"],
+                "coord": best_line["coord"],
+                "line_start": best_line["start"],
+                "line_end": best_line["end"],
+            })
+        else:
+            rejected.append({
+                "circle_center": circle_center,
+                "circle_radius": circle_radius,
+                "text_matches": len(candidate_texts),
+                "line_matches": len(candidate_lines),
             })
 
-    return matched
+    vertical = sorted(deduplicate_markers([m for m in trusted_markers if m["orientation"] == "vertical"]), key=lambda x: x["coord"])
+    horizontal = sorted(deduplicate_markers([m for m in trusted_markers if m["orientation"] == "horizontal"]), key=lambda x: x["coord"])
+
+    return {
+        "texts": texts,
+        "circles": circles,
+        "lines": lines,
+        "trusted_markers": trusted_markers,
+        "rejected_markers": rejected,
+        "vertical": vertical,
+        "horizontal": horizontal,
+    }
 
 
-def attach_bubbles_to_lines(bubbles, lines, line_gap=600.0):
-    vertical_grids = []
-    horizontal_grids = []
-
-    for bubble in bubbles:
-        bx, by = bubble["circle_center"]
-
-        best_vertical = None
-        best_vertical_d = None
-        best_horizontal = None
-        best_horizontal_d = None
-
-        for line in lines:
-            if line["orientation"] == "vertical":
-                d = abs(bx - line["coord"])
-                if d <= line_gap and (best_vertical_d is None or d < best_vertical_d):
-                    best_vertical_d = d
-                    best_vertical = line
-
-            elif line["orientation"] == "horizontal":
-                d = abs(by - line["coord"])
-                if d <= line_gap and (best_horizontal_d is None or d < best_horizontal_d):
-                    best_horizontal_d = d
-                    best_horizontal = line
-
-        chosen = None
-        if best_vertical and best_horizontal:
-            chosen = best_vertical if best_vertical_d <= best_horizontal_d else best_horizontal
-        elif best_vertical:
-            chosen = best_vertical
-        elif best_horizontal:
-            chosen = best_horizontal
-
-        if chosen:
-            record = {
-                "label": bubble["label"],
-                "coord": chosen["coord"],
-                "center": bubble["circle_center"],
-                "radius": bubble["circle_radius"],
-                "text_entity": bubble["text_entity"],
-                "circle_entity": bubble["circle_entity"],
-                "line_entity": chosen["entity"],
-                "orientation": chosen["orientation"],
-            }
-
-            if chosen["orientation"] == "vertical":
-                vertical_grids.append(record)
-            else:
-                horizontal_grids.append(record)
-
-    vertical_grids = sorted(deduplicate_grids(vertical_grids), key=lambda x: x["coord"])
-    horizontal_grids = sorted(deduplicate_grids(horizontal_grids), key=lambda x: x["coord"])
-
-    return vertical_grids, horizontal_grids
-
-
-def deduplicate_grids(grids, tol=5.0):
-    if not grids:
+def deduplicate_markers(markers, tol=5.0):
+    if not markers:
         return []
 
-    grids = sorted(grids, key=lambda x: x["coord"])
+    markers = sorted(markers, key=lambda x: x["coord"])
     result = []
-    current = [grids[0]]
+    current = [markers[0]]
 
-    for item in grids[1:]:
+    for item in markers[1:]:
         if abs(item["coord"] - current[-1]["coord"]) <= tol:
             current.append(item)
         else:
@@ -397,45 +403,17 @@ def deduplicate_grids(grids, tol=5.0):
     return result
 
 
-def detect_grids(doc, line_layer, text_layer, circle_layer, min_grid_length, text_circle_gap, line_gap):
-    texts = extract_texts(doc, layer_name=text_layer)
-    circles = extract_circles(doc, layer_name=circle_layer)
-    lines = extract_axis_lines(doc, layer_name=line_layer, min_length=min_grid_length)
-
-    matched_bubbles = match_text_to_circle(
-        texts,
-        circles,
-        center_factor=1.2,
-        absolute_gap=text_circle_gap
-    )
-
-    vertical, horizontal = attach_bubbles_to_lines(
-        matched_bubbles,
-        lines,
-        line_gap=line_gap
-    )
-
-    return {
-        "texts": texts,
-        "circles": circles,
-        "lines": lines,
-        "matched_bubbles": matched_bubbles,
-        "vertical": vertical,
-        "horizontal": horizontal,
-    }
-
-
 # =========================================================
 # GEOMETRY QA
 # =========================================================
-def build_spacings(grids, orientation):
+def build_spacings(markers, orientation):
     data = []
-    if len(grids) < 2:
+    if len(markers) < 2:
         return data
 
-    for i in range(len(grids) - 1):
-        a = grids[i]
-        b = grids[i + 1]
+    for i in range(len(markers) - 1):
+        a = markers[i]
+        b = markers[i + 1]
         spacing = round(abs(b["coord"] - a["coord"]), 3)
         data.append({
             "orientation": orientation,
@@ -450,9 +428,9 @@ def build_spacings(grids, orientation):
     return data
 
 
-def compare_spacings(arch_grids, struc_grids, orientation, tolerance):
-    arch_sp = build_spacings(arch_grids, orientation)
-    struc_sp = build_spacings(struc_grids, orientation)
+def compare_spacings(arch_markers, struc_markers, orientation, tolerance):
+    arch_sp = build_spacings(arch_markers, orientation)
+    struc_sp = build_spacings(struc_markers, orientation)
 
     pair_count = min(len(arch_sp), len(struc_sp))
     issues = []
@@ -489,81 +467,50 @@ def summarize_geometry_issues(all_issues):
 
 
 # =========================================================
-# LABEL MAPPING
+# ARCH -> STRUC MAPPING
 # =========================================================
-def build_mapping_by_position(arch_grids, struc_grids):
-    mapping = {}
+def build_mapping_by_position(arch_markers, struc_markers):
     preview = []
+    count = min(len(arch_markers), len(struc_markers))
 
-    count = min(len(arch_grids), len(struc_grids))
     for i in range(count):
-        old_label = struc_grids[i]["label"]
-        new_label = arch_grids[i]["label"]
-        mapping[old_label] = new_label
         preview.append({
             "position": i + 1,
-            "structural_old": old_label,
-            "architectural_new": new_label,
-            "arch_coord": arch_grids[i]["coord"],
-            "struc_coord": struc_grids[i]["coord"],
-            "difference": round(abs(arch_grids[i]["coord"] - struc_grids[i]["coord"]), 3),
+            "arch_label": arch_markers[i]["label"],
+            "struc_old_label": struc_markers[i]["label"],
+            "arch_coord": arch_markers[i]["coord"],
+            "struc_coord": struc_markers[i]["coord"],
+            "difference": round(abs(arch_markers[i]["coord"] - struc_markers[i]["coord"]), 3),
         })
 
-    return mapping, preview
+    return preview
 
 
-def replace_single_label(text, mapping):
-    t = clean_text(text)
-    return mapping.get(t, t)
-
-
-def replace_pair_label(text, mapping):
-    t = clean_text(text)
-    if "-" not in t:
-        return mapping.get(t, t)
-
-    parts = t.split("-")
-    if len(parts) == 2:
-        left = mapping.get(parts[0], parts[0])
-        right = mapping.get(parts[1], parts[1])
-        return f"{left}-{right}"
-    return t
-
-
-def apply_mapping_to_structural_texts(doc, vertical_map, horizontal_map):
-    combined = {}
-    combined.update(vertical_map)
-    combined.update(horizontal_map)
-
+def apply_arch_labels_to_structural_markers(arch_markers, struc_markers):
+    """
+    Safe rename:
+    Update only the specific trusted structural marker text entities.
+    No global find/replace.
+    """
+    count = min(len(arch_markers), len(struc_markers))
     changed = 0
-    msp = doc.modelspace()
 
-    for e in msp:
+    for i in range(count):
+        new_label = arch_markers[i]["label"]
+        marker = struc_markers[i]
+        entity = marker["text_entity"]
+
         try:
-            if e.dxftype() == "TEXT":
-                old = clean_text(e.dxf.text)
-                new = old
-
-                if probable_grid_label(old):
-                    new = replace_single_label(old, combined)
-                elif probable_grid_ref(old):
-                    new = replace_pair_label(old, combined)
-
-                if new != old:
-                    e.dxf.text = new
+            if entity.dxftype() == "TEXT":
+                old = clean_text(entity.dxf.text)
+                if old != new_label:
+                    entity.dxf.text = new_label
                     changed += 1
 
-            elif e.dxftype() == "MTEXT":
-                old = clean_text(e.text)
-                new = old
-
-                if probable_grid_label(old):
-                    new = replace_single_label(old, combined)
-                elif probable_grid_ref(old):
-                    new = replace_pair_label(old, combined)
-
-                if new != old:
-                    e.text = new
+            elif entity.dxftype() == "MTEXT":
+                old = clean_text(entity.text)
+                if old != new_label:
+                    entity.text = new_label
                     changed += 1
         except Exception:
             continue
@@ -574,7 +521,7 @@ def apply_mapping_to_structural_texts(doc, vertical_map, horizontal_map):
 # =========================================================
 # VISUALIZATION
 # =========================================================
-def draw_preview(title, detection_result, issues=None, color_v="blue", color_h="green"):
+def draw_preview(title, detection_result, issues=None):
     fig, ax = plt.subplots(figsize=(8, 8))
 
     for line in detection_result["lines"]:
@@ -587,27 +534,17 @@ def draw_preview(title, detection_result, issues=None, color_v="blue", color_h="
         circ = MplCircle((cx, cy), c["radius"], fill=False, color="silver", linewidth=0.8)
         ax.add_patch(circ)
 
-    for t in detection_result["texts"]:
-        tx, ty = t["point"]
-        ax.text(tx, ty, t["text"], fontsize=7, color="black")
-
-    for g in detection_result["vertical"]:
-        cx, cy = g["center"]
-        circ = MplCircle((cx, cy), g["radius"], fill=False, color=color_v, linewidth=1.8)
+    for m in detection_result["trusted_markers"]:
+        cx, cy = m["circle_center"]
+        color = "blue" if m["orientation"] == "vertical" else "green"
+        circ = MplCircle((cx, cy), m["circle_radius"], fill=False, color=color, linewidth=2)
         ax.add_patch(circ)
-        ax.text(cx, cy, g["label"], ha="center", va="center", color=color_v, fontsize=8)
-
-    for g in detection_result["horizontal"]:
-        cx, cy = g["center"]
-        circ = MplCircle((cx, cy), g["radius"], fill=False, color=color_h, linewidth=1.8)
-        ax.add_patch(circ)
-        ax.text(cx, cy, g["label"], ha="center", va="center", color=color_h, fontsize=8)
+        ax.text(cx, cy, m["label"], ha="center", va="center", color=color, fontsize=8)
 
     if issues:
         for issue in issues:
             if issue["status"] != "FAIL":
                 continue
-
             if issue["orientation"] == "vertical":
                 ax.axvline(issue["coord_a_struc"], color="red", linestyle="--", linewidth=1)
                 ax.axvline(issue["coord_b_struc"], color="red", linestyle="--", linewidth=1)
@@ -633,8 +570,6 @@ def init_sync_state():
         "struc_name": "",
         "arch_detection": {},
         "struc_detection": {},
-        "vertical_map": {},
-        "horizontal_map": {},
         "vertical_preview": [],
         "horizontal_preview": [],
         "geometry_issues": [],
@@ -656,8 +591,6 @@ def reset_sync_state():
         "struc_name",
         "arch_detection",
         "struc_detection",
-        "vertical_map",
-        "horizontal_map",
         "vertical_preview",
         "horizontal_preview",
         "geometry_issues",
@@ -671,7 +604,7 @@ def reset_sync_state():
 
 
 # =========================================================
-# TOOL 1: DXF SMART PURGER
+# TOOL 1
 # =========================================================
 if tool_choice == "1. DXF Smart Purger":
     st.subheader("Tool 1: DXF Smart Purger")
@@ -709,13 +642,13 @@ if tool_choice == "1. DXF Smart Purger":
 
 
 # =========================================================
-# TOOL 2: GRID LABEL SYNC (LAYER-GUIDED)
+# TOOL 2
 # =========================================================
 elif tool_choice == "2. Grid Label Sync":
-    st.subheader("Tool 2: Layer-Guided Grid Label Sync")
+    st.subheader("Tool 2: Strict Arch → Struc Grid Label Sync")
     st.caption(
-        "Choose separate line, text, and circle layers for both Architectural and Structural drawings. "
-        "The tool then detects grid bubbles, compares spacing with tolerance, shows visual preview, and relabels the Structural DXF."
+        "Two-way authentication: only markers that pass both layer validation and geometry-pattern validation are renamed. "
+        "Architectural labels are copied onto trusted Structural markers only."
     )
 
     init_sync_state()
@@ -726,9 +659,9 @@ elif tool_choice == "2. Grid Label Sync":
     with c2:
         min_grid_length = st.slider("Min Grid Line Length (mm)", 100.0, 20000.0, 1000.0, 100.0)
     with c3:
-        text_circle_gap = st.slider("Text-Circle Match Gap (mm)", 20.0, 1000.0, 300.0, 10.0)
+        text_gap = st.slider("Text-in-Circle Gap (mm)", 20.0, 1000.0, 120.0, 10.0)
     with c4:
-        line_gap = st.slider("Bubble-Line Match Gap (mm)", 50.0, 2000.0, 600.0, 50.0)
+        attach_gap = st.slider("Line-to-Circle Attach Gap (mm)", 20.0, 1000.0, 120.0, 10.0)
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -781,40 +714,38 @@ elif tool_choice == "2. Grid Label Sync":
             with b1:
                 if st.button("🚀 Analyze, Check, and Preview"):
                     try:
-                        arch_detection = detect_grids(
+                        arch_detection = build_trusted_markers(
                             st.session_state.arch_doc,
                             line_layer=arch_line_layer,
                             text_layer=arch_text_layer,
                             circle_layer=arch_circle_layer,
                             min_grid_length=min_grid_length,
-                            text_circle_gap=text_circle_gap,
-                            line_gap=line_gap,
+                            text_gap=text_gap,
+                            attach_gap=attach_gap,
                         )
 
-                        struc_detection = detect_grids(
+                        struc_detection = build_trusted_markers(
                             st.session_state.struc_doc,
                             line_layer=struc_line_layer,
                             text_layer=struc_text_layer,
                             circle_layer=struc_circle_layer,
                             min_grid_length=min_grid_length,
-                            text_circle_gap=text_circle_gap,
-                            line_gap=line_gap,
+                            text_gap=text_gap,
+                            attach_gap=attach_gap,
                         )
 
                         st.session_state.arch_detection = arch_detection
                         st.session_state.struc_detection = struc_detection
 
-                        vertical_map, vertical_preview = build_mapping_by_position(
+                        vertical_preview = build_mapping_by_position(
                             arch_detection["vertical"],
                             struc_detection["vertical"]
                         )
-                        horizontal_map, horizontal_preview = build_mapping_by_position(
+                        horizontal_preview = build_mapping_by_position(
                             arch_detection["horizontal"],
                             struc_detection["horizontal"]
                         )
 
-                        st.session_state.vertical_map = vertical_map
-                        st.session_state.horizontal_map = horizontal_map
                         st.session_state.vertical_preview = vertical_preview
                         st.session_state.horizontal_preview = horizontal_preview
 
@@ -842,7 +773,7 @@ elif tool_choice == "2. Grid Label Sync":
                             st.session_state.geometry_continue = False
                             st.session_state.apply_ready = False
 
-                        st.success("Detection complete. Review mapping, QA, and preview tabs.")
+                        st.success("Strict detection complete. Review results before apply.")
 
                     except Exception as e:
                         st.error(f"Analysis failed: {e}")
@@ -866,13 +797,13 @@ elif tool_choice == "2. Grid Label Sync":
             tabs = st.tabs(["Grid Mapping", "Geometry Check", "Visual Preview", "Apply Labels", "Download"])
 
             with tabs[0]:
-                st.write("### Vertical Grid Mapping")
+                st.write("### Vertical Arch → Struc Mapping")
                 if st.session_state.vertical_preview:
                     st.dataframe(st.session_state.vertical_preview, use_container_width=True)
                 else:
                     st.info("No vertical mapping yet.")
 
-                st.write("### Horizontal Grid Mapping")
+                st.write("### Horizontal Arch → Struc Mapping")
                 if st.session_state.horizontal_preview:
                     st.dataframe(st.session_state.horizontal_preview, use_container_width=True)
                 else:
@@ -916,7 +847,7 @@ elif tool_choice == "2. Grid Label Sync":
                 with pv1:
                     if st.session_state.arch_detection:
                         fig_arch = draw_preview(
-                            "Architectural Detection",
+                            "Architectural Trusted Markers",
                             st.session_state.arch_detection
                         )
                         st.pyplot(fig_arch)
@@ -926,7 +857,7 @@ elif tool_choice == "2. Grid Label Sync":
                 with pv2:
                     if st.session_state.struc_detection:
                         fig_struc = draw_preview(
-                            "Structural Detection + Fails",
+                            "Structural Trusted Markers + Fail Highlights",
                             st.session_state.struc_detection,
                             issues=st.session_state.geometry_issues
                         )
@@ -935,24 +866,36 @@ elif tool_choice == "2. Grid Label Sync":
                         st.info("No structural preview yet.")
 
                 st.caption(
-                    "Use the preview to confirm the correct line/text/circle layers are selected. "
-                    "Detected vertical and horizontal grids should appear clearly."
+                    "Only markers that pass layer authentication and geometry-pattern authentication are shown as trusted."
                 )
 
+                if st.session_state.arch_detection:
+                    st.write("#### Architectural Rejected Marker Count")
+                    st.write(len(st.session_state.arch_detection.get("rejected_markers", [])))
+
+                if st.session_state.struc_detection:
+                    st.write("#### Structural Rejected Marker Count")
+                    st.write(len(st.session_state.struc_detection.get("rejected_markers", [])))
+
             with tabs[3]:
-                st.write("### Apply Architectural Labels to Structural DXF")
+                st.write("### Apply Architectural Labels to Trusted Structural Markers")
                 if st.session_state.apply_ready:
                     st.success("Geometry gate passed or continuation approved.")
 
-                    if st.button("✍️ Apply Label Sync"):
+                    if st.button("✍️ Apply Arch → Struc Label Sync"):
                         try:
-                            changed = apply_mapping_to_structural_texts(
-                                st.session_state.struc_doc,
-                                st.session_state.vertical_map,
-                                st.session_state.horizontal_map
+                            changed = 0
+                            changed += apply_arch_labels_to_structural_markers(
+                                st.session_state.arch_detection.get("vertical", []),
+                                st.session_state.struc_detection.get("vertical", [])
                             )
+                            changed += apply_arch_labels_to_structural_markers(
+                                st.session_state.arch_detection.get("horizontal", []),
+                                st.session_state.struc_detection.get("horizontal", [])
+                            )
+
                             st.session_state.labels_changed_count = changed
-                            st.success(f"Label sync applied. {changed} text entities updated.")
+                            st.success(f"Sync applied. {changed} trusted structural marker texts updated.")
                         except Exception as e:
                             st.error(f"Failed to apply label sync: {e}")
                 else:
@@ -961,7 +904,7 @@ elif tool_choice == "2. Grid Label Sync":
             with tabs[4]:
                 st.write("### Download Modified Structural DXF")
                 if st.session_state.struc_doc is not None:
-                    st.info(f"Updated text entities: {st.session_state.labels_changed_count}")
+                    st.info(f"Updated trusted marker texts: {st.session_state.labels_changed_count}")
                     dxf_bytes = write_doc_to_temp_bytes(st.session_state.struc_doc)
 
                     st.download_button(
