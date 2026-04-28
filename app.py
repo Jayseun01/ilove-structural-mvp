@@ -680,13 +680,13 @@ def summarize_geometry_issues(all_issues):
     return passes, fails
 
 
-def build_axis_mapping_preview(arch_axis_groups, struc_axis_groups, family_name, cluster_name=None):
+def build_axis_mapping_preview(arch_axis_groups, struc_axis_groups, family_name, region_name=None):
     preview = []
     count = min(len(arch_axis_groups), len(struc_axis_groups))
 
     for i in range(count):
         preview.append({
-            "cluster": cluster_name if cluster_name else "Reference",
+            "region": region_name if region_name else "Reference",
             "family": family_name,
             "position": i + 1,
             "arch_label": arch_axis_groups[i]["label"],
@@ -723,7 +723,7 @@ def apply_axis_group_labels(arch_axis_groups, struc_axis_groups):
 
 
 # =========================================================
-# MULTI-PLAN CLUSTERING
+# EMPTY-SPACE PLAN SEGMENTATION
 # =========================================================
 def bbox_from_markers(markers):
     xs = [m["circle_center"][0] for m in markers]
@@ -739,79 +739,100 @@ def bbox_from_markers(markers):
     }
 
 
-def estimate_cluster_gap(markers):
-    if len(markers) < 2:
-        return 5000.0
+def compute_major_gap_threshold(values):
+    if len(values) < 2:
+        return None
 
-    xs = sorted(set(round(m["circle_center"][0], 1) for m in markers))
-    ys = sorted(set(round(m["circle_center"][1], 1) for m in markers))
+    vals = sorted(set(round(v, 3) for v in values))
+    if len(vals) < 2:
+        return None
 
-    x_gaps = [xs[i + 1] - xs[i] for i in range(len(xs) - 1)]
-    y_gaps = [ys[i + 1] - ys[i] for i in range(len(ys) - 1)]
+    gaps = [vals[i + 1] - vals[i] for i in range(len(vals) - 1)]
+    pos_gaps = [g for g in gaps if g > 0]
+    if not pos_gaps:
+        return None
 
-    positive_gaps = [g for g in (x_gaps + y_gaps) if g > 0]
-    if not positive_gaps:
-        return 5000.0
-
-    base = sorted(positive_gaps)[len(positive_gaps) // 2]
-    return max(3000.0, base * 2.5)
+    typical = sorted(pos_gaps)[len(pos_gaps) // 2]
+    return max(typical * 3.0, 6000.0)
 
 
-def cluster_markers_by_proximity(markers, cluster_gap=None):
-    if not markers:
+def build_axis_value_groups(values, major_gap_threshold):
+    vals = sorted(set(round(v, 3) for v in values))
+    if not vals:
         return []
 
-    if cluster_gap is None:
-        cluster_gap = estimate_cluster_gap(markers)
-
-    unvisited = set(range(len(markers)))
-    clusters = []
-
-    while unvisited:
-        seed = unvisited.pop()
-        queue = [seed]
-        cluster_idx = [seed]
-
-        while queue:
-            current = queue.pop(0)
-            cx, cy = markers[current]["circle_center"]
-
-            neighbors = []
-            for idx in list(unvisited):
-                x, y = markers[idx]["circle_center"]
-                if abs(x - cx) <= cluster_gap and abs(y - cy) <= cluster_gap:
-                    neighbors.append(idx)
-
-            for idx in neighbors:
-                unvisited.remove(idx)
-                queue.append(idx)
-                cluster_idx.append(idx)
-
-        cluster_markers = [markers[i] for i in cluster_idx]
-        clusters.append(cluster_markers)
-
-    clusters = sorted(clusters, key=lambda c: (bbox_from_markers(c)["centroid"][1], bbox_from_markers(c)["centroid"][0]))
-    return clusters
+    groups = [[vals[0]]]
+    for v in vals[1:]:
+        if abs(v - groups[-1][-1]) > major_gap_threshold:
+            groups.append([v])
+        else:
+            groups[-1].append(v)
+    return groups
 
 
-def build_structural_clusters(trusted_markers):
-    raw_clusters = cluster_markers_by_proximity(trusted_markers)
-    cluster_data = []
+def assign_value_to_group(value, groups):
+    v = round(value, 3)
+    for i, grp in enumerate(groups):
+        if grp[0] <= v <= grp[-1]:
+            return i
+    return None
 
-    for i, markers in enumerate(raw_clusters):
+
+def build_structural_regions_by_empty_space(trusted_markers):
+    if not trusted_markers:
+        return []
+
+    xs = [m["circle_center"][0] for m in trusted_markers]
+    ys = [m["circle_center"][1] for m in trusted_markers]
+
+    x_gap_threshold = compute_major_gap_threshold(xs)
+    y_gap_threshold = compute_major_gap_threshold(ys)
+
+    if x_gap_threshold is None:
+        x_gap_threshold = 6000.0
+    if y_gap_threshold is None:
+        y_gap_threshold = 6000.0
+
+    x_groups = build_axis_value_groups(xs, x_gap_threshold)
+    y_groups = build_axis_value_groups(ys, y_gap_threshold)
+
+    buckets = {}
+    for m in trusted_markers:
+        x_idx = assign_value_to_group(m["circle_center"][0], x_groups)
+        y_idx = assign_value_to_group(m["circle_center"][1], y_groups)
+        key = (x_idx, y_idx)
+        buckets.setdefault(key, []).append(m)
+
+    regions = []
+    n = 1
+    for key, markers in sorted(buckets.items(), key=lambda item: (item[0][1], item[0][0])):
+        if not markers:
+            continue
+
         axis_groups = group_markers_by_axis(markers)
         bbox = bbox_from_markers(markers)
-        cluster_data.append({
-            "name": f"Cluster {i + 1}",
+
+        if len(markers) < 6:
+            continue
+
+        regions.append({
+            "name": f"Region {n}",
             "markers": markers,
             "axis_groups": axis_groups,
             "bbox": bbox,
+            "grid_bucket": key,
         })
+        n += 1
 
-    return cluster_data
+    return regions, {
+        "x_gap_threshold": x_gap_threshold,
+        "y_gap_threshold": y_gap_threshold,
+        "x_group_count": len(x_groups),
+        "y_group_count": len(y_groups),
+    }
 
 
-def cluster_matches_reference(ref_numeric, ref_alpha, cand_numeric, cand_alpha):
+def region_matches_reference(ref_numeric, ref_alpha, cand_numeric, cand_alpha):
     if len(ref_numeric) != len(cand_numeric):
         return False
     if len(ref_alpha) != len(cand_alpha):
@@ -861,8 +882,9 @@ def init_sync_state():
         "family_summary": {},
         "numeric_arch_groups": [],
         "alpha_arch_groups": [],
-        "structural_clusters": [],
-        "matched_clusters": [],
+        "structural_regions": [],
+        "matched_regions": [],
+        "segmentation_summary": {},
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -889,8 +911,9 @@ def reset_sync_state():
         "family_summary",
         "numeric_arch_groups",
         "alpha_arch_groups",
-        "structural_clusters",
-        "matched_clusters",
+        "structural_regions",
+        "matched_regions",
+        "segmentation_summary",
     ]
     for key in keys:
         if key in st.session_state:
@@ -909,8 +932,9 @@ def clear_sync_outputs():
     st.session_state.family_summary = {}
     st.session_state.numeric_arch_groups = []
     st.session_state.alpha_arch_groups = []
-    st.session_state.structural_clusters = []
-    st.session_state.matched_clusters = []
+    st.session_state.structural_regions = []
+    st.session_state.matched_regions = []
+    st.session_state.segmentation_summary = {}
 
 
 def uploaded_file_signature(uploaded_file):
@@ -1113,64 +1137,68 @@ elif tool_choice == "2. Grid Label Sync":
                         st.session_state.numeric_arch_groups = numeric_arch_groups
                         st.session_state.alpha_arch_groups = alpha_arch_groups
 
-                        structural_clusters = build_structural_clusters(struc_detection["trusted_markers"])
-                        st.session_state.structural_clusters = structural_clusters
+                        structural_regions, segmentation_summary = build_structural_regions_by_empty_space(
+                            struc_detection["trusted_markers"]
+                        )
+                        st.session_state.structural_regions = structural_regions
+                        st.session_state.segmentation_summary = segmentation_summary
 
-                        matched_clusters = []
+                        matched_regions = []
                         mapping_preview = []
                         issues = []
 
-                        for cluster in structural_clusters:
-                            cluster_axis = cluster["axis_groups"]
-                            numeric_struc_groups = sorted(cluster_axis.get(numeric_orientation, []), key=lambda x: x["coord"])
-                            alpha_struc_groups = sorted(cluster_axis.get(alpha_orientation, []), key=lambda x: x["coord"])
+                        for region in structural_regions:
+                            region_axis = region["axis_groups"]
+                            numeric_struc_groups = sorted(region_axis.get(numeric_orientation, []), key=lambda x: x["coord"])
+                            alpha_struc_groups = sorted(region_axis.get(alpha_orientation, []), key=lambda x: x["coord"])
 
-                            if cluster_matches_reference(
+                            if region_matches_reference(
                                 numeric_arch_groups,
                                 alpha_arch_groups,
                                 numeric_struc_groups,
                                 alpha_struc_groups
                             ):
-                                matched_clusters.append({
-                                    "name": cluster["name"],
-                                    "bbox": cluster["bbox"],
+                                matched_regions.append({
+                                    "name": region["name"],
+                                    "bbox": region["bbox"],
                                     "numeric_groups": numeric_struc_groups,
                                     "alpha_groups": alpha_struc_groups,
+                                    "grid_bucket": region["grid_bucket"],
                                 })
 
                                 mapping_preview.extend(build_axis_mapping_preview(
-                                    numeric_arch_groups, numeric_struc_groups, "numeric", cluster["name"]
+                                    numeric_arch_groups, numeric_struc_groups, "numeric", region["name"]
                                 ))
                                 mapping_preview.extend(build_axis_mapping_preview(
-                                    alpha_arch_groups, alpha_struc_groups, "alphabetic", cluster["name"]
+                                    alpha_arch_groups, alpha_struc_groups, "alphabetic", region["name"]
                                 ))
 
                                 issues.extend(compare_spacings(
                                     numeric_arch_groups,
                                     numeric_struc_groups,
-                                    f"{cluster['name']} - numeric",
+                                    f"{region['name']} - numeric",
                                     tolerance
                                 ))
                                 issues.extend(compare_spacings(
                                     alpha_arch_groups,
                                     alpha_struc_groups,
-                                    f"{cluster['name']} - alphabetic",
+                                    f"{region['name']} - alphabetic",
                                     tolerance
                                 ))
 
-                        st.session_state.matched_clusters = matched_clusters
+                        st.session_state.matched_regions = matched_regions
                         st.session_state.mapping_preview = mapping_preview
                         st.session_state.geometry_issues = issues
-                        st.session_state.apply_ready = len(matched_clusters) > 0
+                        st.session_state.apply_ready = len(matched_regions) > 0
 
-                        if matched_clusters:
+                        if matched_regions:
                             st.success(
-                                f"Found {len(structural_clusters)} structural plan cluster(s). "
-                                f"{len(matched_clusters)} cluster(s) matched the architectural reference and are ready for sync."
+                                f"Detected {len(structural_regions)} structural region(s) using empty-space segmentation. "
+                                f"{len(matched_regions)} region(s) matched the architectural reference and are ready for sync."
                             )
                         else:
                             st.warning(
-                                "No structural clusters matched the architectural reference. "
+                                "No structural regions matched the architectural reference. "
                                 "Check the optional diagnostic section below."
                             )
 
@@ -1189,21 +1217,27 @@ elif tool_choice == "2. Grid Label Sync":
                     f"Alphabetic family = {fam['alpha_orientation']} axes."
                 )
 
-            if st.session_state.structural_clusters:
-                st.markdown("### Structural Plan Clusters")
-                cluster_rows = []
-                matched_names = {c["name"] for c in st.session_state.matched_clusters}
-                for c in st.session_state.structural_clusters:
-                    cluster_rows.append({
-                        "cluster": c["name"],
-                        "trusted_markers": len(c["markers"]),
-                        "vertical_axes": len(c["axis_groups"].get("vertical", [])),
-                        "horizontal_axes": len(c["axis_groups"].get("horizontal", [])),
-                        "centroid_x": round(c["bbox"]["centroid"][0], 3),
-                        "centroid_y": round(c["bbox"]["centroid"][1], 3),
-                        "matched_reference": c["name"] in matched_names,
+            if st.session_state.segmentation_summary:
+                st.markdown("### Empty-Space Segmentation Summary")
+                st.write(st.session_state.segmentation_summary)
+
+            if st.session_state.structural_regions:
+                st.markdown("### Structural Regions")
+                region_rows = []
+                matched_names = {r["name"] for r in st.session_state.matched_regions}
+                for r in st.session_state.structural_regions:
+                    region_rows.append({
+                        "region": r["name"],
+                        "trusted_markers": len(r["markers"]),
+                        "vertical_axes": len(r["axis_groups"].get("vertical", [])),
+                        "horizontal_axes": len(r["axis_groups"].get("horizontal", [])),
+                        "min_x": round(r["bbox"]["min_x"], 3),
+                        "max_x": round(r["bbox"]["max_x"], 3),
+                        "min_y": round(r["bbox"]["min_y"], 3),
+                        "max_y": round(r["bbox"]["max_y"], 3),
+                        "matched_reference": r["name"] in matched_names,
                     })
-                st.dataframe(cluster_rows, use_container_width=True)
+                st.dataframe(region_rows, use_container_width=True)
 
             st.markdown("---")
             st.markdown("### Sync Preview")
@@ -1226,14 +1260,14 @@ elif tool_choice == "2. Grid Label Sync":
                 if st.button("✍️ Apply Label Sync"):
                     try:
                         changed = 0
-                        for cluster in st.session_state.matched_clusters:
+                        for region in st.session_state.matched_regions:
                             changed += apply_axis_group_labels(
                                 st.session_state.numeric_arch_groups,
-                                cluster["numeric_groups"]
+                                region["numeric_groups"]
                             )
                             changed += apply_axis_group_labels(
                                 st.session_state.alpha_arch_groups,
-                                cluster["alpha_groups"]
+                                region["alpha_groups"]
                             )
 
                         st.session_state.labels_changed_count = changed
@@ -1241,12 +1275,12 @@ elif tool_choice == "2. Grid Label Sync":
                         if changed > 0:
                             st.session_state.last_apply_message = (
                                 f"Label sync complete. {changed} trusted structural marker text entities updated "
-                                f"across {len(st.session_state.matched_clusters)} matched structural cluster(s)."
+                                f"across {len(st.session_state.matched_regions)} matched structural region(s)."
                             )
                             st.success(st.session_state.last_apply_message)
                         else:
                             st.session_state.last_apply_message = (
-                                "Matched structural clusters were found, but no text changes were needed. "
+                                "Matched structural regions were found, but no text changes were needed. "
                                 "The labels may already match."
                             )
                             st.info(st.session_state.last_apply_message)
@@ -1289,8 +1323,8 @@ elif tool_choice == "2. Grid Label Sync":
                     "axis_lines_on_selected_line_layer": len(struc_det.get("lines", [])),
                     "trusted_markers_found": len(struc_det.get("trusted_markers", [])),
                     "rejected_markers": len(struc_det.get("rejected_markers", [])),
-                    "structural_clusters_found": len(st.session_state.structural_clusters),
-                    "matched_clusters": len(st.session_state.matched_clusters),
+                    "structural_regions_found": len(st.session_state.structural_regions),
+                    "matched_regions": len(st.session_state.matched_regions),
                 })
 
                 if st.session_state.family_summary:
@@ -1306,10 +1340,8 @@ elif tool_choice == "2. Grid Label Sync":
                     st.dataframe(st.session_state.geometry_issues, use_container_width=True)
 
                 st.caption(
-                    "This sync supports multiple plan regions in the same structural DXF. "
-                    "Trusted structural markers are clustered spatially into separate plan groups, "
-                    "and each cluster is compared against the architectural reference. "
-                    "All matched clusters are relabeled."
+                    "This version uses empty-space segmentation to split the structural drawing into separate plan regions. "
+                    "Large blank X/Y gaps between trusted marker zones are used to identify different plans before syncing."
                 )
     else:
         st.info("Please upload both the Architectural DXF and Structural DXF.")
