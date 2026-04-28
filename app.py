@@ -20,7 +20,6 @@ st.sidebar.info("Developed by James Oluwaseun Emmanuel")
 
 st.title("🏗️ iLoveStructural")
 
-
 # =========================================================
 # FILE HELPERS
 # =========================================================
@@ -105,6 +104,23 @@ def pick_default_layer(layers, candidates):
         if c.upper() in upper_map:
             return upper_map[c.upper()]
     return layers[0] if layers else None
+
+
+def median(values):
+    if not values:
+        return 0.0
+    vals = sorted(values)
+    n = len(vals)
+    m = n // 2
+    if n % 2 == 1:
+        return float(vals[m])
+    return float((vals[m - 1] + vals[m]) / 2.0)
+
+
+def ratio_safe(a, b):
+    if b == 0:
+        return 0.0
+    return float(a) / float(b)
 
 
 # =========================================================
@@ -778,9 +794,9 @@ def assign_value_to_group(value, groups):
     return None
 
 
-def build_structural_regions_by_empty_space(trusted_markers):
+def build_structural_regions_by_empty_space(trusted_markers, min_region_markers=6):
     if not trusted_markers:
-        return []
+        return [], {}
 
     xs = [m["circle_center"][0] for m in trusted_markers]
     ys = [m["circle_center"][1] for m in trusted_markers]
@@ -805,15 +821,20 @@ def build_structural_regions_by_empty_space(trusted_markers):
 
     regions = []
     n = 1
+    skipped_small = 0
+
     for key, markers in sorted(buckets.items(), key=lambda item: (item[0][1], item[0][0])):
         if not markers:
+            continue
+        if len(markers) < min_region_markers:
+            skipped_small += 1
             continue
 
         axis_groups = group_markers_by_axis(markers)
         bbox = bbox_from_markers(markers)
 
-        if len(markers) < 6:
-            continue
+        vertical_count = len(axis_groups.get("vertical", []))
+        horizontal_count = len(axis_groups.get("horizontal", []))
 
         regions.append({
             "name": f"Region {n}",
@@ -821,6 +842,10 @@ def build_structural_regions_by_empty_space(trusted_markers):
             "axis_groups": axis_groups,
             "bbox": bbox,
             "grid_bucket": key,
+            "marker_count": len(markers),
+            "vertical_axes": vertical_count,
+            "horizontal_axes": horizontal_count,
+            "bbox_area": round(max(1.0, bbox["width"] * bbox["height"]), 3),
         })
         n += 1
 
@@ -829,34 +854,199 @@ def build_structural_regions_by_empty_space(trusted_markers):
         "y_gap_threshold": y_gap_threshold,
         "x_group_count": len(x_groups),
         "y_group_count": len(y_groups),
+        "raw_bucket_count": len(buckets),
+        "regions_kept": len(regions),
+        "small_regions_skipped": skipped_small,
+        "min_region_markers": min_region_markers,
     }
 
 
-def region_matches_reference(ref_numeric, ref_alpha, cand_numeric, cand_alpha):
-    if len(ref_numeric) != len(cand_numeric):
-        return False
-    if len(ref_alpha) != len(cand_alpha):
-        return False
+# =========================================================
+# SIMILARITY / MATCHING
+# =========================================================
+def build_spacing_values(axis_groups):
+    if len(axis_groups) < 2:
+        return []
+    coords = [g["coord"] for g in axis_groups]
+    return [round(abs(coords[i + 1] - coords[i]), 3) for i in range(len(coords) - 1)]
 
-    ref_num_sp = build_spacings(ref_numeric, "numeric")
-    cand_num_sp = build_spacings(cand_numeric, "numeric")
-    ref_alp_sp = build_spacings(ref_alpha, "alphabetic")
-    cand_alp_sp = build_spacings(cand_alpha, "alphabetic")
 
-    if len(ref_num_sp) != len(cand_num_sp):
-        return False
-    if len(ref_alp_sp) != len(cand_alp_sp):
-        return False
+def best_subsequence_match_score(ref_spacings, cand_spacings, spacing_tol=50.0):
+    if not ref_spacings or not cand_spacings:
+        return 0.0, 0, 0
 
-    for a, b in zip(ref_num_sp, cand_num_sp):
-        if abs(a["spacing"] - b["spacing"]) > 50.0:
-            return False
+    best_match_count = 0
+    best_window_len = 0
 
-    for a, b in zip(ref_alp_sp, cand_alp_sp):
-        if abs(a["spacing"] - b["spacing"]) > 50.0:
-            return False
+    if len(cand_spacings) <= len(ref_spacings):
+        max_start = len(ref_spacings) - len(cand_spacings)
+        for start in range(max_start + 1):
+            matched = 0
+            for i, val in enumerate(cand_spacings):
+                if abs(ref_spacings[start + i] - val) <= spacing_tol:
+                    matched += 1
+            if matched > best_match_count:
+                best_match_count = matched
+                best_window_len = len(cand_spacings)
+    else:
+        max_start = len(cand_spacings) - len(ref_spacings)
+        for start in range(max_start + 1):
+            matched = 0
+            for i, val in enumerate(ref_spacings):
+                if abs(cand_spacings[start + i] - val) <= spacing_tol:
+                    matched += 1
+            if matched > best_match_count:
+                best_match_count = matched
+                best_window_len = len(ref_spacings)
 
-    return True
+    denom = max(1, best_window_len)
+    return round(best_match_count / denom, 3), best_match_count, best_window_len
+
+
+def bbox_similarity_score(ref_bbox, cand_bbox):
+    ref_w = max(1.0, ref_bbox.get("width", 1.0))
+    ref_h = max(1.0, ref_bbox.get("height", 1.0))
+    cand_w = max(1.0, cand_bbox.get("width", 1.0))
+    cand_h = max(1.0, cand_bbox.get("height", 1.0))
+
+    width_ratio = min(ref_w, cand_w) / max(ref_w, cand_w)
+    height_ratio = min(ref_h, cand_h) / max(ref_h, cand_h)
+    return round((width_ratio + height_ratio) / 2.0, 3), round(width_ratio, 3), round(height_ratio, 3)
+
+
+def evaluate_region_match(ref_numeric, ref_alpha, cand_numeric, cand_alpha, ref_marker_count, cand_marker_count, ref_bbox, cand_bbox):
+    ref_num_count = len(ref_numeric)
+    ref_alpha_count = len(ref_alpha)
+    cand_num_count = len(cand_numeric)
+    cand_alpha_count = len(cand_alpha)
+
+    ref_num_sp = build_spacing_values(ref_numeric)
+    cand_num_sp = build_spacing_values(cand_numeric)
+    ref_alp_sp = build_spacing_values(ref_alpha)
+    cand_alp_sp = build_spacing_values(cand_alpha)
+
+    num_subseq_score, num_subseq_matches, num_subseq_window = best_subsequence_match_score(ref_num_sp, cand_num_sp, spacing_tol=50.0)
+    alp_subseq_score, alp_subseq_matches, alp_subseq_window = best_subsequence_match_score(ref_alp_sp, cand_alp_sp, spacing_tol=50.0)
+
+    num_ratio = ratio_safe(cand_num_count, ref_num_count) if ref_num_count else 0.0
+    alp_ratio = ratio_safe(cand_alpha_count, ref_alpha_count) if ref_alpha_count else 0.0
+    marker_ratio = ratio_safe(cand_marker_count, ref_marker_count) if ref_marker_count else 0.0
+
+    bbox_score, width_ratio, height_ratio = bbox_similarity_score(ref_bbox, cand_bbox)
+
+    exact_full = (
+        cand_num_count == ref_num_count
+        and cand_alpha_count == ref_alpha_count
+        and num_subseq_score >= 1.0
+        and alp_subseq_score >= 1.0
+    )
+
+    strong_similar = (
+        num_ratio >= 0.75
+        and alp_ratio >= 0.75
+        and marker_ratio >= 0.70
+        and num_subseq_score >= 0.70
+        and alp_subseq_score >= 0.70
+        and bbox_score >= 0.75
+    )
+
+    partial_but_confident = (
+        num_ratio >= 0.60
+        and alp_ratio >= 0.60
+        and marker_ratio >= 0.55
+        and (
+            (num_subseq_score >= 0.85 and alp_subseq_score >= 0.60)
+            or (alp_subseq_score >= 0.85 and num_subseq_score >= 0.60)
+            or (num_subseq_score >= 0.75 and alp_subseq_score >= 0.75 and bbox_score >= 0.85)
+        )
+    )
+
+    reasons = []
+
+    if exact_full:
+        reasons.append("Exact full match")
+        matched = True
+        match_mode = "exact"
+    elif strong_similar:
+        reasons.append("Strong similar repeated-plan match")
+        matched = True
+        match_mode = "strong-similar"
+    elif partial_but_confident:
+        reasons.append("Partial but confident repeated-plan match")
+        matched = True
+        match_mode = "partial-confident"
+    else:
+        matched = False
+        match_mode = "rejected"
+
+    if not matched:
+        if num_ratio < 0.60:
+            reasons.append("numeric axis count too low")
+        elif num_ratio < 0.75:
+            reasons.append("numeric axis count slightly low")
+
+        if alp_ratio < 0.60:
+            reasons.append("alphabetic axis count too low")
+        elif alp_ratio < 0.75:
+            reasons.append("alphabetic axis count slightly low")
+
+        if marker_ratio < 0.55:
+            reasons.append("trusted marker count too low")
+        elif marker_ratio < 0.70:
+            reasons.append("trusted marker count slightly low")
+
+        if num_subseq_score < 0.60:
+            reasons.append("numeric spacing signature weak")
+        elif num_subseq_score < 0.75:
+            reasons.append("numeric spacing signature moderate")
+
+        if alp_subseq_score < 0.60:
+            reasons.append("alphabetic spacing signature weak")
+        elif alp_subseq_score < 0.75:
+            reasons.append("alphabetic spacing signature moderate")
+
+        if bbox_score < 0.75:
+            reasons.append("plan bounding shape differs")
+
+    return {
+        "matched": matched,
+        "match_mode": match_mode,
+        "reason": "; ".join(reasons) if reasons else "Not similar enough",
+        "num_ratio": round(num_ratio, 3),
+        "alp_ratio": round(alp_ratio, 3),
+        "marker_ratio": round(marker_ratio, 3),
+        "num_score": round(num_subseq_score, 3),
+        "alp_score": round(alp_subseq_score, 3),
+        "bbox_score": round(bbox_score, 3),
+        "width_ratio": width_ratio,
+        "height_ratio": height_ratio,
+        "num_subseq_matches": num_subseq_matches,
+        "alp_subseq_matches": alp_subseq_matches,
+        "num_subseq_window": num_subseq_window,
+        "alp_subseq_window": alp_subseq_window,
+    }
+
+
+def build_reference_region_like_bbox(numeric_arch_groups, alpha_arch_groups):
+    xs = [g["centroid"][0] for g in numeric_arch_groups] if numeric_arch_groups else []
+    ys = [g["centroid"][1] for g in alpha_arch_groups] if alpha_arch_groups else []
+
+    if not xs and not ys:
+        return {"width": 1.0, "height": 1.0}
+
+    if not xs:
+        xs = [0.0, 1.0]
+    if not ys:
+        ys = [0.0, 1.0]
+
+    return {
+        "min_x": min(xs),
+        "max_x": max(xs),
+        "min_y": min(ys),
+        "max_y": max(ys),
+        "width": max(xs) - min(xs),
+        "height": max(ys) - min(ys),
+    }
 
 
 # =========================================================
@@ -885,6 +1075,9 @@ def init_sync_state():
         "structural_regions": [],
         "matched_regions": [],
         "segmentation_summary": {},
+        "region_match_report": [],
+        "reference_region_bbox": {},
+        "reference_marker_count": 0,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -914,6 +1107,9 @@ def reset_sync_state():
         "structural_regions",
         "matched_regions",
         "segmentation_summary",
+        "region_match_report",
+        "reference_region_bbox",
+        "reference_marker_count",
     ]
     for key in keys:
         if key in st.session_state:
@@ -935,6 +1131,9 @@ def clear_sync_outputs():
     st.session_state.structural_regions = []
     st.session_state.matched_regions = []
     st.session_state.segmentation_summary = {}
+    st.session_state.region_match_report = []
+    st.session_state.reference_region_bbox = {}
+    st.session_state.reference_marker_count = 0
 
 
 def uploaded_file_signature(uploaded_file):
@@ -1001,7 +1200,13 @@ elif tool_choice == "2. Grid Label Sync":
     with c3:
         attach_gap = st.slider("Line-to-Marker Attach Gap (mm)", 20.0, 1500.0, 180.0, 10.0)
 
-    min_grid_length = 1000.0
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        min_grid_length = st.number_input("Minimum Grid Line Length (mm)", min_value=1.0, value=1000.0, step=100.0)
+    with d2:
+        min_region_markers = st.number_input("Minimum Markers Per Region", min_value=1, value=6, step=1)
+    with d3:
+        sync_similar_regions = st.checkbox("Sync structurally similar repeated plan regions", value=True)
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -1136,9 +1341,14 @@ elif tool_choice == "2. Grid Label Sync":
 
                         st.session_state.numeric_arch_groups = numeric_arch_groups
                         st.session_state.alpha_arch_groups = alpha_arch_groups
+                        st.session_state.reference_marker_count = len(arch_detection["trusted_markers"])
+                        st.session_state.reference_region_bbox = build_reference_region_like_bbox(
+                            numeric_arch_groups, alpha_arch_groups
+                        )
 
                         structural_regions, segmentation_summary = build_structural_regions_by_empty_space(
-                            struc_detection["trusted_markers"]
+                            struc_detection["trusted_markers"],
+                            min_region_markers=min_region_markers,
                         )
                         st.session_state.structural_regions = structural_regions
                         st.session_state.segmentation_summary = segmentation_summary
@@ -1146,24 +1356,56 @@ elif tool_choice == "2. Grid Label Sync":
                         matched_regions = []
                         mapping_preview = []
                         issues = []
+                        region_match_report = []
 
                         for region in structural_regions:
                             region_axis = region["axis_groups"]
                             numeric_struc_groups = sorted(region_axis.get(numeric_orientation, []), key=lambda x: x["coord"])
                             alpha_struc_groups = sorted(region_axis.get(alpha_orientation, []), key=lambda x: x["coord"])
 
-                            if region_matches_reference(
+                            match_eval = evaluate_region_match(
                                 numeric_arch_groups,
                                 alpha_arch_groups,
                                 numeric_struc_groups,
-                                alpha_struc_groups
-                            ):
+                                alpha_struc_groups,
+                                st.session_state.reference_marker_count,
+                                len(region["markers"]),
+                                st.session_state.reference_region_bbox,
+                                region["bbox"],
+                            )
+
+                            strict_exact = match_eval["match_mode"] == "exact"
+                            similar_allowed = sync_similar_regions and match_eval["matched"]
+                            will_sync = strict_exact or similar_allowed
+
+                            region_match_report.append({
+                                "region": region["name"],
+                                "trusted_markers": len(region["markers"]),
+                                "numeric_axes": len(numeric_struc_groups),
+                                "alphabetic_axes": len(alpha_struc_groups),
+                                "bbox_width": round(region["bbox"]["width"], 3),
+                                "bbox_height": round(region["bbox"]["height"], 3),
+                                "marker_ratio": match_eval["marker_ratio"],
+                                "num_ratio": match_eval["num_ratio"],
+                                "alp_ratio": match_eval["alp_ratio"],
+                                "num_score": match_eval["num_score"],
+                                "alp_score": match_eval["alp_score"],
+                                "bbox_score": match_eval["bbox_score"],
+                                "match_mode": match_eval["match_mode"],
+                                "match_reason": match_eval["reason"],
+                                "will_sync": will_sync,
+                            })
+
+                            if will_sync:
                                 matched_regions.append({
                                     "name": region["name"],
                                     "bbox": region["bbox"],
                                     "numeric_groups": numeric_struc_groups,
                                     "alpha_groups": alpha_struc_groups,
                                     "grid_bucket": region["grid_bucket"],
+                                    "match_reason": match_eval["reason"],
+                                    "match_mode": match_eval["match_mode"],
+                                    "marker_count": len(region["markers"]),
                                 })
 
                                 mapping_preview.extend(build_axis_mapping_preview(
@@ -1189,17 +1431,18 @@ elif tool_choice == "2. Grid Label Sync":
                         st.session_state.matched_regions = matched_regions
                         st.session_state.mapping_preview = mapping_preview
                         st.session_state.geometry_issues = issues
+                        st.session_state.region_match_report = region_match_report
                         st.session_state.apply_ready = len(matched_regions) > 0
 
                         if matched_regions:
                             st.success(
-                                f"Detected {len(structural_regions)} structural region(s) using empty-space segmentation. "
-                                f"{len(matched_regions)} region(s) matched the architectural reference and are ready for sync."
+                                f"Detected {len(structural_regions)} structural region(s). "
+                                f"{len(matched_regions)} region(s) are ready for sync."
                             )
                         else:
                             st.warning(
-                                "No structural regions matched the architectural reference. "
-                                "Check the optional diagnostic section below."
+                                "No structural regions qualified for sync. "
+                                "Check region reasons below."
                             )
 
                     except Exception as e:
@@ -1221,23 +1464,9 @@ elif tool_choice == "2. Grid Label Sync":
                 st.markdown("### Empty-Space Segmentation Summary")
                 st.write(st.session_state.segmentation_summary)
 
-            if st.session_state.structural_regions:
-                st.markdown("### Structural Regions")
-                region_rows = []
-                matched_names = {r["name"] for r in st.session_state.matched_regions}
-                for r in st.session_state.structural_regions:
-                    region_rows.append({
-                        "region": r["name"],
-                        "trusted_markers": len(r["markers"]),
-                        "vertical_axes": len(r["axis_groups"].get("vertical", [])),
-                        "horizontal_axes": len(r["axis_groups"].get("horizontal", [])),
-                        "min_x": round(r["bbox"]["min_x"], 3),
-                        "max_x": round(r["bbox"]["max_x"], 3),
-                        "min_y": round(r["bbox"]["min_y"], 3),
-                        "max_y": round(r["bbox"]["max_y"], 3),
-                        "matched_reference": r["name"] in matched_names,
-                    })
-                st.dataframe(region_rows, use_container_width=True)
+            if st.session_state.region_match_report:
+                st.markdown("### Structural Region Match Report")
+                st.dataframe(st.session_state.region_match_report, use_container_width=True)
 
             st.markdown("---")
             st.markdown("### Sync Preview")
@@ -1314,6 +1543,8 @@ elif tool_choice == "2. Grid Label Sync":
                     "rejected_markers": len(arch_det.get("rejected_markers", [])),
                     "vertical_axes_grouped": len(arch_groups.get("vertical", [])),
                     "horizontal_axes_grouped": len(arch_groups.get("horizontal", [])),
+                    "reference_marker_count": st.session_state.reference_marker_count,
+                    "reference_region_bbox": st.session_state.reference_region_bbox,
                 })
 
                 st.write("#### Structural Detection")
@@ -1331,6 +1562,21 @@ elif tool_choice == "2. Grid Label Sync":
                     st.write("#### Architectural Family Inference")
                     st.write(st.session_state.family_summary)
 
+                if st.session_state.structural_regions:
+                    st.write("#### Structural Region Summary")
+                    region_rows = []
+                    for r in st.session_state.structural_regions:
+                        region_rows.append({
+                            "region": r["name"],
+                            "trusted_markers": r["marker_count"],
+                            "vertical_axes": r["vertical_axes"],
+                            "horizontal_axes": r["horizontal_axes"],
+                            "bbox_width": round(r["bbox"]["width"], 3),
+                            "bbox_height": round(r["bbox"]["height"], 3),
+                            "grid_bucket": r["grid_bucket"],
+                        })
+                    st.dataframe(region_rows, use_container_width=True)
+
                 if struc_det.get("rejected_markers"):
                     st.write("#### Rejected Structural Markers")
                     st.dataframe(struc_det["rejected_markers"], use_container_width=True)
@@ -1340,8 +1586,9 @@ elif tool_choice == "2. Grid Label Sync":
                     st.dataframe(st.session_state.geometry_issues, use_container_width=True)
 
                 st.caption(
-                    "This version uses empty-space segmentation to split the structural drawing into separate plan regions. "
-                    "Large blank X/Y gaps between trusted marker zones are used to identify different plans before syncing."
+                    "This version uses empty-space segmentation plus looser repeated-plan matching. "
+                    "A structural region can qualify as exact, strong-similar, or partial-but-confident. "
+                    "The region match report explains why each region will or will not sync."
                 )
     else:
         st.info("Please upload both the Architectural DXF and Structural DXF.")
