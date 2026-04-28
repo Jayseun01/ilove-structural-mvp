@@ -20,6 +20,7 @@ st.sidebar.info("Developed by James Oluwaseun Emmanuel")
 
 st.title("🏗️ iLoveStructural")
 
+
 # =========================================================
 # FILE HELPERS
 # =========================================================
@@ -104,17 +105,6 @@ def pick_default_layer(layers, candidates):
         if c.upper() in upper_map:
             return upper_map[c.upper()]
     return layers[0] if layers else None
-
-
-def median(values):
-    if not values:
-        return 0.0
-    vals = sorted(values)
-    n = len(vals)
-    m = n // 2
-    if n % 2 == 1:
-        return float(vals[m])
-    return float((vals[m - 1] + vals[m]) / 2.0)
 
 
 def ratio_safe(a, b):
@@ -219,6 +209,11 @@ def set_text_value(entity, new_value):
         entity.text = new_value
     elif entity.dxftype() == "ATTRIB":
         entity.dxf.text = new_value
+
+
+def is_entity_writable(marker):
+    source = marker.get("text_source", "")
+    return source in ("modelspace", "insert_attrib")
 
 
 # =========================================================
@@ -546,7 +541,7 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
 
 
 # =========================================================
-# AXIS GROUPING / FAMILY / QA / APPLY
+# AXIS GROUPING / FAMILY / PREVIEW / APPLY
 # =========================================================
 def group_markers_by_axis(markers, tol=5.0):
     if not markers:
@@ -584,12 +579,15 @@ def resolve_axis_group(group, orientation):
     xs = [m["circle_center"][0] for m in group]
     ys = [m["circle_center"][1] for m in group]
 
+    writable_markers = [m for m in group if is_entity_writable(m)]
+
     return {
         "orientation": orientation,
         "coord": coord,
         "label": label,
         "markers": group,
         "marker_count": len(group),
+        "writable_marker_count": len(writable_markers),
         "representative": representative,
         "bbox": {
             "min_x": min(xs),
@@ -662,26 +660,26 @@ def build_spacings(axis_groups, family_name):
     return data
 
 
-def compare_spacings(arch_groups, struc_groups, family_name, tolerance):
-    arch_sp = build_spacings(arch_groups, family_name)
-    struc_sp = build_spacings(struc_groups, family_name)
+def compare_spacings(source_groups, target_groups, family_name, tolerance):
+    src_sp = build_spacings(source_groups, family_name)
+    tgt_sp = build_spacings(target_groups, family_name)
 
-    pair_count = min(len(arch_sp), len(struc_sp))
+    pair_count = min(len(src_sp), len(tgt_sp))
     issues = []
 
     for i in range(pair_count):
-        a = arch_sp[i]
-        s = struc_sp[i]
+        a = src_sp[i]
+        s = tgt_sp[i]
         diff = round(abs(a["spacing"] - s["spacing"]), 3)
         status = "PASS" if diff <= tolerance else "FAIL"
 
         issues.append({
             "family": family_name,
             "span_position": i + 1,
-            "arch_span": f"{a['label_a']}-{a['label_b']}",
-            "struc_span": f"{s['label_a']}-{s['label_b']}",
-            "arch_spacing": a["spacing"],
-            "struc_spacing": s["spacing"],
+            "source_span": f"{a['label_a']}-{a['label_b']}",
+            "target_span": f"{s['label_a']}-{s['label_b']}",
+            "source_spacing": a["spacing"],
+            "target_spacing": s["spacing"],
             "difference": diff,
             "tolerance": tolerance,
             "status": status,
@@ -696,36 +694,43 @@ def summarize_geometry_issues(all_issues):
     return passes, fails
 
 
-def build_axis_mapping_preview(arch_axis_groups, struc_axis_groups, family_name, region_name=None):
+def build_axis_mapping_preview(source_axis_groups, target_axis_groups, family_name, region_name=None, source_name="Source"):
     preview = []
-    count = min(len(arch_axis_groups), len(struc_axis_groups))
+    count = min(len(source_axis_groups), len(target_axis_groups))
 
     for i in range(count):
         preview.append({
-            "region": region_name if region_name else "Reference",
+            "target_region": region_name if region_name else "Reference",
+            "source_reference": source_name,
             "family": family_name,
             "position": i + 1,
-            "arch_label": arch_axis_groups[i]["label"],
-            "struc_old_label": struc_axis_groups[i]["label"],
-            "arch_coord": arch_axis_groups[i]["coord"],
-            "struc_coord": struc_axis_groups[i]["coord"],
-            "difference": round(abs(arch_axis_groups[i]["coord"] - struc_axis_groups[i]["coord"]), 3),
-            "arch_visible_markers": arch_axis_groups[i]["marker_count"],
-            "struc_visible_markers": struc_axis_groups[i]["marker_count"],
+            "source_label": source_axis_groups[i]["label"],
+            "target_old_label": target_axis_groups[i]["label"],
+            "source_coord": source_axis_groups[i]["coord"],
+            "target_coord": target_axis_groups[i]["coord"],
+            "difference": round(abs(source_axis_groups[i]["coord"] - target_axis_groups[i]["coord"]), 3),
+            "source_visible_markers": source_axis_groups[i]["marker_count"],
+            "target_visible_markers": target_axis_groups[i]["marker_count"],
+            "target_writable_markers": target_axis_groups[i]["writable_marker_count"],
         })
 
     return preview
 
 
-def apply_axis_group_labels(arch_axis_groups, struc_axis_groups):
-    count = min(len(arch_axis_groups), len(struc_axis_groups))
+def apply_axis_group_labels(source_axis_groups, target_axis_groups, writable_only=True):
+    count = min(len(source_axis_groups), len(target_axis_groups))
     changed = 0
+    skipped_non_writable = 0
 
     for i in range(count):
-        new_label = arch_axis_groups[i]["label"]
-        struc_group = struc_axis_groups[i]
+        new_label = source_axis_groups[i]["label"]
+        target_group = target_axis_groups[i]
 
-        for marker in struc_group["markers"]:
+        for marker in target_group["markers"]:
+            if writable_only and not is_entity_writable(marker):
+                skipped_non_writable += 1
+                continue
+
             entity = marker["text_entity"]
             try:
                 old = get_text_value(entity)
@@ -735,7 +740,7 @@ def apply_axis_group_labels(arch_axis_groups, struc_axis_groups):
             except Exception:
                 continue
 
-    return changed
+    return changed, skipped_non_writable
 
 
 # =========================================================
@@ -833,9 +838,6 @@ def build_structural_regions_by_empty_space(trusted_markers, min_region_markers=
         axis_groups = group_markers_by_axis(markers)
         bbox = bbox_from_markers(markers)
 
-        vertical_count = len(axis_groups.get("vertical", []))
-        horizontal_count = len(axis_groups.get("horizontal", []))
-
         regions.append({
             "name": f"Region {n}",
             "markers": markers,
@@ -843,9 +845,6 @@ def build_structural_regions_by_empty_space(trusted_markers, min_region_markers=
             "bbox": bbox,
             "grid_bucket": key,
             "marker_count": len(markers),
-            "vertical_axes": vertical_count,
-            "horizontal_axes": horizontal_count,
-            "bbox_area": round(max(1.0, bbox["width"] * bbox["height"]), 3),
         })
         n += 1
 
@@ -862,13 +861,24 @@ def build_structural_regions_by_empty_space(trusted_markers, min_region_markers=
 
 
 # =========================================================
-# SIMILARITY / MATCHING
+# CHAIN-REACTION MATCHING
 # =========================================================
 def build_spacing_values(axis_groups):
     if len(axis_groups) < 2:
         return []
     coords = [g["coord"] for g in axis_groups]
     return [round(abs(coords[i + 1] - coords[i]), 3) for i in range(len(coords) - 1)]
+
+
+def bbox_similarity_score(ref_bbox, cand_bbox):
+    ref_w = max(1.0, ref_bbox.get("width", 1.0))
+    ref_h = max(1.0, ref_bbox.get("height", 1.0))
+    cand_w = max(1.0, cand_bbox.get("width", 1.0))
+    cand_h = max(1.0, cand_bbox.get("height", 1.0))
+
+    width_ratio = min(ref_w, cand_w) / max(ref_w, cand_w)
+    height_ratio = min(ref_h, cand_h) / max(ref_h, cand_h)
+    return round((width_ratio + height_ratio) / 2.0, 3), round(width_ratio, 3), round(height_ratio, 3)
 
 
 def best_subsequence_match_score(ref_spacings, cand_spacings, spacing_tol=50.0):
@@ -903,18 +913,20 @@ def best_subsequence_match_score(ref_spacings, cand_spacings, spacing_tol=50.0):
     return round(best_match_count / denom, 3), best_match_count, best_window_len
 
 
-def bbox_similarity_score(ref_bbox, cand_bbox):
-    ref_w = max(1.0, ref_bbox.get("width", 1.0))
-    ref_h = max(1.0, ref_bbox.get("height", 1.0))
-    cand_w = max(1.0, cand_bbox.get("width", 1.0))
-    cand_h = max(1.0, cand_bbox.get("height", 1.0))
+def build_reference_bbox_from_arch(numeric_arch_groups, alpha_arch_groups):
+    xs = [g["coord"] for g in numeric_arch_groups] if numeric_arch_groups else [0.0, 1.0]
+    ys = [g["coord"] for g in alpha_arch_groups] if alpha_arch_groups else [0.0, 1.0]
+    return {
+        "min_x": min(xs),
+        "max_x": max(xs),
+        "min_y": min(ys),
+        "max_y": max(ys),
+        "width": max(xs) - min(xs),
+        "height": max(ys) - min(ys),
+    }
 
-    width_ratio = min(ref_w, cand_w) / max(ref_w, cand_w)
-    height_ratio = min(ref_h, cand_h) / max(ref_h, cand_h)
-    return round((width_ratio + height_ratio) / 2.0, 3), round(width_ratio, 3), round(height_ratio, 3)
 
-
-def evaluate_region_match(ref_numeric, ref_alpha, cand_numeric, cand_alpha, ref_marker_count, cand_marker_count, ref_bbox, cand_bbox):
+def score_region_against_reference(ref_numeric, ref_alpha, ref_marker_count, ref_bbox, cand_numeric, cand_alpha, cand_marker_count, cand_bbox):
     ref_num_count = len(ref_numeric)
     ref_alpha_count = len(ref_alpha)
     cand_num_count = len(cand_numeric)
@@ -925,8 +937,8 @@ def evaluate_region_match(ref_numeric, ref_alpha, cand_numeric, cand_alpha, ref_
     ref_alp_sp = build_spacing_values(ref_alpha)
     cand_alp_sp = build_spacing_values(cand_alpha)
 
-    num_subseq_score, num_subseq_matches, num_subseq_window = best_subsequence_match_score(ref_num_sp, cand_num_sp, spacing_tol=50.0)
-    alp_subseq_score, alp_subseq_matches, alp_subseq_window = best_subsequence_match_score(ref_alp_sp, cand_alp_sp, spacing_tol=50.0)
+    num_score, _, _ = best_subsequence_match_score(ref_num_sp, cand_num_sp, spacing_tol=50.0)
+    alp_score, _, _ = best_subsequence_match_score(ref_alp_sp, cand_alp_sp, spacing_tol=50.0)
 
     num_ratio = ratio_safe(cand_num_count, ref_num_count) if ref_num_count else 0.0
     alp_ratio = ratio_safe(cand_alpha_count, ref_alpha_count) if ref_alpha_count else 0.0
@@ -934,118 +946,113 @@ def evaluate_region_match(ref_numeric, ref_alpha, cand_numeric, cand_alpha, ref_
 
     bbox_score, width_ratio, height_ratio = bbox_similarity_score(ref_bbox, cand_bbox)
 
-    exact_full = (
+    total_score = round(
+        0.28 * min(1.0, num_ratio) +
+        0.28 * min(1.0, alp_ratio) +
+        0.18 * min(1.0, marker_ratio) +
+        0.13 * num_score +
+        0.13 * alp_score,
+        3
+    )
+
+    exact = (
         cand_num_count == ref_num_count
         and cand_alpha_count == ref_alpha_count
-        and num_subseq_score >= 1.0
-        and alp_subseq_score >= 1.0
+        and num_score >= 1.0
+        and alp_score >= 1.0
     )
 
-    strong_similar = (
-        num_ratio >= 0.75
-        and alp_ratio >= 0.75
-        and marker_ratio >= 0.70
-        and num_subseq_score >= 0.70
-        and alp_subseq_score >= 0.70
-        and bbox_score >= 0.75
-    )
-
-    partial_but_confident = (
+    acceptable = (
         num_ratio >= 0.60
         and alp_ratio >= 0.60
-        and marker_ratio >= 0.55
+        and marker_ratio >= 0.50
         and (
-            (num_subseq_score >= 0.85 and alp_subseq_score >= 0.60)
-            or (alp_subseq_score >= 0.85 and num_subseq_score >= 0.60)
-            or (num_subseq_score >= 0.75 and alp_subseq_score >= 0.75 and bbox_score >= 0.85)
+            (num_score >= 0.70 and alp_score >= 0.70)
+            or (bbox_score >= 0.85 and num_score >= 0.60 and alp_score >= 0.60)
         )
     )
 
     reasons = []
-
-    if exact_full:
-        reasons.append("Exact full match")
-        matched = True
-        match_mode = "exact"
-    elif strong_similar:
-        reasons.append("Strong similar repeated-plan match")
-        matched = True
-        match_mode = "strong-similar"
-    elif partial_but_confident:
-        reasons.append("Partial but confident repeated-plan match")
-        matched = True
-        match_mode = "partial-confident"
+    if exact:
+        reasons.append("Exact architectural seed match")
+    elif acceptable:
+        reasons.append("Best acceptable architectural seed match")
     else:
-        matched = False
-        match_mode = "rejected"
-
-    if not matched:
-        if num_ratio < 0.60:
-            reasons.append("numeric axis count too low")
-        elif num_ratio < 0.75:
-            reasons.append("numeric axis count slightly low")
-
-        if alp_ratio < 0.60:
-            reasons.append("alphabetic axis count too low")
-        elif alp_ratio < 0.75:
-            reasons.append("alphabetic axis count slightly low")
-
-        if marker_ratio < 0.55:
-            reasons.append("trusted marker count too low")
-        elif marker_ratio < 0.70:
-            reasons.append("trusted marker count slightly low")
-
-        if num_subseq_score < 0.60:
-            reasons.append("numeric spacing signature weak")
-        elif num_subseq_score < 0.75:
-            reasons.append("numeric spacing signature moderate")
-
-        if alp_subseq_score < 0.60:
-            reasons.append("alphabetic spacing signature weak")
-        elif alp_subseq_score < 0.75:
-            reasons.append("alphabetic spacing signature moderate")
-
-        if bbox_score < 0.75:
-            reasons.append("plan bounding shape differs")
+        reasons.append("Weak match to architectural reference")
 
     return {
-        "matched": matched,
-        "match_mode": match_mode,
-        "reason": "; ".join(reasons) if reasons else "Not similar enough",
+        "acceptable": acceptable or exact,
+        "exact": exact,
+        "total_score": total_score,
         "num_ratio": round(num_ratio, 3),
         "alp_ratio": round(alp_ratio, 3),
         "marker_ratio": round(marker_ratio, 3),
-        "num_score": round(num_subseq_score, 3),
-        "alp_score": round(alp_subseq_score, 3),
+        "num_score": round(num_score, 3),
+        "alp_score": round(alp_score, 3),
         "bbox_score": round(bbox_score, 3),
         "width_ratio": width_ratio,
         "height_ratio": height_ratio,
-        "num_subseq_matches": num_subseq_matches,
-        "alp_subseq_matches": alp_subseq_matches,
-        "num_subseq_window": num_subseq_window,
-        "alp_subseq_window": alp_subseq_window,
+        "reason": "; ".join(reasons),
     }
 
 
-def build_reference_region_like_bbox(numeric_arch_groups, alpha_arch_groups):
-    xs = [g["centroid"][0] for g in numeric_arch_groups] if numeric_arch_groups else []
-    ys = [g["centroid"][1] for g in alpha_arch_groups] if alpha_arch_groups else []
+def score_region_against_anchor(anchor_numeric, anchor_alpha, anchor_marker_count, anchor_bbox, cand_numeric, cand_alpha, cand_marker_count, cand_bbox):
+    anchor_num_count = len(anchor_numeric)
+    anchor_alpha_count = len(anchor_alpha)
+    cand_num_count = len(cand_numeric)
+    cand_alpha_count = len(cand_alpha)
 
-    if not xs and not ys:
-        return {"width": 1.0, "height": 1.0}
+    anchor_num_sp = build_spacing_values(anchor_numeric)
+    cand_num_sp = build_spacing_values(cand_numeric)
+    anchor_alp_sp = build_spacing_values(anchor_alpha)
+    cand_alp_sp = build_spacing_values(cand_alpha)
 
-    if not xs:
-        xs = [0.0, 1.0]
-    if not ys:
-        ys = [0.0, 1.0]
+    num_score, _, _ = best_subsequence_match_score(anchor_num_sp, cand_num_sp, spacing_tol=50.0)
+    alp_score, _, _ = best_subsequence_match_score(anchor_alp_sp, cand_alp_sp, spacing_tol=50.0)
+
+    num_ratio = ratio_safe(cand_num_count, anchor_num_count) if anchor_num_count else 0.0
+    alp_ratio = ratio_safe(cand_alpha_count, anchor_alpha_count) if anchor_alpha_count else 0.0
+    marker_ratio = ratio_safe(cand_marker_count, anchor_marker_count) if anchor_marker_count else 0.0
+
+    bbox_score, width_ratio, height_ratio = bbox_similarity_score(anchor_bbox, cand_bbox)
+
+    duplicate_score = round(
+        0.22 * min(1.0, num_ratio) +
+        0.22 * min(1.0, alp_ratio) +
+        0.18 * min(1.0, marker_ratio) +
+        0.19 * num_score +
+        0.19 * alp_score,
+        3
+    )
+
+    duplicate = (
+        num_ratio >= 0.60
+        and alp_ratio >= 0.60
+        and marker_ratio >= 0.50
+        and bbox_score >= 0.75
+        and (
+            (num_score >= 0.65 and alp_score >= 0.65)
+            or duplicate_score >= 0.72
+        )
+    )
+
+    if duplicate:
+        reason = "Duplicate / similar structural region of anchor"
+    else:
+        reason = "Not similar enough to anchor"
 
     return {
-        "min_x": min(xs),
-        "max_x": max(xs),
-        "min_y": min(ys),
-        "max_y": max(ys),
-        "width": max(xs) - min(xs),
-        "height": max(ys) - min(ys),
+        "duplicate": duplicate,
+        "duplicate_score": duplicate_score,
+        "num_ratio": round(num_ratio, 3),
+        "alp_ratio": round(alp_ratio, 3),
+        "marker_ratio": round(marker_ratio, 3),
+        "num_score": round(num_score, 3),
+        "alp_score": round(alp_score, 3),
+        "bbox_score": round(bbox_score, 3),
+        "width_ratio": width_ratio,
+        "height_ratio": height_ratio,
+        "reason": reason,
     }
 
 
@@ -1076,8 +1083,11 @@ def init_sync_state():
         "matched_regions": [],
         "segmentation_summary": {},
         "region_match_report": [],
-        "reference_region_bbox": {},
+        "anchor_region": None,
         "reference_marker_count": 0,
+        "reference_bbox": {},
+        "skipped_non_writable_count": 0,
+        "structural_text_source_summary": {},
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -1108,8 +1118,11 @@ def reset_sync_state():
         "matched_regions",
         "segmentation_summary",
         "region_match_report",
-        "reference_region_bbox",
+        "anchor_region",
         "reference_marker_count",
+        "reference_bbox",
+        "skipped_non_writable_count",
+        "structural_text_source_summary",
     ]
     for key in keys:
         if key in st.session_state:
@@ -1132,8 +1145,11 @@ def clear_sync_outputs():
     st.session_state.matched_regions = []
     st.session_state.segmentation_summary = {}
     st.session_state.region_match_report = []
-    st.session_state.reference_region_bbox = {}
+    st.session_state.anchor_region = None
     st.session_state.reference_marker_count = 0
+    st.session_state.reference_bbox = {}
+    st.session_state.skipped_non_writable_count = 0
+    st.session_state.structural_text_source_summary = {}
 
 
 def uploaded_file_signature(uploaded_file):
@@ -1187,7 +1203,7 @@ elif tool_choice == "2. Grid Label Sync":
     st.subheader("Tool 2: Grid Label Sync")
     st.caption(
         "Architectural labels are copied onto trusted Structural markers only. "
-        "Two-factor authentication is enforced: selected layers + valid marker pattern."
+        "This version uses anchor-region chain-reaction sync: Architecture → best structural seed → duplicate structural regions."
     )
 
     init_sync_state()
@@ -1206,7 +1222,7 @@ elif tool_choice == "2. Grid Label Sync":
     with d2:
         min_region_markers = st.number_input("Minimum Markers Per Region", min_value=1, value=6, step=1)
     with d3:
-        sync_similar_regions = st.checkbox("Sync structurally similar repeated plan regions", value=True)
+        writable_only = st.checkbox("Write only to safe writable text entities", value=True)
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -1327,6 +1343,13 @@ elif tool_choice == "2. Grid Label Sync":
                         st.session_state.arch_detection = arch_detection
                         st.session_state.struc_detection = struc_detection
 
+                        structural_source_summary = {
+                            "modelspace": len([m for m in struc_detection["trusted_markers"] if m.get("text_source") == "modelspace"]),
+                            "insert_attrib": len([m for m in struc_detection["trusted_markers"] if m.get("text_source") == "insert_attrib"]),
+                            "block_text": len([m for m in struc_detection["trusted_markers"] if m.get("text_source") == "block_text"]),
+                        }
+                        st.session_state.structural_text_source_summary = structural_source_summary
+
                         arch_axis_groups = group_markers_by_axis(arch_detection["trusted_markers"])
                         st.session_state.arch_axis_groups = arch_axis_groups
 
@@ -1342,7 +1365,7 @@ elif tool_choice == "2. Grid Label Sync":
                         st.session_state.numeric_arch_groups = numeric_arch_groups
                         st.session_state.alpha_arch_groups = alpha_arch_groups
                         st.session_state.reference_marker_count = len(arch_detection["trusted_markers"])
-                        st.session_state.reference_region_bbox = build_reference_region_like_bbox(
+                        st.session_state.reference_bbox = build_reference_bbox_from_arch(
                             numeric_arch_groups, alpha_arch_groups
                         )
 
@@ -1353,80 +1376,170 @@ elif tool_choice == "2. Grid Label Sync":
                         st.session_state.structural_regions = structural_regions
                         st.session_state.segmentation_summary = segmentation_summary
 
-                        matched_regions = []
+                        region_match_report = []
                         mapping_preview = []
                         issues = []
-                        region_match_report = []
+                        matched_regions = []
 
+                        # -------------------------------------------------
+                        # Stage 1: choose best structural anchor from arch
+                        # -------------------------------------------------
+                        scored_candidates = []
                         for region in structural_regions:
                             region_axis = region["axis_groups"]
                             numeric_struc_groups = sorted(region_axis.get(numeric_orientation, []), key=lambda x: x["coord"])
                             alpha_struc_groups = sorted(region_axis.get(alpha_orientation, []), key=lambda x: x["coord"])
 
-                            match_eval = evaluate_region_match(
+                            arch_score = score_region_against_reference(
                                 numeric_arch_groups,
                                 alpha_arch_groups,
+                                st.session_state.reference_marker_count,
+                                st.session_state.reference_bbox,
                                 numeric_struc_groups,
                                 alpha_struc_groups,
-                                st.session_state.reference_marker_count,
                                 len(region["markers"]),
-                                st.session_state.reference_region_bbox,
                                 region["bbox"],
                             )
 
-                            strict_exact = match_eval["match_mode"] == "exact"
-                            similar_allowed = sync_similar_regions and match_eval["matched"]
-                            will_sync = strict_exact or similar_allowed
-
-                            region_match_report.append({
-                                "region": region["name"],
-                                "trusted_markers": len(region["markers"]),
-                                "numeric_axes": len(numeric_struc_groups),
-                                "alphabetic_axes": len(alpha_struc_groups),
-                                "bbox_width": round(region["bbox"]["width"], 3),
-                                "bbox_height": round(region["bbox"]["height"], 3),
-                                "marker_ratio": match_eval["marker_ratio"],
-                                "num_ratio": match_eval["num_ratio"],
-                                "alp_ratio": match_eval["alp_ratio"],
-                                "num_score": match_eval["num_score"],
-                                "alp_score": match_eval["alp_score"],
-                                "bbox_score": match_eval["bbox_score"],
-                                "match_mode": match_eval["match_mode"],
-                                "match_reason": match_eval["reason"],
-                                "will_sync": will_sync,
+                            scored_candidates.append({
+                                "region": region,
+                                "numeric_groups": numeric_struc_groups,
+                                "alpha_groups": alpha_struc_groups,
+                                "arch_score": arch_score,
                             })
 
-                            if will_sync:
-                                matched_regions.append({
-                                    "name": region["name"],
-                                    "bbox": region["bbox"],
-                                    "numeric_groups": numeric_struc_groups,
-                                    "alpha_groups": alpha_struc_groups,
-                                    "grid_bucket": region["grid_bucket"],
-                                    "match_reason": match_eval["reason"],
-                                    "match_mode": match_eval["match_mode"],
-                                    "marker_count": len(region["markers"]),
+                        anchor_candidate = None
+                        acceptable_candidates = [x for x in scored_candidates if x["arch_score"]["acceptable"]]
+
+                        if acceptable_candidates:
+                            anchor_candidate = max(acceptable_candidates, key=lambda x: x["arch_score"]["total_score"])
+                        elif scored_candidates:
+                            anchor_candidate = max(scored_candidates, key=lambda x: x["arch_score"]["total_score"])
+
+                        st.session_state.anchor_region = anchor_candidate
+
+                        if anchor_candidate is not None:
+                            anchor_region = anchor_candidate["region"]
+                            anchor_numeric = anchor_candidate["numeric_groups"]
+                            anchor_alpha = anchor_candidate["alpha_groups"]
+                            anchor_marker_count = len(anchor_region["markers"])
+                            anchor_bbox = anchor_region["bbox"]
+
+                            for item in scored_candidates:
+                                region = item["region"]
+                                numeric_struc_groups = item["numeric_groups"]
+                                alpha_struc_groups = item["alpha_groups"]
+                                arch_score = item["arch_score"]
+
+                                if region["name"] == anchor_region["name"]:
+                                    classification = "anchor"
+                                    will_sync = True
+                                    reason = f"Anchor region selected. {arch_score['reason']}"
+                                    match_score = arch_score["total_score"]
+
+                                    matched_regions.append({
+                                        "name": region["name"],
+                                        "bbox": region["bbox"],
+                                        "numeric_groups": numeric_struc_groups,
+                                        "alpha_groups": alpha_struc_groups,
+                                        "grid_bucket": region["grid_bucket"],
+                                        "match_reason": reason,
+                                        "match_mode": "anchor",
+                                        "marker_count": len(region["markers"]),
+                                        "source_reference": "architecture",
+                                    })
+
+                                    mapping_preview.extend(build_axis_mapping_preview(
+                                        numeric_arch_groups, numeric_struc_groups, "numeric", region["name"], "Architecture"
+                                    ))
+                                    mapping_preview.extend(build_axis_mapping_preview(
+                                        alpha_arch_groups, alpha_struc_groups, "alphabetic", region["name"], "Architecture"
+                                    ))
+
+                                    issues.extend(compare_spacings(
+                                        numeric_arch_groups,
+                                        numeric_struc_groups,
+                                        f"{region['name']} - numeric (Architecture → Anchor)",
+                                        tolerance
+                                    ))
+                                    issues.extend(compare_spacings(
+                                        alpha_arch_groups,
+                                        alpha_struc_groups,
+                                        f"{region['name']} - alphabetic (Architecture → Anchor)",
+                                        tolerance
+                                    ))
+
+                                else:
+                                    dup_score = score_region_against_anchor(
+                                        anchor_numeric,
+                                        anchor_alpha,
+                                        anchor_marker_count,
+                                        anchor_bbox,
+                                        numeric_struc_groups,
+                                        alpha_struc_groups,
+                                        len(region["markers"]),
+                                        region["bbox"],
+                                    )
+
+                                    if dup_score["duplicate"]:
+                                        classification = "duplicate_of_anchor"
+                                        will_sync = True
+                                        reason = dup_score["reason"]
+                                        match_score = dup_score["duplicate_score"]
+
+                                        matched_regions.append({
+                                            "name": region["name"],
+                                            "bbox": region["bbox"],
+                                            "numeric_groups": numeric_struc_groups,
+                                            "alpha_groups": alpha_struc_groups,
+                                            "grid_bucket": region["grid_bucket"],
+                                            "match_reason": reason,
+                                            "match_mode": "duplicate_of_anchor",
+                                            "marker_count": len(region["markers"]),
+                                            "source_reference": anchor_region["name"],
+                                        })
+
+                                        mapping_preview.extend(build_axis_mapping_preview(
+                                            anchor_numeric, numeric_struc_groups, "numeric", region["name"], anchor_region["name"]
+                                        ))
+                                        mapping_preview.extend(build_axis_mapping_preview(
+                                            anchor_alpha, alpha_struc_groups, "alphabetic", region["name"], anchor_region["name"]
+                                        ))
+
+                                        issues.extend(compare_spacings(
+                                            anchor_numeric,
+                                            numeric_struc_groups,
+                                            f"{region['name']} - numeric ({anchor_region['name']} → Duplicate)",
+                                            tolerance
+                                        ))
+                                        issues.extend(compare_spacings(
+                                            anchor_alpha,
+                                            alpha_struc_groups,
+                                            f"{region['name']} - alphabetic ({anchor_region['name']} → Duplicate)",
+                                            tolerance
+                                        ))
+                                    else:
+                                        classification = "rejected"
+                                        will_sync = False
+                                        reason = dup_score["reason"]
+                                        match_score = dup_score["duplicate_score"]
+
+                                writable_count = len([m for m in region["markers"] if is_entity_writable(m)])
+
+                                region_match_report.append({
+                                    "region": region["name"],
+                                    "classification": classification,
+                                    "source_reference": "Architecture" if classification == "anchor" else (anchor_region["name"] if anchor_candidate else "None"),
+                                    "trusted_markers": len(region["markers"]),
+                                    "writable_markers": writable_count,
+                                    "numeric_axes": len(numeric_struc_groups),
+                                    "alphabetic_axes": len(alpha_struc_groups),
+                                    "bbox_width": round(region["bbox"]["width"], 3),
+                                    "bbox_height": round(region["bbox"]["height"], 3),
+                                    "score": round(match_score, 3),
+                                    "reason": reason,
+                                    "will_sync": will_sync,
                                 })
-
-                                mapping_preview.extend(build_axis_mapping_preview(
-                                    numeric_arch_groups, numeric_struc_groups, "numeric", region["name"]
-                                ))
-                                mapping_preview.extend(build_axis_mapping_preview(
-                                    alpha_arch_groups, alpha_struc_groups, "alphabetic", region["name"]
-                                ))
-
-                                issues.extend(compare_spacings(
-                                    numeric_arch_groups,
-                                    numeric_struc_groups,
-                                    f"{region['name']} - numeric",
-                                    tolerance
-                                ))
-                                issues.extend(compare_spacings(
-                                    alpha_arch_groups,
-                                    alpha_struc_groups,
-                                    f"{region['name']} - alphabetic",
-                                    tolerance
-                                ))
 
                         st.session_state.matched_regions = matched_regions
                         st.session_state.mapping_preview = mapping_preview
@@ -1435,9 +1548,11 @@ elif tool_choice == "2. Grid Label Sync":
                         st.session_state.apply_ready = len(matched_regions) > 0
 
                         if matched_regions:
+                            anchor_count = len([r for r in matched_regions if r["match_mode"] == "anchor"])
+                            dup_count = len([r for r in matched_regions if r["match_mode"] == "duplicate_of_anchor"])
                             st.success(
                                 f"Detected {len(structural_regions)} structural region(s). "
-                                f"{len(matched_regions)} region(s) are ready for sync."
+                                f"{anchor_count} anchor region and {dup_count} duplicate region(s) are ready for sync."
                             )
                         else:
                             st.warning(
@@ -1459,6 +1574,16 @@ elif tool_choice == "2. Grid Label Sync":
                     f"Reference family detection: Numeric family = {fam['numeric_orientation']} axes, "
                     f"Alphabetic family = {fam['alpha_orientation']} axes."
                 )
+
+            if st.session_state.anchor_region is not None:
+                st.markdown("### Anchor Region")
+                anchor_region = st.session_state.anchor_region["region"]
+                st.write({
+                    "anchor_region": anchor_region["name"],
+                    "trusted_markers": len(anchor_region["markers"]),
+                    "architectural_seed_score": st.session_state.anchor_region["arch_score"]["total_score"],
+                    "architectural_seed_reason": st.session_state.anchor_region["arch_score"]["reason"],
+                })
 
             if st.session_state.segmentation_summary:
                 st.markdown("### Empty-Space Segmentation Summary")
@@ -1489,17 +1614,44 @@ elif tool_choice == "2. Grid Label Sync":
                 if st.button("✍️ Apply Label Sync"):
                     try:
                         changed = 0
-                        for region in st.session_state.matched_regions:
-                            changed += apply_axis_group_labels(
+                        skipped_non_writable = 0
+
+                        anchor_items = [r for r in st.session_state.matched_regions if r["match_mode"] == "anchor"]
+                        dup_items = [r for r in st.session_state.matched_regions if r["match_mode"] == "duplicate_of_anchor"]
+
+                        # Stage 1: Architecture -> Anchor
+                        for region in anchor_items:
+                            c1, s1 = apply_axis_group_labels(
                                 st.session_state.numeric_arch_groups,
-                                region["numeric_groups"]
+                                region["numeric_groups"],
+                                writable_only=writable_only
                             )
-                            changed += apply_axis_group_labels(
+                            c2, s2 = apply_axis_group_labels(
                                 st.session_state.alpha_arch_groups,
-                                region["alpha_groups"]
+                                region["alpha_groups"],
+                                writable_only=writable_only
                             )
+                            changed += (c1 + c2)
+                            skipped_non_writable += (s1 + s2)
+
+                        # Stage 2: Architecture labels propagated to duplicates
+                        # We use architecture groups directly because the anchor should end up identical in ordering.
+                        for region in dup_items:
+                            c1, s1 = apply_axis_group_labels(
+                                st.session_state.numeric_arch_groups,
+                                region["numeric_groups"],
+                                writable_only=writable_only
+                            )
+                            c2, s2 = apply_axis_group_labels(
+                                st.session_state.alpha_arch_groups,
+                                region["alpha_groups"],
+                                writable_only=writable_only
+                            )
+                            changed += (c1 + c2)
+                            skipped_non_writable += (s1 + s2)
 
                         st.session_state.labels_changed_count = changed
+                        st.session_state.skipped_non_writable_count = skipped_non_writable
 
                         if changed > 0:
                             st.session_state.last_apply_message = (
@@ -1507,12 +1659,25 @@ elif tool_choice == "2. Grid Label Sync":
                                 f"across {len(st.session_state.matched_regions)} matched structural region(s)."
                             )
                             st.success(st.session_state.last_apply_message)
+
+                            if skipped_non_writable > 0:
+                                st.warning(
+                                    f"{skipped_non_writable} marker text entities were skipped because they are not safely writable "
+                                    f"(for example block-definition text)."
+                                )
                         else:
-                            st.session_state.last_apply_message = (
-                                "Matched structural regions were found, but no text changes were needed. "
-                                "The labels may already match."
-                            )
-                            st.info(st.session_state.last_apply_message)
+                            if skipped_non_writable > 0:
+                                st.session_state.last_apply_message = (
+                                    "No writable text changes were applied. "
+                                    "Detected target markers may be mostly non-writable block text."
+                                )
+                                st.warning(st.session_state.last_apply_message)
+                            else:
+                                st.session_state.last_apply_message = (
+                                    "Matched structural regions were found, but no text changes were needed. "
+                                    "The labels may already match."
+                                )
+                                st.info(st.session_state.last_apply_message)
 
                     except Exception as e:
                         st.error(f"Failed to apply label sync: {e}")
@@ -1544,7 +1709,7 @@ elif tool_choice == "2. Grid Label Sync":
                     "vertical_axes_grouped": len(arch_groups.get("vertical", [])),
                     "horizontal_axes_grouped": len(arch_groups.get("horizontal", [])),
                     "reference_marker_count": st.session_state.reference_marker_count,
-                    "reference_region_bbox": st.session_state.reference_region_bbox,
+                    "reference_bbox": st.session_state.reference_bbox,
                 })
 
                 st.write("#### Structural Detection")
@@ -1556,6 +1721,7 @@ elif tool_choice == "2. Grid Label Sync":
                     "rejected_markers": len(struc_det.get("rejected_markers", [])),
                     "structural_regions_found": len(st.session_state.structural_regions),
                     "matched_regions": len(st.session_state.matched_regions),
+                    "trusted_marker_text_sources": st.session_state.structural_text_source_summary,
                 })
 
                 if st.session_state.family_summary:
@@ -1566,11 +1732,13 @@ elif tool_choice == "2. Grid Label Sync":
                     st.write("#### Structural Region Summary")
                     region_rows = []
                     for r in st.session_state.structural_regions:
+                        writable_count = len([m for m in r["markers"] if is_entity_writable(m)])
                         region_rows.append({
                             "region": r["name"],
-                            "trusted_markers": r["marker_count"],
-                            "vertical_axes": r["vertical_axes"],
-                            "horizontal_axes": r["horizontal_axes"],
+                            "trusted_markers": len(r["markers"]),
+                            "writable_markers": writable_count,
+                            "vertical_axes": len(r["axis_groups"].get("vertical", [])),
+                            "horizontal_axes": len(r["axis_groups"].get("horizontal", [])),
                             "bbox_width": round(r["bbox"]["width"], 3),
                             "bbox_height": round(r["bbox"]["height"], 3),
                             "grid_bucket": r["grid_bucket"],
@@ -1586,9 +1754,9 @@ elif tool_choice == "2. Grid Label Sync":
                     st.dataframe(st.session_state.geometry_issues, use_container_width=True)
 
                 st.caption(
-                    "This version uses empty-space segmentation plus looser repeated-plan matching. "
-                    "A structural region can qualify as exact, strong-similar, or partial-but-confident. "
-                    "The region match report explains why each region will or will not sync."
+                    "This version selects one best structural anchor region from the architectural reference, "
+                    "then propagates labels to duplicate structural regions. "
+                    "For safety, block-definition text can be skipped from write-back if writable-only mode is enabled."
                 )
     else:
         st.info("Please upload both the Architectural DXF and Structural DXF.")
