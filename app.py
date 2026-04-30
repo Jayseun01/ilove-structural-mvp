@@ -1831,4 +1831,277 @@ if st.session_state.structural_regions and st.session_state.family_summary:
             "bbox_height": round(region["bbox"]["height"], 1),
         })
 
-    st.markdown("### Region
+        st.markdown("### Region Axis Count Check")
+    st.dataframe(region_axis_rows, use_container_width=True)
+
+
+if st.session_state.region_match_report:
+    st.markdown("### Structural Region Match Report")
+    st.dataframe(st.session_state.region_match_report, use_container_width=True)
+
+
+st.markdown("---")
+st.markdown("### Sync Preview")
+
+axis_count_warnings = []
+
+if st.session_state.mapping_preview:
+    st.dataframe(st.session_state.mapping_preview, use_container_width=True)
+
+    axis_count_warnings = build_axis_count_warnings(st.session_state.matched_regions)
+
+    if axis_count_warnings:
+        st.warning(
+            "Some matched regions have different source/target axis counts. "
+            "By default, those regions will be blocked during Apply Sync."
+        )
+        st.dataframe(axis_count_warnings, use_container_width=True)
+else:
+    st.info("No sync preview yet.")
+
+
+# =========================================================
+# WRITE SAFETY SUMMARY
+# =========================================================
+if st.session_state.struc_detection:
+    trusted = st.session_state.struc_detection.get("trusted_markers", [])
+    writable = [marker for marker in trusted if is_entity_writable(marker)]
+    non_writable = [marker for marker in trusted if not is_entity_writable(marker)]
+
+    st.markdown("### Write Safety Summary")
+    st.write({
+        "trusted_structural_markers": len(trusted),
+        "safe_writable_markers": len(writable),
+        "non_writable_block_definition_markers": len(non_writable),
+    })
+
+    if non_writable:
+        st.warning(
+            "Some labels appear to come from block definition text. These are detected for matching, "
+            "but not edited while safe-writable mode is enabled."
+        )
+
+
+# =========================================================
+# APPLY SYNC
+# =========================================================
+st.markdown("### Apply Sync")
+
+if st.session_state.apply_ready:
+    if st.button("✍️ Apply Label Sync", type="primary"):
+        try:
+            changed = 0
+            skipped_non_writable = 0
+            blocked_regions = []
+
+            for region in st.session_state.matched_regions:
+                source_num = region["source_numeric_groups"]
+                target_num = region["numeric_groups"]
+                source_alpha = region["source_alpha_groups"]
+                target_alpha = region["alpha_groups"]
+
+                numeric_match = len(source_num) == len(target_num)
+                alpha_match = len(source_alpha) == len(target_alpha)
+
+                if not allow_partial_axis_sync and (not numeric_match or not alpha_match):
+                    blocked_regions.append({
+                        "region": region["name"],
+                        "source_reference": region.get("source_reference", ""),
+                        "source_numeric_axes": len(source_num),
+                        "target_numeric_axes": len(target_num),
+                        "source_alphabetic_axes": len(source_alpha),
+                        "target_alphabetic_axes": len(target_alpha),
+                    })
+                    continue
+
+                if numeric_match or allow_partial_axis_sync:
+                    c1, s1 = apply_axis_group_labels(
+                        source_num,
+                        target_num,
+                        writable_only=writable_only,
+                    )
+                else:
+                    c1, s1 = 0, 0
+
+                if alpha_match or allow_partial_axis_sync:
+                    c2, s2 = apply_axis_group_labels(
+                        source_alpha,
+                        target_alpha,
+                        writable_only=writable_only,
+                    )
+                else:
+                    c2, s2 = 0, 0
+
+                changed += c1 + c2
+                skipped_non_writable += s1 + s2
+
+            st.session_state.labels_changed_count = changed
+            st.session_state.skipped_non_writable_count = skipped_non_writable
+            st.session_state.blocked_regions = blocked_regions
+
+            if changed > 0:
+                st.session_state.last_apply_message = (
+                    f"Label sync complete. {changed} trusted structural marker text entities updated "
+                    f"across {len(st.session_state.matched_regions) - len(blocked_regions)} applied region(s)."
+                )
+                st.success(st.session_state.last_apply_message)
+            else:
+                st.info("No text changes were needed, or detected labels already match.")
+
+            if blocked_regions:
+                st.warning(
+                    f"{len(blocked_regions)} region(s) were blocked because their axis counts do not match. "
+                    "Enable partial sync only after manual review."
+                )
+                st.dataframe(blocked_regions, use_container_width=True)
+
+            if skipped_non_writable > 0:
+                st.warning(
+                    f"{skipped_non_writable} marker text entities were skipped because they are not safely writable. "
+                    "If labels are inside block definitions, convert them to attributes or test on a copied DXF."
+                )
+
+        except Exception as error:
+            st.error(f"Failed to apply label sync: {error}")
+
+else:
+    st.info("Prepare Label Sync first.")
+
+
+# =========================================================
+# DOWNLOAD
+# =========================================================
+st.markdown("### Download")
+
+if st.session_state.struc_doc is not None:
+    dxf_bytes = write_doc_to_temp_bytes(st.session_state.struc_doc)
+
+    file_label = (
+        "📥 Download Relabeled Structural DXF"
+        if st.session_state.labels_changed_count > 0
+        else "📥 Download Current Structural DXF"
+    )
+
+    st.download_button(
+        file_label,
+        data=dxf_bytes,
+        file_name=f"RELABELED_{st.session_state.struc_name}",
+        mime="application/dxf",
+    )
+
+
+# =========================================================
+# DETECTION DETAILS
+# =========================================================
+with st.expander("Detection Details"):
+    arch_det = st.session_state.arch_detection or {}
+    struc_det = st.session_state.struc_detection or {}
+    arch_groups = st.session_state.arch_axis_groups or {}
+
+    arch_modes = {}
+    for marker in arch_det.get("trusted_markers", []):
+        mode = marker.get("detection_mode", "unknown")
+        arch_modes[mode] = arch_modes.get(mode, 0) + 1
+
+    struc_modes = {}
+    for marker in struc_det.get("trusted_markers", []):
+        mode = marker.get("detection_mode", "unknown")
+        struc_modes[mode] = struc_modes.get(mode, 0) + 1
+
+    st.write("#### Architectural Detection")
+    st.write({
+        "texts_on_selected_text_layer": len(arch_det.get("texts", [])),
+        "circles_or_block_markers_on_selected_circle_layer": len(arch_det.get("circles", [])),
+        "axis_lines_on_selected_line_layer": len(arch_det.get("lines", [])),
+        "trusted_markers_found": len(arch_det.get("trusted_markers", [])),
+        "rejected_markers": len(arch_det.get("rejected_markers", [])),
+        "vertical_axes_grouped": len(arch_groups.get("vertical", [])),
+        "horizontal_axes_grouped": len(arch_groups.get("horizontal", [])),
+        "detection_modes": arch_modes,
+    })
+
+    st.write("#### Structural Detection")
+    st.write({
+        "texts_on_selected_text_layer": len(struc_det.get("texts", [])),
+        "circles_or_block_markers_on_selected_circle_layer": len(struc_det.get("circles", [])),
+        "axis_lines_on_selected_line_layer": len(struc_det.get("lines", [])),
+        "trusted_markers_found": len(struc_det.get("trusted_markers", [])),
+        "rejected_markers": len(struc_det.get("rejected_markers", [])),
+        "structural_regions_found": len(st.session_state.structural_regions),
+        "matched_regions": len(st.session_state.matched_regions),
+        "detection_modes": struc_modes,
+    })
+
+    if st.session_state.family_summary:
+        st.write("#### Architectural Family Inference")
+        st.write(st.session_state.family_summary)
+
+    if st.session_state.structural_regions:
+        st.write("#### Structural Region Summary")
+
+        rows = []
+
+        for region in st.session_state.structural_regions:
+            writable_count = len([
+                marker for marker in region["markers"]
+                if is_entity_writable(marker)
+            ])
+
+            rows.append({
+                "region": region["name"],
+                "trusted_markers": len(region["markers"]),
+                "writable_markers": writable_count,
+                "vertical_axes": len(region["axis_groups"].get("vertical", [])),
+                "horizontal_axes": len(region["axis_groups"].get("horizontal", [])),
+                "bbox_width": round(region["bbox"]["width"], 3),
+                "bbox_height": round(region["bbox"]["height"], 3),
+                "grid_bucket": region["grid_bucket"],
+            })
+
+        st.dataframe(rows, use_container_width=True)
+
+    if st.session_state.matched_regions:
+        st.write("#### Matched Region Sync Summary")
+
+        matched_rows = []
+
+        for region in st.session_state.matched_regions:
+            matched_rows.append({
+                "region": region.get("name"),
+                "match_mode": region.get("match_mode"),
+                "source_reference": region.get("source_reference"),
+                "source_numeric_axes": len(region.get("source_numeric_groups", [])),
+                "target_numeric_axes": len(region.get("numeric_groups", [])),
+                "source_alphabetic_axes": len(region.get("source_alpha_groups", [])),
+                "target_alphabetic_axes": len(region.get("alpha_groups", [])),
+                "target_markers": region.get("marker_count"),
+            })
+
+        st.dataframe(matched_rows, use_container_width=True)
+
+    if struc_det.get("rejected_markers"):
+        st.write("#### Rejected Structural Markers")
+        st.dataframe(struc_det["rejected_markers"], use_container_width=True)
+
+    if struc_det.get("trusted_markers"):
+        st.write("#### Sample Trusted Structural Markers")
+
+        sample_rows = []
+
+        for marker in struc_det.get("trusted_markers", [])[:150]:
+            sample_rows.append({
+                "label": marker.get("label"),
+                "orientation": marker.get("orientation"),
+                "coord": marker.get("coord"),
+                "text_source": marker.get("text_source"),
+                "detection_mode": marker.get("detection_mode"),
+                "circle_x": round(marker.get("circle_center", (0, 0))[0], 3),
+                "circle_y": round(marker.get("circle_center", (0, 0))[1], 3),
+            })
+
+        st.dataframe(sample_rows, use_container_width=True)
+
+    st.caption(
+        "Hybrid marker authentication: circle + valid grid text + attached gridline OR closest gridline. "
+        "Multiple structural plans are segmented by empty space, then synced by region."
+    )
