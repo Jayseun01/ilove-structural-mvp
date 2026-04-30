@@ -7,6 +7,19 @@ import re
 
 st.set_page_config(page_title="iLoveStructural", page_icon="🏗️", layout="wide")
 
+# =========================================================
+# SIDEBAR / HEADER
+# =========================================================
+st.sidebar.title("Navigation")
+tool_choice = st.sidebar.radio(
+    "Select a Tool:",
+    ["1. DXF Smart Purger", "2. Grid Label Sync"]
+)
+st.sidebar.markdown("---")
+st.sidebar.info("Developed by James Oluwaseun Emmanuel")
+
+st.title("🏗️ iLoveStructural")
+
 
 # =========================================================
 # FILE HELPERS
@@ -53,16 +66,12 @@ def euclidean(p1, p2):
     return math.dist((p1[0], p1[1]), (p2[0], p2[1]))
 
 
-def get_layer_names(doc):
-    return sorted([layer.dxf.name for layer in doc.layers])
+def is_vertical(x1, y1, x2, y2, tol=2.0):
+    return abs(x1 - x2) <= tol and abs(y2 - y1) > tol
 
 
-def pick_default_layer(layers, candidates):
-    upper_map = {layer.upper(): layer for layer in layers}
-    for c in candidates:
-        if c.upper() in upper_map:
-            return upper_map[c.upper()]
-    return layers[0] if layers else None
+def is_horizontal(x1, y1, x2, y2, tol=2.0):
+    return abs(y1 - y2) <= tol and abs(x2 - x1) > tol
 
 
 def probable_grid_label(text):
@@ -84,12 +93,22 @@ def is_alpha_label(text):
     return bool(re.match(r"^[A-Z]{1,3}'?$", clean_text(text)))
 
 
-def is_vertical(x1, y1, x2, y2, tol=2.0):
-    return abs(x1 - x2) <= tol and abs(y2 - y1) > tol
+def get_layer_names(doc):
+    return sorted([layer.dxf.name for layer in doc.layers])
 
 
-def is_horizontal(x1, y1, x2, y2, tol=2.0):
-    return abs(y1 - y2) <= tol and abs(x2 - x1) > tol
+def pick_default_layer(layers, candidates):
+    upper_map = {layer.upper(): layer for layer in layers}
+    for c in candidates:
+        if c.upper() in upper_map:
+            return upper_map[c.upper()]
+    return layers[0] if layers else None
+
+
+def ratio_safe(a, b):
+    if b == 0:
+        return 0.0
+    return float(a) / float(b)
 
 
 # =========================================================
@@ -113,7 +132,7 @@ def purge_layers_from_modelspace(doc, layers_to_keep):
 
 
 # =========================================================
-# BLOCK / TEXT HELPERS
+# BLOCK / GEOMETRY HELPERS
 # =========================================================
 def get_insert_transform(insert_entity):
     try:
@@ -121,9 +140,9 @@ def get_insert_transform(insert_entity):
         sx = float(getattr(insert_entity.dxf, "xscale", 1.0) or 1.0)
         sy = float(getattr(insert_entity.dxf, "yscale", 1.0) or 1.0)
         rot = float(getattr(insert_entity.dxf, "rotation", 0.0) or 0.0)
-        return float(ins.x), float(ins.y), sx, sy, rot
+        return (float(ins.x), float(ins.y), sx, sy, rot)
     except Exception:
-        return 0.0, 0.0, 1.0, 1.0, 0.0
+        return (0.0, 0.0, 1.0, 1.0, 0.0)
 
 
 def transform_block_point(local_point, insert_entity):
@@ -137,7 +156,7 @@ def transform_block_point(local_point, insert_entity):
     xr = x * math.cos(ang) - y * math.sin(ang)
     yr = x * math.sin(ang) + y * math.cos(ang)
 
-    return xr + ix, yr + iy
+    return (xr + ix, yr + iy)
 
 
 def transform_block_radius(local_radius, insert_entity):
@@ -152,30 +171,27 @@ def get_text_point(entity):
             try:
                 ap = entity.dxf.align_point
                 if ap is not None and (float(ap.x) != 0.0 or float(ap.y) != 0.0):
-                    return float(ap.x), float(ap.y)
+                    return (float(ap.x), float(ap.y))
             except Exception:
                 pass
-
             ins = entity.dxf.insert
-            return float(ins.x), float(ins.y)
+            return (float(ins.x), float(ins.y))
 
-        if entity.dxftype() in ("MTEXT", "ATTRIB"):
+        elif entity.dxftype() in ("MTEXT", "ATTRIB"):
             ins = entity.dxf.insert
-            return float(ins.x), float(ins.y)
-
+            return (float(ins.x), float(ins.y))
     except Exception:
         pass
-
-    return 0.0, 0.0
+    return (0.0, 0.0)
 
 
 def get_text_value(entity):
     try:
         if entity.dxftype() == "TEXT":
             return clean_text(entity.dxf.text)
-        if entity.dxftype() == "MTEXT":
+        elif entity.dxftype() == "MTEXT":
             return clean_text(entity.text)
-        if entity.dxftype() == "ATTRIB":
+        elif entity.dxftype() == "ATTRIB":
             return clean_text(entity.dxf.text)
     except Exception:
         pass
@@ -199,7 +215,7 @@ def is_entity_writable(marker):
 
 
 # =========================================================
-# EXTRACTION
+# TEXT / CIRCLE / LINE EXTRACTION
 # =========================================================
 def extract_texts(doc, layer_name):
     texts = []
@@ -253,7 +269,6 @@ def extract_texts(doc, layer_name):
                                 })
                 except Exception:
                     pass
-
         except Exception:
             continue
 
@@ -288,7 +303,6 @@ def extract_circles(doc, layer_name):
                                 c = be.dxf.center
                                 world_center = transform_block_point((float(c.x), float(c.y)), e)
                                 world_radius = transform_block_radius(float(be.dxf.radius), e)
-
                                 circles.append({
                                     "entity": e,
                                     "nested_entity": be,
@@ -300,7 +314,6 @@ def extract_circles(doc, layer_name):
                                 })
                 except Exception:
                     pass
-
         except Exception:
             continue
 
@@ -355,7 +368,6 @@ def deduplicate_axis_lines(lines, tol=5.0):
             item["orientation"] == current[-1]["orientation"]
             and abs(item["coord"] - current[-1]["coord"]) <= tol
         )
-
         if same_band:
             current.append(item)
         else:
@@ -401,52 +413,70 @@ def extract_axis_lines(doc, layer_name, min_length=1000.0):
 
 
 # =========================================================
-# IMPROVED TRUSTED MARKER DETECTION
-# Rule:
-#   circle + valid text inside circle + closest grid pattern/line
-# Not strict attachment.
-# Not hardcoded alphabet/number orientation.
+# HYBRID PATTERN AUTHENTICATION
+# circle + text + (attached line OR closest grid line)
 # =========================================================
 def text_inside_circle(text_point, circle_center, circle_radius, extra_gap=180.0):
-    return euclidean(text_point, circle_center) <= circle_radius + extra_gap
+    d = euclidean(text_point, circle_center)
+    return d <= (circle_radius + extra_gap)
 
 
-def make_virtual_axis(circle_center, orientation, coord, line_layer):
+def point_to_segment_distance(px, py, x1, y1, x2, y2):
+    dx = x2 - x1
+    dy = y2 - y1
+
+    if dx == 0 and dy == 0:
+        return math.dist((px, py), (x1, y1))
+
+    t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
+    t = max(0.0, min(1.0, t))
+
+    proj_x = x1 + t * dx
+    proj_y = y1 + t * dy
+
+    return math.dist((px, py), (proj_x, proj_y))
+
+
+def point_projects_on_segment(px, py, x1, y1, x2, y2, pad=0.0):
+    min_x, max_x = min(x1, x2) - pad, max(x1, x2) + pad
+    min_y, max_y = min(y1, y2) - pad, max(y1, y2) + pad
+    return min_x <= px <= max_x and min_y <= py <= max_y
+
+
+def line_attached_to_circle(line, circle_center, circle_radius, attach_gap=180.0):
     cx, cy = circle_center
+    x1, y1 = line["start"]
+    x2, y2 = line["end"]
 
-    if orientation == "vertical":
-        return {
-            "entity": None,
-            "orientation": "vertical",
-            "coord": round(float(coord), 3),
-            "start": (float(coord), float(cy - 1000.0)),
-            "end": (float(coord), float(cy + 1000.0)),
-            "length": 1000.0,
-            "layer": line_layer,
-            "virtual": True,
-        }
+    if line["orientation"] == "vertical":
+        if abs(line["coord"] - cx) > attach_gap:
+            return False
+        if not point_projects_on_segment(cx, cy, x1, y1, x2, y2, pad=circle_radius + attach_gap):
+            return False
 
-    return {
-        "entity": None,
-        "orientation": "horizontal",
-        "coord": round(float(coord), 3),
-        "start": (float(cx - 1000.0), float(coord)),
-        "end": (float(cx + 1000.0), float(coord)),
-        "length": 1000.0,
-        "layer": line_layer,
-        "virtual": True,
-    }
+    elif line["orientation"] == "horizontal":
+        if abs(line["coord"] - cy) > attach_gap:
+            return False
+        if not point_projects_on_segment(cx, cy, x1, y1, x2, y2, pad=circle_radius + attach_gap):
+            return False
+
+    else:
+        return False
+
+    d_seg = point_to_segment_distance(cx, cy, x1, y1, x2, y2)
+    d1 = abs(euclidean((x1, y1), circle_center) - circle_radius)
+    d2 = abs(euclidean((x2, y2), circle_center) - circle_radius)
+
+    return min(abs(d_seg), d1, d2) <= attach_gap
 
 
-def nearest_grid_line_to_bubble(circle_center, lines, attach_gap):
+def closest_grid_line_to_circle(circle_center, lines, attach_gap):
     """
-    Finds closest vertical/horizontal grid line pattern to a bubble.
+    Finds closest grid line pattern to the bubble.
 
-    This does not require actual attachment. It scores:
-        perpendicular distance + small penalty if bubble is outside line span.
-
-    Returns:
-        best_line, score, perpendicular_distance
+    It does not require physical touching.
+    It scores:
+        perpendicular distance + small outside-span penalty
     """
     if not lines:
         return None, None, None
@@ -463,7 +493,7 @@ def nearest_grid_line_to_bubble(circle_center, lines, attach_gap):
             span_min = min(y1, y2)
             span_max = max(y1, y2)
 
-            if span_min - attach_gap * 6 <= cy <= span_max + attach_gap * 6:
+            if span_min - attach_gap * 8 <= cy <= span_max + attach_gap * 8:
                 span_penalty = 0.0
             else:
                 span_penalty = min(abs(cy - span_min), abs(cy - span_max))
@@ -473,7 +503,7 @@ def nearest_grid_line_to_bubble(circle_center, lines, attach_gap):
             span_min = min(x1, x2)
             span_max = max(x1, x2)
 
-            if span_min - attach_gap * 6 <= cx <= span_max + attach_gap * 6:
+            if span_min - attach_gap * 8 <= cx <= span_max + attach_gap * 8:
                 span_penalty = 0.0
             else:
                 span_penalty = min(abs(cx - span_min), abs(cx - span_max))
@@ -492,9 +522,9 @@ def nearest_grid_line_to_bubble(circle_center, lines, attach_gap):
 
 def infer_orientation_from_same_label(bubble, bubbles, text_gap):
     """
-    Dynamic fallback:
-    If same label appears above/below, likely vertical axis.
-    If same label appears left/right, likely horizontal axis.
+    Dynamic backup:
+    If same label appears above/below, likely vertical.
+    If same label appears left/right, likely horizontal.
     """
     label = bubble["label"]
     cx, cy = bubble["circle_center"]
@@ -533,15 +563,52 @@ def infer_orientation_from_same_label(bubble, bubbles, text_gap):
         vertical_candidates.sort(key=lambda x: (x[0], -x[1]))
         horizontal_candidates.sort(key=lambda x: (x[0], -x[1]))
 
-        # Prefer smaller alignment error.
         if vertical_candidates[0][0] <= horizontal_candidates[0][0]:
             return "vertical", round(float(vertical_candidates[0][2]), 3)
-        return "horizontal", round(float(horizontal_candidates[0][2]), 3)
+        else:
+            return "horizontal", round(float(horizontal_candidates[0][2]), 3)
 
     return None, None
 
 
+def make_virtual_axis(circle_center, orientation, coord, line_layer):
+    cx, cy = circle_center
+
+    if orientation == "vertical":
+        return {
+            "entity": None,
+            "orientation": "vertical",
+            "coord": round(float(coord), 3),
+            "start": (float(coord), float(cy - 1000.0)),
+            "end": (float(coord), float(cy + 1000.0)),
+            "length": 1000.0,
+            "layer": line_layer,
+            "virtual": True,
+        }
+
+    return {
+        "entity": None,
+        "orientation": "horizontal",
+        "coord": round(float(coord), 3),
+        "start": (float(cx - 1000.0), float(coord)),
+        "end": (float(cx + 1000.0), float(coord)),
+        "length": 1000.0,
+        "layer": line_layer,
+        "virtual": True,
+    }
+
+
 def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_length, text_gap, attach_gap):
+    """
+    Hybrid detector.
+
+    Marker is trusted when:
+        1. circle has exactly one valid grid text inside
+        2. AND either:
+            a. attached grid line is found
+            b. closest grid line is found within relaxed distance
+            c. same-label alignment can infer the axis
+    """
     texts = extract_texts(doc, text_layer)
     circles = extract_circles(doc, circle_layer)
     lines = extract_axis_lines(doc, line_layer, min_length=min_grid_length)
@@ -549,26 +616,22 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
     bubbles = []
     rejected = []
 
-    # Step 1: circle + one valid text inside circle.
+    # Step 1: circle + one valid text inside
     for c in circles:
         circle_center = c["center"]
         circle_radius = c["radius"]
 
         candidate_texts = []
-
         for t in texts:
             if not probable_grid_label(t["text"]):
                 continue
-
             if text_inside_circle(t["point"], circle_center, circle_radius, extra_gap=text_gap):
                 candidate_texts.append(t)
 
         if len(candidate_texts) == 1:
             t = candidate_texts[0]
-            label = clean_text(t["text"])
-
             bubbles.append({
-                "label": label,
+                "label": clean_text(t["text"]),
                 "text_entity": t["entity"],
                 "text_point": t["point"],
                 "text_source": t.get("source", "unknown"),
@@ -583,44 +646,57 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
                 "circle_center": circle_center,
                 "circle_radius": circle_radius,
                 "text_matches": len(candidate_texts),
+                "line_matches": 0,
                 "candidate_texts": [t["text"] for t in candidate_texts[:10]],
+                "circle_source": c.get("source", "unknown"),
                 "reason": "No valid text in marker" if len(candidate_texts) == 0 else "Multiple texts in marker",
             })
 
     trusted_markers = []
 
-    # Step 2: for each bubble, choose closest grid pattern/line.
+    # Step 2: attached line first, closest gridline fallback
     for b in bubbles:
         circle_center = b["circle_center"]
-        cx, cy = circle_center
+        circle_radius = b["circle_radius"]
 
-        best_line, score, perp = nearest_grid_line_to_bubble(circle_center, lines, attach_gap)
+        attached_candidates = []
+        for line in lines:
+            if line_attached_to_circle(line, circle_center, circle_radius, attach_gap=attach_gap):
+                attached_candidates.append(line)
 
-        detection_mode = ""
         selected_line = None
+        detection_mode = ""
 
-        relaxed_limit = max(attach_gap * 12.0, 2500.0)
+        if attached_candidates:
+            selected_line = max(attached_candidates, key=lambda ln: ln["length"])
+            detection_mode = "attached_gridline"
 
-        if best_line is not None and perp is not None and perp <= relaxed_limit:
-            selected_line = dict(best_line)
-            detection_mode = "closest_grid_line"
         else:
-            # Fallback to same-label alignment pattern.
-            orient, coord = infer_orientation_from_same_label(b, bubbles, text_gap)
+            closest_line, score, perp = closest_grid_line_to_circle(circle_center, lines, attach_gap)
+            relaxed_limit = max(attach_gap * 12.0, 2500.0)
 
-            if orient is None:
-                # Final fallback by nearest line even if far.
-                if best_line is not None:
-                    selected_line = dict(best_line)
-                    detection_mode = "far_closest_grid_line"
-                else:
-                    orient = "vertical"
-                    coord = cx
-                    selected_line = make_virtual_axis(circle_center, orient, coord, line_layer)
-                    detection_mode = "virtual_axis"
+            if closest_line is not None and perp is not None and perp <= relaxed_limit:
+                selected_line = closest_line
+                detection_mode = "closest_gridline"
+
             else:
-                selected_line = make_virtual_axis(circle_center, orient, coord, line_layer)
-                detection_mode = "same_label_virtual_axis"
+                orient, coord = infer_orientation_from_same_label(b, bubbles, text_gap)
+
+                if orient is not None:
+                    selected_line = make_virtual_axis(circle_center, orient, coord, line_layer)
+                    detection_mode = "same_label_virtual_axis"
+
+        if selected_line is None:
+            rejected.append({
+                "circle_center": circle_center,
+                "circle_radius": circle_radius,
+                "text_matches": 1,
+                "line_matches": 0,
+                "candidate_texts": [b["label"]],
+                "circle_source": b.get("circle_source", "unknown"),
+                "reason": "Text found, but no attached/closest/same-label gridline could be inferred",
+            })
+            continue
 
         trusted_markers.append({
             "label": b["label"],
@@ -651,45 +727,12 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
 
 
 # =========================================================
-# AXIS GROUPING / FAMILY INFERENCE
+# AXIS GROUPING / FAMILY / QA / APPLY
 # =========================================================
-def resolve_axis_group(group, orientation):
-    coord = round(sum(m["coord"] for m in group) / len(group), 3)
-
-    labels = [m["label"] for m in group if clean_text(m["label"])]
-    label_counts = {}
-    for lb in labels:
-        label_counts[lb] = label_counts.get(lb, 0) + 1
-
-    if label_counts:
-        label = sorted(label_counts.items(), key=lambda x: (-x[1], x[0]))[0][0]
-    else:
-        label = ""
-
-    xs = [m["circle_center"][0] for m in group]
-    ys = [m["circle_center"][1] for m in group]
-    writable_markers = [m for m in group if is_entity_writable(m)]
-
-    return {
-        "orientation": orientation,
-        "coord": coord,
-        "label": label,
-        "markers": group,
-        "marker_count": len(group),
-        "writable_marker_count": len(writable_markers),
-        "bbox": {
-            "min_x": min(xs),
-            "max_x": max(xs),
-            "min_y": min(ys),
-            "max_y": max(ys),
-            "width": max(xs) - min(xs),
-            "height": max(ys) - min(ys),
-        },
-        "centroid": (sum(xs) / len(xs), sum(ys) / len(ys)),
-    }
-
-
 def group_markers_by_axis(markers, tol=5.0):
+    if not markers:
+        return {"vertical": [], "horizontal": []}
+
     grouped = {"vertical": [], "horizontal": []}
 
     for orientation in ["vertical", "horizontal"]:
@@ -702,7 +745,6 @@ def group_markers_by_axis(markers, tol=5.0):
             continue
 
         current = [subset[0]]
-
         for item in subset[1:]:
             if abs(item["coord"] - current[-1]["coord"]) <= tol:
                 current.append(item)
@@ -715,165 +757,82 @@ def group_markers_by_axis(markers, tol=5.0):
     return grouped
 
 
-def get_family_groups(axis_groups, family):
-    if family == "numeric":
-        checker = is_numeric_label
+def resolve_axis_group(group, orientation):
+    coord = round(sum(m["coord"] for m in group) / len(group), 3)
+
+    labels = [m["label"] for m in group if clean_text(m["label"])]
+    label_counts = {}
+    for label in labels:
+        label_counts[label] = label_counts.get(label, 0) + 1
+
+    if label_counts:
+        label = sorted(label_counts.items(), key=lambda x: (-x[1], x[0]))[0][0]
     else:
-        checker = is_alpha_label
+        label = ""
 
-    vertical = [g for g in axis_groups.get("vertical", []) if checker(g["label"])]
-    horizontal = [g for g in axis_groups.get("horizontal", []) if checker(g["label"])]
+    representative = max(group, key=lambda x: x.get("line_length", 0.0))
+    writable_markers = [m for m in group if is_entity_writable(m)]
 
-    # Use dominant orientation for that family.
-    # This avoids mixing top/bottom rows with actual axes.
-    if len(vertical) >= len(horizontal):
-        chosen = vertical
-        orientation = "vertical"
-    else:
-        chosen = horizontal
-        orientation = "horizontal"
-
-    chosen = sorted(chosen, key=lambda x: x["coord"])
-    return chosen, orientation, {"vertical": len(vertical), "horizontal": len(horizontal)}
-
-
-def get_numeric_alpha_groups(axis_groups):
-    numeric_groups, numeric_orientation, numeric_counts = get_family_groups(axis_groups, "numeric")
-    alpha_groups, alpha_orientation, alpha_counts = get_family_groups(axis_groups, "alpha")
-
-    summary = {
-        "numeric_orientation": numeric_orientation,
-        "alpha_orientation": alpha_orientation,
-        "numeric_counts": numeric_counts,
-        "alpha_counts": alpha_counts,
-    }
-
-    return numeric_groups, alpha_groups, summary
-
-
-# =========================================================
-# REGION SEGMENTATION
-# =========================================================
-def bbox_from_markers(markers):
-    xs = [m["circle_center"][0] for m in markers]
-    ys = [m["circle_center"][1] for m in markers]
+    xs = [m["circle_center"][0] for m in group]
+    ys = [m["circle_center"][1] for m in group]
 
     return {
-        "min_x": min(xs),
-        "max_x": max(xs),
-        "min_y": min(ys),
-        "max_y": max(ys),
-        "width": max(xs) - min(xs),
-        "height": max(ys) - min(ys),
+        "orientation": orientation,
+        "coord": coord,
+        "label": label,
+        "markers": group,
+        "marker_count": len(group),
+        "writable_marker_count": len(writable_markers),
+        "representative": representative,
+        "bbox": {
+            "min_x": min(xs),
+            "max_x": max(xs),
+            "min_y": min(ys),
+            "max_y": max(ys),
+            "width": max(xs) - min(xs),
+            "height": max(ys) - min(ys),
+        },
         "centroid": (sum(xs) / len(xs), sum(ys) / len(ys)),
     }
 
 
-def compute_major_gap_threshold(values):
-    if len(values) < 2:
-        return None
+def infer_arch_families(arch_groups):
+    vertical = arch_groups.get("vertical", [])
+    horizontal = arch_groups.get("horizontal", [])
 
-    vals = sorted(set(round(v, 3) for v in values))
-    if len(vals) < 2:
-        return None
+    v_num = len([g for g in vertical if is_numeric_label(g["label"])])
+    v_alpha = len([g for g in vertical if is_alpha_label(g["label"])])
+    h_num = len([g for g in horizontal if is_numeric_label(g["label"])])
+    h_alpha = len([g for g in horizontal if is_alpha_label(g["label"])])
 
-    gaps = [vals[i + 1] - vals[i] for i in range(len(vals) - 1)]
-    pos_gaps = [g for g in gaps if g > 0]
-
-    if not pos_gaps:
-        return None
-
-    typical = sorted(pos_gaps)[len(pos_gaps) // 2]
-    return max(typical * 3.0, 6000.0)
-
-
-def build_axis_value_groups(values, major_gap_threshold):
-    vals = sorted(set(round(v, 3) for v in values))
-    if not vals:
-        return []
-
-    groups = [[vals[0]]]
-
-    for v in vals[1:]:
-        if abs(v - groups[-1][-1]) > major_gap_threshold:
-            groups.append([v])
+    if v_num >= h_num and h_alpha >= v_alpha:
+        numeric_orientation = "vertical"
+        alpha_orientation = "horizontal"
+    elif h_num >= v_num and v_alpha >= h_alpha:
+        numeric_orientation = "horizontal"
+        alpha_orientation = "vertical"
+    else:
+        if (v_num - v_alpha) >= (h_num - h_alpha):
+            numeric_orientation = "vertical"
+            alpha_orientation = "horizontal"
         else:
-            groups[-1].append(v)
+            numeric_orientation = "horizontal"
+            alpha_orientation = "vertical"
 
-    return groups
+    numeric_arch = sorted(arch_groups.get(numeric_orientation, []), key=lambda x: x["coord"])
+    alpha_arch = sorted(arch_groups.get(alpha_orientation, []), key=lambda x: x["coord"])
 
-
-def assign_value_to_group(value, groups):
-    v = round(value, 3)
-    for i, grp in enumerate(groups):
-        if grp[0] <= v <= grp[-1]:
-            return i
-    return None
-
-
-def build_structural_regions_by_empty_space(trusted_markers, min_region_markers=6):
-    if not trusted_markers:
-        return [], {}
-
-    xs = [m["circle_center"][0] for m in trusted_markers]
-    ys = [m["circle_center"][1] for m in trusted_markers]
-
-    x_gap_threshold = compute_major_gap_threshold(xs) or 6000.0
-    y_gap_threshold = compute_major_gap_threshold(ys) or 6000.0
-
-    x_groups = build_axis_value_groups(xs, x_gap_threshold)
-    y_groups = build_axis_value_groups(ys, y_gap_threshold)
-
-    buckets = {}
-
-    for m in trusted_markers:
-        x_idx = assign_value_to_group(m["circle_center"][0], x_groups)
-        y_idx = assign_value_to_group(m["circle_center"][1], y_groups)
-        key = (x_idx, y_idx)
-        buckets.setdefault(key, []).append(m)
-
-    regions = []
-    n = 1
-    skipped_small = 0
-
-    for key, markers in sorted(buckets.items(), key=lambda item: (item[0][1], item[0][0])):
-        if len(markers) < min_region_markers:
-            skipped_small += 1
-            continue
-
-        axis_groups = group_markers_by_axis(markers)
-        numeric_groups, alpha_groups, fam_summary = get_numeric_alpha_groups(axis_groups)
-
-        regions.append({
-            "name": f"Region {n}",
-            "markers": markers,
-            "axis_groups": axis_groups,
-            "numeric_groups": numeric_groups,
-            "alpha_groups": alpha_groups,
-            "family_summary": fam_summary,
-            "bbox": bbox_from_markers(markers),
-            "grid_bucket": key,
-            "marker_count": len(markers),
-        })
-
-        n += 1
-
-    return regions, {
-        "x_gap_threshold": x_gap_threshold,
-        "y_gap_threshold": y_gap_threshold,
-        "x_group_count": len(x_groups),
-        "y_group_count": len(y_groups),
-        "raw_bucket_count": len(buckets),
-        "regions_kept": len(regions),
-        "small_regions_skipped": skipped_small,
-        "min_region_markers": min_region_markers,
+    return {
+        "numeric_orientation": numeric_orientation,
+        "alpha_orientation": alpha_orientation,
+        "numeric_arch": numeric_arch,
+        "alpha_arch": alpha_arch,
+        "vertical_counts": {"numeric": v_num, "alpha": v_alpha},
+        "horizontal_counts": {"numeric": h_num, "alpha": h_alpha},
     }
 
 
-# =========================================================
-# MAPPING / APPLY
-# =========================================================
-def build_axis_mapping_preview(source_axis_groups, target_axis_groups, family_name, region_name, source_name):
+def build_axis_mapping_preview(source_axis_groups, target_axis_groups, family_name, region_name="Structural", source_name="Architecture"):
     preview = []
     count = min(len(source_axis_groups), len(target_axis_groups))
 
@@ -936,25 +895,162 @@ def build_propagated_axis_groups(source_axis_groups, target_axis_groups):
 
 
 # =========================================================
-# PROPAGATION SYNC
+# STRUCTURAL PLAN SEGMENTATION
 # =========================================================
-def score_region_for_anchor(region, numeric_arch_groups, alpha_arch_groups):
-    rn = len(region["numeric_groups"])
-    ra = len(region["alpha_groups"])
+def bbox_from_markers(markers):
+    xs = [m["circle_center"][0] for m in markers]
+    ys = [m["circle_center"][1] for m in markers]
+
+    return {
+        "min_x": min(xs),
+        "max_x": max(xs),
+        "min_y": min(ys),
+        "max_y": max(ys),
+        "width": max(xs) - min(xs),
+        "height": max(ys) - min(ys),
+        "centroid": (sum(xs) / len(xs), sum(ys) / len(ys)),
+    }
+
+
+def compute_major_gap_threshold(values):
+    if len(values) < 2:
+        return None
+
+    vals = sorted(set(round(v, 3) for v in values))
+    if len(vals) < 2:
+        return None
+
+    gaps = [vals[i + 1] - vals[i] for i in range(len(vals) - 1)]
+    pos_gaps = [g for g in gaps if g > 0]
+
+    if not pos_gaps:
+        return None
+
+    typical = sorted(pos_gaps)[len(pos_gaps) // 2]
+    return max(typical * 3.0, 6000.0)
+
+
+def build_axis_value_groups(values, major_gap_threshold):
+    vals = sorted(set(round(v, 3) for v in values))
+    if not vals:
+        return []
+
+    groups = [[vals[0]]]
+
+    for v in vals[1:]:
+        if abs(v - groups[-1][-1]) > major_gap_threshold:
+            groups.append([v])
+        else:
+            groups[-1].append(v)
+
+    return groups
+
+
+def assign_value_to_group(value, groups):
+    v = round(value, 3)
+
+    for i, grp in enumerate(groups):
+        if grp[0] <= v <= grp[-1]:
+            return i
+
+    return None
+
+
+def build_structural_regions_by_empty_space(trusted_markers, min_region_markers=6):
+    if not trusted_markers:
+        return [], {}
+
+    xs = [m["circle_center"][0] for m in trusted_markers]
+    ys = [m["circle_center"][1] for m in trusted_markers]
+
+    x_gap_threshold = compute_major_gap_threshold(xs) or 6000.0
+    y_gap_threshold = compute_major_gap_threshold(ys) or 6000.0
+
+    x_groups = build_axis_value_groups(xs, x_gap_threshold)
+    y_groups = build_axis_value_groups(ys, y_gap_threshold)
+
+    buckets = {}
+
+    for m in trusted_markers:
+        x_idx = assign_value_to_group(m["circle_center"][0], x_groups)
+        y_idx = assign_value_to_group(m["circle_center"][1], y_groups)
+        key = (x_idx, y_idx)
+        buckets.setdefault(key, []).append(m)
+
+    regions = []
+    n = 1
+    skipped_small = 0
+
+    for key, markers in sorted(buckets.items(), key=lambda item: (item[0][1], item[0][0])):
+        if len(markers) < min_region_markers:
+            skipped_small += 1
+            continue
+
+        axis_groups = group_markers_by_axis(markers)
+        bbox = bbox_from_markers(markers)
+
+        regions.append({
+            "name": f"Region {n}",
+            "markers": markers,
+            "axis_groups": axis_groups,
+            "bbox": bbox,
+            "grid_bucket": key,
+            "marker_count": len(markers),
+        })
+        n += 1
+
+    return regions, {
+        "x_gap_threshold": x_gap_threshold,
+        "y_gap_threshold": y_gap_threshold,
+        "x_group_count": len(x_groups),
+        "y_group_count": len(y_groups),
+        "raw_bucket_count": len(buckets),
+        "regions_kept": len(regions),
+        "small_regions_skipped": skipped_small,
+        "min_region_markers": min_region_markers,
+    }
+
+
+def get_region_family_groups(region, numeric_orientation, alpha_orientation):
+    axis_groups = region["axis_groups"]
+
+    numeric_groups = sorted(
+        [g for g in axis_groups.get(numeric_orientation, []) if is_numeric_label(g["label"])],
+        key=lambda x: x["coord"]
+    )
+
+    alpha_groups = sorted(
+        [g for g in axis_groups.get(alpha_orientation, []) if is_alpha_label(g["label"])],
+        key=lambda x: x["coord"]
+    )
+
+    return numeric_groups, alpha_groups
+
+
+def score_region_for_anchor(region, numeric_arch_groups, alpha_arch_groups, numeric_orientation, alpha_orientation):
+    numeric_groups, alpha_groups = get_region_family_groups(region, numeric_orientation, alpha_orientation)
+
+    rn = len(numeric_groups)
+    ra = len(alpha_groups)
     an = len(numeric_arch_groups)
     aa = len(alpha_arch_groups)
-
-    if an == 0 and aa == 0:
-        return 0.0
 
     num_score = min(rn, an) / max(rn, an) if rn and an else 0.0
     alp_score = min(ra, aa) / max(ra, aa) if ra and aa else 0.0
     marker_score = min(1.0, region["marker_count"] / max(1, (an + aa) * 2))
 
-    return round(0.4 * num_score + 0.4 * alp_score + 0.2 * marker_score, 3)
+    total = round(0.4 * num_score + 0.4 * alp_score + 0.2 * marker_score, 3)
+
+    return total, numeric_groups, alpha_groups
 
 
-def prepare_propagator_sync(structural_regions, numeric_arch_groups, alpha_arch_groups):
+def prepare_propagator_sync(
+    structural_regions,
+    numeric_arch_groups,
+    alpha_arch_groups,
+    numeric_orientation,
+    alpha_orientation,
+):
     matched_regions = []
     mapping_preview = []
     region_match_report = []
@@ -965,19 +1061,31 @@ def prepare_propagator_sync(structural_regions, numeric_arch_groups, alpha_arch_
     scored = []
 
     for region in structural_regions:
-        score = score_region_for_anchor(region, numeric_arch_groups, alpha_arch_groups)
-        scored.append((score, region))
+        score, numeric_groups, alpha_groups = score_region_for_anchor(
+            region,
+            numeric_arch_groups,
+            alpha_arch_groups,
+            numeric_orientation,
+            alpha_orientation,
+        )
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    anchor_score, anchor_region = scored[0]
+        scored.append({
+            "score": score,
+            "region": region,
+            "numeric_groups": numeric_groups,
+            "alpha_groups": alpha_groups,
+        })
 
-    anchor_numeric = anchor_region["numeric_groups"]
-    anchor_alpha = anchor_region["alpha_groups"]
+    scored.sort(key=lambda x: x["score"], reverse=True)
+
+    anchor_item = scored[0]
+    anchor_region = anchor_item["region"]
+    anchor_numeric = anchor_item["numeric_groups"]
+    anchor_alpha = anchor_item["alpha_groups"]
 
     synced_anchor_numeric = build_propagated_axis_groups(numeric_arch_groups, anchor_numeric)
     synced_anchor_alpha = build_propagated_axis_groups(alpha_arch_groups, anchor_alpha)
 
-    # Anchor: Architecture -> Anchor
     matched_regions.append({
         "name": anchor_region["name"],
         "bbox": anchor_region["bbox"],
@@ -1009,7 +1117,10 @@ def prepare_propagator_sync(structural_regions, numeric_arch_groups, alpha_arch_
         "Architecture"
     ))
 
-    for score, region in scored:
+    for item in scored:
+        region = item["region"]
+        numeric_groups = item["numeric_groups"]
+        alpha_groups = item["alpha_groups"]
         writable_count = len([m for m in region["markers"] if is_entity_writable(m)])
 
         if region["name"] == anchor_region["name"]:
@@ -1019,24 +1130,22 @@ def prepare_propagator_sync(structural_regions, numeric_arch_groups, alpha_arch_
                 "source_reference": "Architecture",
                 "trusted_markers": region["marker_count"],
                 "writable_markers": writable_count,
-                "numeric_axes": len(region["numeric_groups"]),
-                "alphabetic_axes": len(region["alpha_groups"]),
-                "score": anchor_score,
+                "numeric_axes": len(numeric_groups),
+                "alphabetic_axes": len(alpha_groups),
+                "score": item["score"],
                 "reason": "Best structural region selected as propagator.",
                 "will_sync": True,
             })
             continue
 
-        # Less rigid propagation:
-        # If a region has at least one family, sync it.
-        usable = len(region["numeric_groups"]) > 0 or len(region["alpha_groups"]) > 0
+        usable = len(numeric_groups) > 0 or len(alpha_groups) > 0
 
         if usable:
             matched_regions.append({
                 "name": region["name"],
                 "bbox": region["bbox"],
-                "numeric_groups": region["numeric_groups"],
-                "alpha_groups": region["alpha_groups"],
+                "numeric_groups": numeric_groups,
+                "alpha_groups": alpha_groups,
                 "source_numeric_groups": synced_anchor_numeric,
                 "source_alpha_groups": synced_anchor_alpha,
                 "grid_bucket": region["grid_bucket"],
@@ -1047,7 +1156,7 @@ def prepare_propagator_sync(structural_regions, numeric_arch_groups, alpha_arch_
 
             mapping_preview.extend(build_axis_mapping_preview(
                 synced_anchor_numeric,
-                region["numeric_groups"],
+                numeric_groups,
                 "numeric",
                 region["name"],
                 anchor_region["name"]
@@ -1055,7 +1164,7 @@ def prepare_propagator_sync(structural_regions, numeric_arch_groups, alpha_arch_
 
             mapping_preview.extend(build_axis_mapping_preview(
                 synced_anchor_alpha,
-                region["alpha_groups"],
+                alpha_groups,
                 "alphabetic",
                 region["name"],
                 anchor_region["name"]
@@ -1066,7 +1175,7 @@ def prepare_propagator_sync(structural_regions, numeric_arch_groups, alpha_arch_
             will_sync = True
         else:
             classification = "rejected"
-            reason = "No usable grid axes detected in this region."
+            reason = "No usable numeric or alphabetic axis group found."
             will_sync = False
 
         region_match_report.append({
@@ -1075,31 +1184,39 @@ def prepare_propagator_sync(structural_regions, numeric_arch_groups, alpha_arch_
             "source_reference": anchor_region["name"],
             "trusted_markers": region["marker_count"],
             "writable_markers": writable_count,
-            "numeric_axes": len(region["numeric_groups"]),
-            "alphabetic_axes": len(region["alpha_groups"]),
-            "score": score,
+            "numeric_axes": len(numeric_groups),
+            "alphabetic_axes": len(alpha_groups),
+            "score": item["score"],
             "reason": reason,
             "will_sync": will_sync,
         })
 
-    return {"region": anchor_region, "score": anchor_score}, matched_regions, mapping_preview, region_match_report
+    return {"region": anchor_region, "score": anchor_item["score"]}, matched_regions, mapping_preview, region_match_report
 
 
-def prepare_direct_sync(structural_regions, numeric_arch_groups, alpha_arch_groups):
+def prepare_direct_sync(
+    structural_regions,
+    numeric_arch_groups,
+    alpha_arch_groups,
+    numeric_orientation,
+    alpha_orientation,
+):
     matched_regions = []
     mapping_preview = []
     region_match_report = []
 
     for region in structural_regions:
+        numeric_groups, alpha_groups = get_region_family_groups(region, numeric_orientation, alpha_orientation)
         writable_count = len([m for m in region["markers"] if is_entity_writable(m)])
-        usable = len(region["numeric_groups"]) > 0 or len(region["alpha_groups"]) > 0
+
+        usable = len(numeric_groups) > 0 or len(alpha_groups) > 0
 
         if usable:
             matched_regions.append({
                 "name": region["name"],
                 "bbox": region["bbox"],
-                "numeric_groups": region["numeric_groups"],
-                "alpha_groups": region["alpha_groups"],
+                "numeric_groups": numeric_groups,
+                "alpha_groups": alpha_groups,
                 "source_numeric_groups": numeric_arch_groups,
                 "source_alpha_groups": alpha_arch_groups,
                 "grid_bucket": region["grid_bucket"],
@@ -1110,7 +1227,7 @@ def prepare_direct_sync(structural_regions, numeric_arch_groups, alpha_arch_grou
 
             mapping_preview.extend(build_axis_mapping_preview(
                 numeric_arch_groups,
-                region["numeric_groups"],
+                numeric_groups,
                 "numeric",
                 region["name"],
                 "Architecture"
@@ -1118,7 +1235,7 @@ def prepare_direct_sync(structural_regions, numeric_arch_groups, alpha_arch_grou
 
             mapping_preview.extend(build_axis_mapping_preview(
                 alpha_arch_groups,
-                region["alpha_groups"],
+                alpha_groups,
                 "alphabetic",
                 region["name"],
                 "Architecture"
@@ -1140,8 +1257,8 @@ def prepare_direct_sync(structural_regions, numeric_arch_groups, alpha_arch_grou
             "source_reference": "Architecture",
             "trusted_markers": region["marker_count"],
             "writable_markers": writable_count,
-            "numeric_axes": len(region["numeric_groups"]),
-            "alphabetic_axes": len(region["alpha_groups"]),
+            "numeric_axes": len(numeric_groups),
+            "alphabetic_axes": len(alpha_groups),
             "score": score,
             "reason": reason,
             "will_sync": will_sync,
@@ -1153,29 +1270,30 @@ def prepare_direct_sync(structural_regions, numeric_arch_groups, alpha_arch_grou
 # =========================================================
 # SESSION STATE
 # =========================================================
-def init_state():
+def init_sync_state():
     defaults = {
         "docs_loaded": False,
         "arch_doc": None,
         "struc_doc": None,
         "arch_name": "",
         "struc_name": "",
-        "arch_sig": None,
-        "struc_sig": None,
         "arch_detection": {},
         "struc_detection": {},
         "arch_axis_groups": {},
-        "arch_family_summary": {},
+        "mapping_preview": [],
+        "apply_ready": False,
+        "labels_changed_count": 0,
+        "arch_sig": None,
+        "struc_sig": None,
+        "last_apply_message": "",
+        "family_summary": {},
         "numeric_arch_groups": [],
         "alpha_arch_groups": [],
         "structural_regions": [],
         "segmentation_summary": {},
         "anchor_region": None,
         "matched_regions": [],
-        "mapping_preview": [],
         "region_match_report": [],
-        "apply_ready": False,
-        "labels_changed_count": 0,
         "skipped_non_writable_count": 0,
     }
 
@@ -1184,29 +1302,30 @@ def init_state():
             st.session_state[key] = value
 
 
-def reset_state():
+def reset_sync_state():
     keys = [
         "docs_loaded",
         "arch_doc",
         "struc_doc",
         "arch_name",
         "struc_name",
-        "arch_sig",
-        "struc_sig",
         "arch_detection",
         "struc_detection",
         "arch_axis_groups",
-        "arch_family_summary",
+        "mapping_preview",
+        "apply_ready",
+        "labels_changed_count",
+        "arch_sig",
+        "struc_sig",
+        "last_apply_message",
+        "family_summary",
         "numeric_arch_groups",
         "alpha_arch_groups",
         "structural_regions",
         "segmentation_summary",
         "anchor_region",
         "matched_regions",
-        "mapping_preview",
         "region_match_report",
-        "apply_ready",
-        "labels_changed_count",
         "skipped_non_writable_count",
     ]
 
@@ -1215,67 +1334,49 @@ def reset_state():
             del st.session_state[key]
 
 
-def clear_outputs():
+def clear_sync_outputs():
     st.session_state.arch_detection = {}
     st.session_state.struc_detection = {}
     st.session_state.arch_axis_groups = {}
-    st.session_state.arch_family_summary = {}
+    st.session_state.mapping_preview = []
+    st.session_state.apply_ready = False
+    st.session_state.labels_changed_count = 0
+    st.session_state.last_apply_message = ""
+    st.session_state.family_summary = {}
     st.session_state.numeric_arch_groups = []
     st.session_state.alpha_arch_groups = []
     st.session_state.structural_regions = []
     st.session_state.segmentation_summary = {}
     st.session_state.anchor_region = None
     st.session_state.matched_regions = []
-    st.session_state.mapping_preview = []
     st.session_state.region_match_report = []
-    st.session_state.apply_ready = False
-    st.session_state.labels_changed_count = 0
     st.session_state.skipped_non_writable_count = 0
 
 
 def uploaded_file_signature(uploaded_file):
     if uploaded_file is None:
         return None
-    return uploaded_file.name, len(uploaded_file.getvalue())
+    return (uploaded_file.name, len(uploaded_file.getvalue()))
 
 
 # =========================================================
-# UI
-# =========================================================
-st.sidebar.title("Navigation")
-
-tool_choice = st.sidebar.radio(
-    "Select a Tool:",
-    ["1. DXF Smart Purger", "2. Grid Label Sync"]
-)
-
-st.sidebar.markdown("---")
-st.sidebar.info("Developed by James Oluwaseun Emmanuel")
-
-st.title("🏗️ iLoveStructural")
-
-
-# =========================================================
-# TOOL 1 UI
+# TOOL 1
 # =========================================================
 if tool_choice == "1. DXF Smart Purger":
     st.subheader("Tool 1: DXF Smart Purger")
-
     uploaded_file = st.file_uploader("Upload your .DXF file", type=["dxf"], key="purger")
 
     if uploaded_file is not None:
         tmp_path = save_uploaded_to_temp(uploaded_file)
-
         try:
             doc = ezdxf.readfile(tmp_path)
             all_layers = get_layer_names(doc)
-
             st.success(f"Successfully analyzed {uploaded_file.name}")
 
             layers_to_keep = st.multiselect(
                 "Which layers should remain?",
                 options=all_layers,
-                default=all_layers,
+                default=all_layers
             )
 
             if st.button("🔥 Purge and Prepare Download"):
@@ -1283,33 +1384,30 @@ if tool_choice == "1. DXF Smart Purger":
                 dxf_bytes = write_doc_to_temp_bytes(doc)
 
                 st.success(f"Deleted {deleted_count} modelspace entities.")
-
                 st.download_button(
                     "📥 Download Cleaned DXF",
                     data=dxf_bytes,
                     file_name=f"CLEANED_{uploaded_file.name}",
-                    mime="application/dxf",
+                    mime="application/dxf"
                 )
 
         except Exception as e:
             st.error(f"Error: {e}")
-
         finally:
             safe_remove_file(tmp_path)
 
 
 # =========================================================
-# TOOL 2 UI
+# TOOL 2
 # =========================================================
 elif tool_choice == "2. Grid Label Sync":
     st.subheader("Tool 2: Grid Label Sync")
-
     st.caption(
-        "Improved MVP: grid bubble = circle + grid text inside + closest grid pattern. "
-        "Default mode uses Architecture → Anchor Structural Plan → Other Structural Plans."
+        "Hybrid detection: circle + valid grid text + attached gridline OR closest gridline. "
+        "Supports multiple structural plans using propagator sync."
     )
 
-    init_state()
+    init_sync_state()
 
     strategy = st.radio(
         "Sync Strategy",
@@ -1321,51 +1419,36 @@ elif tool_choice == "2. Grid Label Sync":
     )
 
     c1, c2, c3 = st.columns(3)
-
     with c1:
         tolerance = st.slider("Tolerance (mm)", 0.0, 500.0, 10.0, 0.5)
-
     with c2:
         text_gap = st.slider("Text-in-Marker Gap (mm)", 20.0, 1500.0, 180.0, 10.0)
-
     with c3:
-        attach_gap = st.slider("Closest Grid Pattern Gap (mm)", 20.0, 3000.0, 180.0, 10.0)
+        attach_gap = st.slider("Attached/Closest Grid Gap (mm)", 20.0, 3000.0, 180.0, 10.0)
 
     d1, d2, d3 = st.columns(3)
-
     with d1:
-        min_grid_length = st.number_input(
-            "Minimum Grid Line Length (mm)",
-            min_value=1.0,
-            value=1000.0,
-            step=100.0
-        )
-
+        min_grid_length = st.number_input("Minimum Grid Line Length (mm)", min_value=1.0, value=1000.0, step=100.0)
     with d2:
-        min_region_markers = st.number_input(
-            "Minimum Markers Per Region",
-            min_value=1,
-            value=6,
-            step=1
-        )
-
+        min_region_markers = st.number_input("Minimum Markers Per Region", min_value=1, value=6, step=1)
     with d3:
         writable_only = st.checkbox("Write only to safe writable text entities", value=True)
 
     col_a, col_b = st.columns(2)
-
     with col_a:
-        arch_file = st.file_uploader("Reference Architectural DXF", type=["dxf"], key="arch")
-
+        arch_file = st.file_uploader("Reference (Architectural DXF)", type=["dxf"], key="arch")
     with col_b:
-        struc_file = st.file_uploader("Target Structural DXF", type=["dxf"], key="struc")
+        struc_file = st.file_uploader("Target (Structural DXF)", type=["dxf"], key="struc")
 
     current_arch_sig = uploaded_file_signature(arch_file)
     current_struc_sig = uploaded_file_signature(struc_file)
 
-    if current_arch_sig != st.session_state.arch_sig or current_struc_sig != st.session_state.struc_sig:
-        reset_state()
-        init_state()
+    if (
+        current_arch_sig != st.session_state.arch_sig
+        or current_struc_sig != st.session_state.struc_sig
+    ):
+        reset_sync_state()
+        init_sync_state()
         st.session_state.arch_sig = current_arch_sig
         st.session_state.struc_sig = current_struc_sig
 
@@ -1383,10 +1466,8 @@ elif tool_choice == "2. Grid Label Sync":
                 st.session_state.arch_name = arch_file.name
                 st.session_state.struc_name = struc_file.name
                 st.session_state.docs_loaded = True
-
             except Exception as e:
                 st.error(f"Failed to load DXF files: {e}")
-
             finally:
                 safe_remove_file(arch_tmp)
                 safe_remove_file(struc_tmp)
@@ -1406,56 +1487,49 @@ elif tool_choice == "2. Grid Label Sync":
             st.markdown("### Layer Setup")
 
             a1, a2, a3 = st.columns(3)
-
             with a1:
                 arch_line_layer = st.selectbox(
                     "Arch Grid Line Layer",
                     arch_layers,
-                    index=arch_layers.index(arch_line_default) if arch_line_default in arch_layers else 0,
+                    index=arch_layers.index(arch_line_default) if arch_line_default in arch_layers else 0
                 )
-
             with a2:
                 arch_text_layer = st.selectbox(
                     "Arch Grid Text Layer",
                     arch_layers,
-                    index=arch_layers.index(arch_text_default) if arch_text_default in arch_layers else 0,
+                    index=arch_layers.index(arch_text_default) if arch_text_default in arch_layers else 0
                 )
-
             with a3:
                 arch_circle_layer = st.selectbox(
                     "Arch Grid Circle Layer",
                     arch_layers,
-                    index=arch_layers.index(arch_circle_default) if arch_circle_default in arch_layers else 0,
+                    index=arch_layers.index(arch_circle_default) if arch_circle_default in arch_layers else 0
                 )
 
             s1, s2, s3 = st.columns(3)
-
             with s1:
                 struc_line_layer = st.selectbox(
                     "Struc Grid Line Layer",
                     struc_layers,
-                    index=struc_layers.index(struc_line_default) if struc_line_default in struc_layers else 0,
+                    index=struc_layers.index(struc_line_default) if struc_line_default in struc_layers else 0
                 )
-
             with s2:
                 struc_text_layer = st.selectbox(
                     "Struc Grid Text Layer",
                     struc_layers,
-                    index=struc_layers.index(struc_text_default) if struc_text_default in struc_layers else 0,
+                    index=struc_layers.index(struc_text_default) if struc_text_default in struc_layers else 0
                 )
-
             with s3:
                 struc_circle_layer = st.selectbox(
                     "Struc Grid Circle Layer",
                     struc_layers,
-                    index=struc_layers.index(struc_circle_default) if struc_circle_default in struc_layers else 0,
+                    index=struc_layers.index(struc_circle_default) if struc_circle_default in struc_layers else 0
                 )
 
             b1, b2 = st.columns(2)
-
             with b1:
                 if st.button("🔎 Prepare Label Sync"):
-                    clear_outputs()
+                    clear_sync_outputs()
 
                     try:
                         arch_detection = build_trusted_markers(
@@ -1482,12 +1556,26 @@ elif tool_choice == "2. Grid Label Sync":
                         st.session_state.struc_detection = struc_detection
 
                         arch_axis_groups = group_markers_by_axis(arch_detection["trusted_markers"])
-                        numeric_arch_groups, alpha_arch_groups, arch_family_summary = get_numeric_alpha_groups(arch_axis_groups)
-
                         st.session_state.arch_axis_groups = arch_axis_groups
+
+                        fam = infer_arch_families(arch_axis_groups)
+                        st.session_state.family_summary = fam
+
+                        numeric_orientation = fam["numeric_orientation"]
+                        alpha_orientation = fam["alpha_orientation"]
+
+                        numeric_arch_groups = sorted(
+                            arch_axis_groups.get(numeric_orientation, []),
+                            key=lambda x: x["coord"]
+                        )
+
+                        alpha_arch_groups = sorted(
+                            arch_axis_groups.get(alpha_orientation, []),
+                            key=lambda x: x["coord"]
+                        )
+
                         st.session_state.numeric_arch_groups = numeric_arch_groups
                         st.session_state.alpha_arch_groups = alpha_arch_groups
-                        st.session_state.arch_family_summary = arch_family_summary
 
                         structural_regions, segmentation_summary = build_structural_regions_by_empty_space(
                             struc_detection["trusted_markers"],
@@ -1502,12 +1590,16 @@ elif tool_choice == "2. Grid Label Sync":
                                 structural_regions,
                                 numeric_arch_groups,
                                 alpha_arch_groups,
+                                numeric_orientation,
+                                alpha_orientation,
                             )
                         else:
                             anchor_candidate, matched_regions, mapping_preview, region_match_report = prepare_propagator_sync(
                                 structural_regions,
                                 numeric_arch_groups,
                                 alpha_arch_groups,
+                                numeric_orientation,
+                                alpha_orientation,
                             )
 
                         st.session_state.anchor_region = anchor_candidate
@@ -1522,31 +1614,33 @@ elif tool_choice == "2. Grid Label Sync":
                                 f"{len(matched_regions)} region(s) are ready for sync."
                             )
                         else:
-                            st.warning("No structural regions qualified for sync. Check the report below.")
+                            st.warning("No structural regions qualified for sync. Check diagnostics below.")
 
                     except Exception as e:
                         st.error(f"Label sync preparation failed: {e}")
 
             with b2:
                 if st.button("🧹 Reset Tool 2"):
-                    reset_state()
+                    reset_sync_state()
                     st.rerun()
 
-            if st.session_state.arch_family_summary:
-                st.info(f"Reference family detection: {st.session_state.arch_family_summary}")
+            if st.session_state.family_summary:
+                fam = st.session_state.family_summary
+                st.info(
+                    f"Reference family detection: Numeric family = {fam['numeric_orientation']} axes, "
+                    f"Alphabetic family = {fam['alpha_orientation']} axes. "
+                    f"Vertical counts = {fam['vertical_counts']}, "
+                    f"Horizontal counts = {fam['horizontal_counts']}."
+                )
 
             if st.session_state.anchor_region is not None:
                 st.markdown("### Propagator / Anchor Region")
-
                 try:
                     anchor_region = st.session_state.anchor_region["region"]
-
                     st.write({
                         "anchor_region": anchor_region["name"],
                         "score": st.session_state.anchor_region["score"],
                         "trusted_markers": len(anchor_region["markers"]),
-                        "numeric_axes": len(anchor_region["numeric_groups"]),
-                        "alphabetic_axes": len(anchor_region["alpha_groups"]),
                         "reason": "This structural region is synced from Architecture first, then used as the propagator.",
                     })
                 except Exception:
@@ -1569,7 +1663,6 @@ elif tool_choice == "2. Grid Label Sync":
                 st.info("No sync preview yet.")
 
             st.markdown("### Apply Sync")
-
             if st.session_state.apply_ready:
                 if st.button("✍️ Apply Label Sync"):
                     try:
@@ -1596,17 +1689,20 @@ elif tool_choice == "2. Grid Label Sync":
                         st.session_state.skipped_non_writable_count = skipped_non_writable
 
                         if changed > 0:
-                            st.success(
+                            st.session_state.last_apply_message = (
                                 f"Label sync complete. {changed} trusted structural marker text entities updated "
                                 f"across {len(st.session_state.matched_regions)} matched region(s)."
                             )
+                            st.success(st.session_state.last_apply_message)
                         else:
-                            st.info("No text changes were needed, or the detected labels already match.")
+                            st.info(
+                                "No text changes were needed, or the detected labels already match."
+                            )
 
                         if skipped_non_writable > 0:
                             st.warning(
-                                f"{skipped_non_writable} text entities were skipped because they are not safely writable. "
-                                f"If labels are inside blocks, test with writable-only turned OFF."
+                                f"{skipped_non_writable} marker text entities were skipped because they are not safely writable. "
+                                f"If your labels are inside blocks, test again with writable-only turned OFF."
                             )
 
                     except Exception as e:
@@ -1615,46 +1711,43 @@ elif tool_choice == "2. Grid Label Sync":
                 st.info("Prepare Label Sync first.")
 
             st.markdown("### Download")
-
             if st.session_state.struc_doc is not None:
                 dxf_bytes = write_doc_to_temp_bytes(st.session_state.struc_doc)
-
                 st.download_button(
                     "📥 Download Relabeled Structural DXF",
                     data=dxf_bytes,
                     file_name=f"RELABELED_{st.session_state.struc_name}",
-                    mime="application/dxf",
+                    mime="application/dxf"
                 )
 
-            with st.expander("Detection Details"):
+            with st.expander("Detection details"):
                 arch_det = st.session_state.arch_detection or {}
                 struc_det = st.session_state.struc_detection or {}
-
-                st.write("#### Architectural Detection")
+                arch_groups = st.session_state.arch_axis_groups or {}
 
                 arch_modes = {}
                 for m in arch_det.get("trusted_markers", []):
                     mode = m.get("detection_mode", "unknown")
                     arch_modes[mode] = arch_modes.get(mode, 0) + 1
 
+                struc_modes = {}
+                for m in struc_det.get("trusted_markers", []):
+                    mode = m.get("detection_mode", "unknown")
+                    struc_modes[mode] = struc_modes.get(mode, 0) + 1
+
+                st.write("#### Architectural Detection")
                 st.write({
                     "texts_on_selected_text_layer": len(arch_det.get("texts", [])),
                     "circles_or_block_markers_on_selected_circle_layer": len(arch_det.get("circles", [])),
                     "axis_lines_on_selected_line_layer": len(arch_det.get("lines", [])),
                     "trusted_markers_found": len(arch_det.get("trusted_markers", [])),
                     "rejected_markers": len(arch_det.get("rejected_markers", [])),
+                    "vertical_axes_grouped": len(arch_groups.get("vertical", [])),
+                    "horizontal_axes_grouped": len(arch_groups.get("horizontal", [])),
                     "detection_modes": arch_modes,
-                    "numeric_arch_axes": len(st.session_state.numeric_arch_groups),
-                    "alphabetic_arch_axes": len(st.session_state.alpha_arch_groups),
                 })
 
                 st.write("#### Structural Detection")
-
-                struc_modes = {}
-                for m in struc_det.get("trusted_markers", []):
-                    mode = m.get("detection_mode", "unknown")
-                    struc_modes[mode] = struc_modes.get(mode, 0) + 1
-
                 st.write({
                     "texts_on_selected_text_layer": len(struc_det.get("texts", [])),
                     "circles_or_block_markers_on_selected_circle_layer": len(struc_det.get("circles", [])),
@@ -1666,23 +1759,22 @@ elif tool_choice == "2. Grid Label Sync":
                     "detection_modes": struc_modes,
                 })
 
+                if st.session_state.family_summary:
+                    st.write("#### Architectural Family Inference")
+                    st.write(st.session_state.family_summary)
+
                 if st.session_state.structural_regions:
                     st.write("#### Structural Region Summary")
 
                     rows = []
-
                     for r in st.session_state.structural_regions:
                         writable_count = len([m for m in r["markers"] if is_entity_writable(m)])
-
                         rows.append({
                             "region": r["name"],
                             "trusted_markers": len(r["markers"]),
                             "writable_markers": writable_count,
-                            "numeric_axes": len(r.get("numeric_groups", [])),
-                            "alphabetic_axes": len(r.get("alpha_groups", [])),
-                            "vertical_axes_total": len(r["axis_groups"].get("vertical", [])),
-                            "horizontal_axes_total": len(r["axis_groups"].get("horizontal", [])),
-                            "family_summary": r.get("family_summary", {}),
+                            "vertical_axes": len(r["axis_groups"].get("vertical", [])),
+                            "horizontal_axes": len(r["axis_groups"].get("horizontal", [])),
                             "bbox_width": round(r["bbox"]["width"], 3),
                             "bbox_height": round(r["bbox"]["height"], 3),
                             "grid_bucket": r["grid_bucket"],
@@ -1696,7 +1788,6 @@ elif tool_choice == "2. Grid Label Sync":
 
                 if struc_det.get("trusted_markers"):
                     st.write("#### Sample Trusted Structural Markers")
-
                     sample_rows = []
 
                     for m in struc_det.get("trusted_markers", [])[:150]:
@@ -1713,8 +1804,8 @@ elif tool_choice == "2. Grid Label Sync":
                     st.dataframe(sample_rows, use_container_width=True)
 
                 st.caption(
-                    "Detection rule: circle + valid grid text inside + closest grid pattern/line. "
-                    "Sync rule: Architecture labels first sync to the best structural anchor, then the synced anchor propagates to other regions."
+                    "Hybrid marker authentication: circle + valid grid text + attached gridline OR closest gridline. "
+                    "Multiple structural plans are segmented by empty space, then synced by region."
                 )
 
     else:
