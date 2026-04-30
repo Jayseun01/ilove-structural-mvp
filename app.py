@@ -7,6 +7,7 @@ import re
 
 st.set_page_config(page_title="iLoveStructural", page_icon="🏗️", layout="wide")
 
+
 # =========================================================
 # BASIC HELPERS
 # =========================================================
@@ -78,12 +79,6 @@ def is_numeric_label(text):
 
 def is_alpha_label(text):
     return bool(re.match(r"^[A-Z]{1,3}'?$", clean_text(text)))
-
-
-def ratio_safe(a, b):
-    if b == 0:
-        return 0.0
-    return float(a) / float(b)
 
 
 # =========================================================
@@ -221,32 +216,39 @@ def extract_texts(doc, layer_name):
                 })
 
             elif e.dxftype() == "INSERT":
-                for att in e.attribs:
-                    texts.append({
-                        "entity": att,
-                        "text": get_text_value(att),
-                        "point": get_text_point(att),
-                        "layer": e.dxf.layer,
-                        "type": "ATTRIB",
-                        "source": "insert_attrib",
-                        "parent_insert": e,
-                    })
+                try:
+                    for att in e.attribs:
+                        texts.append({
+                            "entity": att,
+                            "text": get_text_value(att),
+                            "point": get_text_point(att),
+                            "layer": e.dxf.layer,
+                            "type": "ATTRIB",
+                            "source": "insert_attrib",
+                            "parent_insert": e,
+                        })
+                except Exception:
+                    pass
 
-                if e.dxf.name in doc.blocks:
-                    block = doc.blocks[e.dxf.name]
-                    for be in block:
-                        if be.dxftype() in ("TEXT", "MTEXT"):
-                            local_point = get_text_point(be)
-                            world_point = transform_block_point(local_point, e)
-                            texts.append({
-                                "entity": be,
-                                "text": get_text_value(be),
-                                "point": world_point,
-                                "layer": e.dxf.layer,
-                                "type": be.dxftype(),
-                                "source": "block_text",
-                                "parent_insert": e,
-                            })
+                try:
+                    if e.dxf.name in doc.blocks:
+                        block = doc.blocks[e.dxf.name]
+                        for be in block:
+                            if be.dxftype() in ("TEXT", "MTEXT"):
+                                local_point = get_text_point(be)
+                                world_point = transform_block_point(local_point, e)
+                                texts.append({
+                                    "entity": be,
+                                    "text": get_text_value(be),
+                                    "point": world_point,
+                                    "layer": e.dxf.layer,
+                                    "type": be.dxftype(),
+                                    "source": "block_text",
+                                    "parent_insert": e,
+                                })
+                except Exception:
+                    pass
+
         except Exception:
             continue
 
@@ -273,22 +275,25 @@ def extract_circles(doc, layer_name):
                 })
 
             elif e.dxftype() == "INSERT":
-                if e.dxf.name in doc.blocks:
-                    block = doc.blocks[e.dxf.name]
-                    for be in block:
-                        if be.dxftype() == "CIRCLE":
-                            c = be.dxf.center
-                            world_center = transform_block_point((float(c.x), float(c.y)), e)
-                            world_radius = transform_block_radius(float(be.dxf.radius), e)
-                            circles.append({
-                                "entity": e,
-                                "nested_entity": be,
-                                "center": world_center,
-                                "radius": world_radius,
-                                "layer": e.dxf.layer,
-                                "source": "block_circle",
-                                "parent_insert": e,
-                            })
+                try:
+                    if e.dxf.name in doc.blocks:
+                        block = doc.blocks[e.dxf.name]
+                        for be in block:
+                            if be.dxftype() == "CIRCLE":
+                                c = be.dxf.center
+                                world_center = transform_block_point((float(c.x), float(c.y)), e)
+                                world_radius = transform_block_radius(float(be.dxf.radius), e)
+                                circles.append({
+                                    "entity": e,
+                                    "nested_entity": be,
+                                    "center": world_center,
+                                    "radius": world_radius,
+                                    "layer": e.dxf.layer,
+                                    "source": "block_circle",
+                                    "parent_insert": e,
+                                })
+                except Exception:
+                    pass
         except Exception:
             continue
 
@@ -424,11 +429,9 @@ def line_attached_to_circle(line, circle_center, circle_radius, attach_gap=180.0
     if line["orientation"] == "vertical":
         if abs(line["coord"] - cx) > attach_gap:
             return False
-
     elif line["orientation"] == "horizontal":
         if abs(line["coord"] - cy) > attach_gap:
             return False
-
     else:
         return False
 
@@ -517,7 +520,6 @@ def resolve_axis_group(group, orientation):
 
     xs = [m["circle_center"][0] for m in group]
     ys = [m["circle_center"][1] for m in group]
-
     writable_markers = [m for m in group if is_entity_writable(m)]
 
     return {
@@ -594,7 +596,7 @@ def infer_arch_families(arch_groups):
 
 
 # =========================================================
-# REGION SEGMENTATION
+# STRUCTURAL REGION SEGMENTATION
 # =========================================================
 def bbox_from_markers(markers):
     xs = [m["circle_center"][0] for m in markers]
@@ -616,7 +618,6 @@ def compute_major_gap_threshold(values):
         return None
 
     vals = sorted(set(round(v, 3) for v in values))
-
     if len(vals) < 2:
         return None
 
@@ -743,12 +744,10 @@ def best_window_indices(source_groups, target_groups, spacing_tol=50.0):
         tgt_sp = axis_spacing_values_from_groups(tgt_window)
 
         check_count = min(len(src_sp), len(tgt_sp))
-
         if check_count == 0:
             return 1.0
 
         matched = 0
-
         for i in range(check_count):
             if abs(src_sp[i] - tgt_sp[i]) <= spacing_tol:
                 matched += 1
@@ -840,7 +839,6 @@ def apply_axis_group_labels_smart(source_axis_groups, target_axis_groups, writab
 
             try:
                 old = get_text_value(entity)
-
                 if old != new_label:
                     set_text_value(entity, new_label)
                     changed += 1
@@ -885,32 +883,17 @@ def get_region_family_groups(region, numeric_orientation, alpha_orientation):
     return numeric_groups, alpha_groups
 
 
-def region_has_usable_grid_match(source_numeric, source_alpha, target_numeric, target_alpha, min_axis_ratio=0.60):
-    if not source_numeric or not source_alpha:
-        return False, "Reference grid family is incomplete."
-
-    if not target_numeric or not target_alpha:
-        return False, "Target region has incomplete grid family."
-
-    numeric_ratio = min(len(source_numeric), len(target_numeric)) / max(len(source_numeric), len(target_numeric))
-    alpha_ratio = min(len(source_alpha), len(target_alpha)) / max(len(source_alpha), len(target_alpha))
-
-    if numeric_ratio >= min_axis_ratio and alpha_ratio >= min_axis_ratio:
-        return True, (
-            f"Usable grid match. Numeric ratio={round(numeric_ratio, 3)}, "
-            f"alphabetic ratio={round(alpha_ratio, 3)}."
-        )
-
-    return False, (
-        f"Rejected. Numeric ratio={round(numeric_ratio, 3)}, "
-        f"alphabetic ratio={round(alpha_ratio, 3)}."
-    )
-
-
 # =========================================================
-# SYNC STRATEGIES
+# SYNC STRATEGIES - LESS RIGID VERSION
 # =========================================================
-def prepare_direct_multi_plan_sync(structural_regions, numeric_orientation, alpha_orientation, numeric_arch_groups, alpha_arch_groups, tolerance):
+def prepare_direct_multi_plan_sync(
+    structural_regions,
+    numeric_orientation,
+    alpha_orientation,
+    numeric_arch_groups,
+    alpha_arch_groups,
+    tolerance
+):
     matched_regions = []
     mapping_preview = []
     region_match_report = []
@@ -922,17 +905,14 @@ def prepare_direct_multi_plan_sync(structural_regions, numeric_orientation, alph
             alpha_orientation,
         )
 
-        usable, reason = region_has_usable_grid_match(
-            numeric_arch_groups,
-            alpha_arch_groups,
-            numeric_struc_groups,
-            alpha_struc_groups,
-            min_axis_ratio=0.60,
-        )
-
         writable_count = len([m for m in region["markers"] if is_entity_writable(m)])
+        numeric_count = len(numeric_struc_groups)
+        alpha_count = len(alpha_struc_groups)
+        usable = numeric_count > 0 and alpha_count > 0
 
         if usable:
+            reason = "Accepted by direct sync. Region has usable numeric and alphabetic grid axes."
+
             matched_regions.append({
                 "name": region["name"],
                 "bbox": region["bbox"],
@@ -942,7 +922,7 @@ def prepare_direct_multi_plan_sync(structural_regions, numeric_orientation, alph
                 "source_alpha_groups": alpha_arch_groups,
                 "grid_bucket": region["grid_bucket"],
                 "match_reason": reason,
-                "match_mode": "direct_arch_to_region",
+                "match_mode": "direct_sync",
                 "marker_count": len(region["markers"]),
                 "source_reference": "Architecture",
             })
@@ -970,6 +950,10 @@ def prepare_direct_multi_plan_sync(structural_regions, numeric_orientation, alph
             score = 1.0
 
         else:
+            reason = (
+                f"Rejected. Numeric axes found: {numeric_count}. "
+                f"Alphabetic axes found: {alpha_count}."
+            )
             classification = "rejected"
             will_sync = False
             score = 0.0
@@ -980,8 +964,8 @@ def prepare_direct_multi_plan_sync(structural_regions, numeric_orientation, alph
             "source_reference": "Architecture",
             "trusted_markers": len(region["markers"]),
             "writable_markers": writable_count,
-            "numeric_axes": len(numeric_struc_groups),
-            "alphabetic_axes": len(alpha_struc_groups),
+            "numeric_axes": numeric_count,
+            "alphabetic_axes": alpha_count,
             "bbox_width": round(region["bbox"]["width"], 3),
             "bbox_height": round(region["bbox"]["height"], 3),
             "score": score,
@@ -992,7 +976,14 @@ def prepare_direct_multi_plan_sync(structural_regions, numeric_orientation, alph
     return None, matched_regions, mapping_preview, region_match_report
 
 
-def prepare_propagator_multi_plan_sync(structural_regions, numeric_orientation, alpha_orientation, numeric_arch_groups, alpha_arch_groups, tolerance):
+def prepare_propagator_multi_plan_sync(
+    structural_regions,
+    numeric_orientation,
+    alpha_orientation,
+    numeric_arch_groups,
+    alpha_arch_groups,
+    tolerance
+):
     matched_regions = []
     mapping_preview = []
     region_match_report = []
@@ -1000,7 +991,7 @@ def prepare_propagator_multi_plan_sync(structural_regions, numeric_orientation, 
     if not structural_regions:
         return None, matched_regions, mapping_preview, region_match_report
 
-    scored = []
+    candidates = []
 
     for region in structural_regions:
         numeric_groups, alpha_groups = get_region_family_groups(
@@ -1009,36 +1000,54 @@ def prepare_propagator_multi_plan_sync(structural_regions, numeric_orientation, 
             alpha_orientation,
         )
 
-        usable, reason = region_has_usable_grid_match(
-            numeric_arch_groups,
-            alpha_arch_groups,
-            numeric_groups,
-            alpha_groups,
-            min_axis_ratio=0.60,
-        )
+        numeric_count = len(numeric_groups)
+        alpha_count = len(alpha_groups)
+        total_axes = numeric_count + alpha_count
+        writable_count = len([m for m in region["markers"] if is_entity_writable(m)])
+        usable = numeric_count > 0 and alpha_count > 0
 
-        score = 0.0
-
-        if usable:
-            num_ratio = min(len(numeric_arch_groups), len(numeric_groups)) / max(len(numeric_arch_groups), len(numeric_groups))
-            alp_ratio = min(len(alpha_arch_groups), len(alpha_groups)) / max(len(alpha_arch_groups), len(alpha_groups))
-            score = round((num_ratio + alp_ratio) / 2.0, 3)
-
-        scored.append({
+        candidates.append({
             "region": region,
             "numeric_groups": numeric_groups,
             "alpha_groups": alpha_groups,
+            "numeric_count": numeric_count,
+            "alpha_count": alpha_count,
+            "total_axes": total_axes,
+            "writable_count": writable_count,
             "usable": usable,
-            "reason": reason,
-            "score": score,
         })
 
-    usable_candidates = [x for x in scored if x["usable"]]
+    usable_candidates = [c for c in candidates if c["usable"]]
 
-    if usable_candidates:
-        anchor_candidate = max(usable_candidates, key=lambda x: x["score"])
-    else:
-        anchor_candidate = max(scored, key=lambda x: len(x["region"]["markers"]))
+    if not usable_candidates:
+        for c in candidates:
+            region = c["region"]
+            region_match_report.append({
+                "region": region["name"],
+                "classification": "rejected",
+                "source_reference": "None",
+                "trusted_markers": len(region["markers"]),
+                "writable_markers": c["writable_count"],
+                "numeric_axes": c["numeric_count"],
+                "alphabetic_axes": c["alpha_count"],
+                "bbox_width": round(region["bbox"]["width"], 3),
+                "bbox_height": round(region["bbox"]["height"], 3),
+                "score": 0.0,
+                "reason": "Rejected. Region does not have both numeric and alphabetic grid families.",
+                "will_sync": False,
+            })
+
+        return None, matched_regions, mapping_preview, region_match_report
+
+    # Pick the most complete detected region as the first synced structural plan.
+    anchor_candidate = max(
+        usable_candidates,
+        key=lambda c: (
+            c["total_axes"],
+            len(c["region"]["markers"]),
+            c["writable_count"],
+        )
+    )
 
     anchor_region = anchor_candidate["region"]
     anchor_numeric = anchor_candidate["numeric_groups"]
@@ -1066,7 +1075,7 @@ def prepare_propagator_multi_plan_sync(structural_regions, numeric_orientation, 
         "synced_numeric_groups": synced_anchor_numeric,
         "synced_alpha_groups": synced_anchor_alpha,
         "grid_bucket": anchor_region["grid_bucket"],
-        "match_reason": "Selected as first synced structural propagator.",
+        "match_reason": "Selected as first synced structural plan / propagator.",
         "match_mode": "anchor",
         "marker_count": len(anchor_region["markers"]),
         "source_reference": "Architecture",
@@ -1090,11 +1099,10 @@ def prepare_propagator_multi_plan_sync(structural_regions, numeric_orientation, 
         spacing_tol=max(tolerance, 50.0),
     ))
 
-    for item in scored:
-        region = item["region"]
-        numeric_groups = item["numeric_groups"]
-        alpha_groups = item["alpha_groups"]
-        writable_count = len([m for m in region["markers"] if is_entity_writable(m)])
+    for c in candidates:
+        region = c["region"]
+        numeric_groups = c["numeric_groups"]
+        alpha_groups = c["alpha_groups"]
 
         if region["name"] == anchor_region["name"]:
             region_match_report.append({
@@ -1102,26 +1110,20 @@ def prepare_propagator_multi_plan_sync(structural_regions, numeric_orientation, 
                 "classification": "anchor",
                 "source_reference": "Architecture",
                 "trusted_markers": len(region["markers"]),
-                "writable_markers": writable_count,
-                "numeric_axes": len(numeric_groups),
-                "alphabetic_axes": len(alpha_groups),
+                "writable_markers": c["writable_count"],
+                "numeric_axes": c["numeric_count"],
+                "alphabetic_axes": c["alpha_count"],
                 "bbox_width": round(region["bbox"]["width"], 3),
                 "bbox_height": round(region["bbox"]["height"], 3),
-                "score": item["score"],
-                "reason": "Selected as first synced structural propagator.",
+                "score": 1.0,
+                "reason": "Selected as the first synced structural plan / propagator.",
                 "will_sync": True,
             })
             continue
 
-        usable, reason = region_has_usable_grid_match(
-            synced_anchor_numeric,
-            synced_anchor_alpha,
-            numeric_groups,
-            alpha_groups,
-            min_axis_ratio=0.60,
-        )
+        if c["usable"]:
+            reason = f"Accepted. This region will be synced from propagator {anchor_region['name']}."
 
-        if usable:
             matched_regions.append({
                 "name": region["name"],
                 "bbox": region["bbox"],
@@ -1130,8 +1132,8 @@ def prepare_propagator_multi_plan_sync(structural_regions, numeric_orientation, 
                 "source_numeric_groups": synced_anchor_numeric,
                 "source_alpha_groups": synced_anchor_alpha,
                 "grid_bucket": region["grid_bucket"],
-                "match_reason": f"Synced from propagator {anchor_region['name']}. {reason}",
-                "match_mode": "duplicate_of_anchor",
+                "match_reason": reason,
+                "match_mode": "propagated",
                 "marker_count": len(region["markers"]),
                 "source_reference": anchor_region["name"],
             })
@@ -1159,6 +1161,10 @@ def prepare_propagator_multi_plan_sync(structural_regions, numeric_orientation, 
             score = 1.0
 
         else:
+            reason = (
+                f"Rejected. Numeric axes found: {c['numeric_count']}. "
+                f"Alphabetic axes found: {c['alpha_count']}."
+            )
             classification = "rejected"
             will_sync = False
             score = 0.0
@@ -1168,9 +1174,9 @@ def prepare_propagator_multi_plan_sync(structural_regions, numeric_orientation, 
             "classification": classification,
             "source_reference": anchor_region["name"],
             "trusted_markers": len(region["markers"]),
-            "writable_markers": writable_count,
-            "numeric_axes": len(numeric_groups),
-            "alphabetic_axes": len(alpha_groups),
+            "writable_markers": c["writable_count"],
+            "numeric_axes": c["numeric_count"],
+            "alphabetic_axes": c["alpha_count"],
             "bbox_width": round(region["bbox"]["width"], 3),
             "bbox_height": round(region["bbox"]["height"], 3),
             "score": score,
@@ -1334,7 +1340,7 @@ elif tool_choice == "2. Grid Label Sync":
 
     st.caption(
         "Sync grid labels from Architectural DXF to Structural DXF. "
-        "This version supports both direct multi-plan sync and propagator chain sync."
+        "Use Option B first for multiple plans."
     )
 
     init_state()
@@ -1342,13 +1348,13 @@ elif tool_choice == "2. Grid Label Sync":
     strategy = st.radio(
         "Sync Strategy",
         [
-            "Option A - Direct Multi-Plan Sync",
             "Option B - Propagator Chain Sync",
+            "Option A - Direct Multi-Plan Sync",
         ],
         index=0,
         help=(
-            "Option A: Architecture syncs every structural plan directly. "
-            "Option B: Architecture syncs the first/best structural plan, then that plan syncs the others."
+            "Option B: Architecture syncs the first/best structural plan, then that plan syncs the others. "
+            "Option A: Architecture syncs every structural plan directly."
         ),
     )
 
@@ -1366,10 +1372,20 @@ elif tool_choice == "2. Grid Label Sync":
     d1, d2, d3 = st.columns(3)
 
     with d1:
-        min_grid_length = st.number_input("Minimum Grid Line Length (mm)", min_value=1.0, value=1000.0, step=100.0)
+        min_grid_length = st.number_input(
+            "Minimum Grid Line Length (mm)",
+            min_value=1.0,
+            value=1000.0,
+            step=100.0
+        )
 
     with d2:
-        min_region_markers = st.number_input("Minimum Markers Per Region", min_value=1, value=6, step=1)
+        min_region_markers = st.number_input(
+            "Minimum Markers Per Region",
+            min_value=1,
+            value=6,
+            step=1
+        )
 
     with d3:
         writable_only = st.checkbox("Write only to safe writable text entities", value=True)
@@ -1590,7 +1606,7 @@ elif tool_choice == "2. Grid Label Sync":
                     st.write({
                         "anchor_region": anchor_region["name"],
                         "trusted_markers": len(anchor_region["markers"]),
-                        "reason": "This is used only in Option B.",
+                        "reason": "This region is synced from Architecture first, then used as the propagator.",
                     })
                 except Exception:
                     pass
@@ -1652,7 +1668,8 @@ elif tool_choice == "2. Grid Label Sync":
 
                         if skipped_non_writable > 0:
                             st.warning(
-                                f"{skipped_non_writable} text entities were skipped because they are not safely writable."
+                                f"{skipped_non_writable} text entities were skipped because they are not safely writable. "
+                                f"If your labels are inside blocks, try again with the writable-only checkbox turned OFF."
                             )
 
                     except Exception as e:
