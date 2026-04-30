@@ -4,7 +4,6 @@ import os
 import tempfile
 import math
 import re
-from statistics import median
 
 st.set_page_config(page_title="iLoveStructural", page_icon="🏗️", layout="wide")
 
@@ -83,7 +82,7 @@ def is_alpha_label(text):
 
 
 # =========================================================
-# TOOL 1 HELPERS
+# TOOL 1
 # =========================================================
 def purge_layers_from_modelspace(doc, layers_to_keep):
     all_layers = get_layer_names(doc)
@@ -103,7 +102,7 @@ def purge_layers_from_modelspace(doc, layers_to_keep):
 
 
 # =========================================================
-# DXF TRANSFORM HELPERS
+# DXF TRANSFORM / TEXT HELPERS
 # =========================================================
 def get_insert_transform(insert_entity):
     try:
@@ -136,9 +135,6 @@ def transform_block_radius(local_radius, insert_entity):
     return float(local_radius) * avg_scale
 
 
-# =========================================================
-# TEXT HELPERS
-# =========================================================
 def get_text_point(entity):
     try:
         if entity.dxftype() == "TEXT":
@@ -155,6 +151,7 @@ def get_text_point(entity):
         if entity.dxftype() in ("MTEXT", "ATTRIB"):
             ins = entity.dxf.insert
             return float(ins.x), float(ins.y)
+
     except Exception:
         pass
 
@@ -205,51 +202,31 @@ def text_inside_circle(text_point, circle_center, circle_radius, extra_gap=180.0
     return euclidean(text_point, circle_center) <= circle_radius + extra_gap
 
 
-def point_to_segment_distance(px, py, x1, y1, x2, y2):
-    dx = x2 - x1
-    dy = y2 - y1
-
-    if dx == 0 and dy == 0:
-        return math.dist((px, py), (x1, y1))
-
-    t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
-    t = max(0.0, min(1.0, t))
-
-    proj_x = x1 + t * dx
-    proj_y = y1 + t * dy
-
-    return math.dist((px, py), (proj_x, proj_y))
-
-
-def point_projects_on_segment(px, py, x1, y1, x2, y2, pad=0.0):
-    return (
-        min(x1, x2) - pad <= px <= max(x1, x2) + pad
-        and min(y1, y2) - pad <= py <= max(y1, y2) + pad
-    )
-
-
-def line_attached_to_circle(line, circle_center, circle_radius, attach_gap=180.0):
+def make_virtual_line(circle_center, orientation, line_layer):
     cx, cy = circle_center
-    x1, y1 = line["start"]
-    x2, y2 = line["end"]
 
-    if line["orientation"] == "vertical":
-        if abs(line["coord"] - cx) > attach_gap:
-            return False
-    elif line["orientation"] == "horizontal":
-        if abs(line["coord"] - cy) > attach_gap:
-            return False
-    else:
-        return False
+    if orientation == "vertical":
+        return {
+            "entity": None,
+            "orientation": "vertical",
+            "coord": round(float(cx), 3),
+            "start": (float(cx), float(cy - 1000.0)),
+            "end": (float(cx), float(cy + 1000.0)),
+            "length": 1000.0,
+            "layer": line_layer,
+            "virtual": True,
+        }
 
-    if not point_projects_on_segment(cx, cy, x1, y1, x2, y2, pad=circle_radius + attach_gap):
-        return False
-
-    d_seg = point_to_segment_distance(cx, cy, x1, y1, x2, y2)
-    d1 = abs(euclidean((x1, y1), circle_center) - circle_radius)
-    d2 = abs(euclidean((x2, y2), circle_center) - circle_radius)
-
-    return min(abs(d_seg), d1, d2) <= attach_gap
+    return {
+        "entity": None,
+        "orientation": "horizontal",
+        "coord": round(float(cy), 3),
+        "start": (float(cx - 1000.0), float(cy)),
+        "end": (float(cx + 1000.0), float(cy)),
+        "length": 1000.0,
+        "layer": line_layer,
+        "virtual": True,
+    }
 
 
 # =========================================================
@@ -456,153 +433,19 @@ def extract_axis_lines(doc, layer_name, min_length=1000.0):
 
 
 # =========================================================
-# SMART DYNAMIC MARKER DETECTION
+# TRUSTED MARKER DETECTION - DYNAMIC FAMILY ORIENTATION
 # =========================================================
-def make_virtual_line(circle_center, orientation, line_layer):
-    cx, cy = circle_center
-
-    if orientation == "vertical":
-        return {
-            "entity": None,
-            "orientation": "vertical",
-            "coord": round(float(cx), 3),
-            "start": (float(cx), float(cy - 1000.0)),
-            "end": (float(cx), float(cy + 1000.0)),
-            "length": 1000.0,
-            "layer": line_layer,
-            "virtual": True,
-        }
-
-    return {
-        "entity": None,
-        "orientation": "horizontal",
-        "coord": round(float(cy), 3),
-        "start": (float(cx - 1000.0), float(cy)),
-        "end": (float(cx + 1000.0), float(cy)),
-        "length": 1000.0,
-        "layer": line_layer,
-        "virtual": True,
-    }
-
-
-def nearest_line_any_orientation(circle_center, lines, attach_gap):
-    cx, cy = circle_center
-    best = None
-
-    for ln in lines:
-        x1, y1 = ln["start"]
-        x2, y2 = ln["end"]
-
-        if ln["orientation"] == "vertical":
-            main_dist = abs(ln["coord"] - cx)
-            span_min = min(y1, y2)
-            span_max = max(y1, y2)
-
-            if span_min - attach_gap * 4 <= cy <= span_max + attach_gap * 4:
-                projection_penalty = 0.0
-            else:
-                projection_penalty = min(abs(cy - span_min), abs(cy - span_max))
-
-        else:
-            main_dist = abs(ln["coord"] - cy)
-            span_min = min(x1, x2)
-            span_max = max(x1, x2)
-
-            if span_min - attach_gap * 4 <= cx <= span_max + attach_gap * 4:
-                projection_penalty = 0.0
-            else:
-                projection_penalty = min(abs(cx - span_min), abs(cx - span_max))
-
-        score = main_dist + projection_penalty * 0.15
-
-        if best is None or score < best["score"]:
-            best = {
-                "line": ln,
-                "score": score,
-                "main_dist": main_dist,
-            }
-
-    return best
-
-
-def infer_marker_orientation_from_same_label(bubble, all_bubbles, text_gap):
-    """
-    Dynamic orientation inference.
-
-    It does NOT assume:
-        alpha = vertical
-        numeric = horizontal
-
-    Instead:
-        If same label appears above/below with close X -> vertical axis.
-        If same label appears left/right with close Y -> horizontal axis.
-    """
-    label = bubble["label"]
-    cx, cy = bubble["circle_center"]
-
-    align_tol = max(text_gap * 4.0, 750.0)
-    min_pair_span = 1000.0
-
-    candidates = []
-
-    for other in all_bubbles:
-        if other is bubble:
-            continue
-
-        if other["label"] != label:
-            continue
-
-        ox, oy = other["circle_center"]
-
-        dx = abs(cx - ox)
-        dy = abs(cy - oy)
-
-        if dx <= align_tol and dy >= min_pair_span:
-            candidates.append({
-                "orientation": "vertical",
-                "score": dx,
-                "coord": round(float((cx + ox) / 2.0), 3),
-                "pair_distance": dy,
-            })
-
-        if dy <= align_tol and dx >= min_pair_span:
-            candidates.append({
-                "orientation": "horizontal",
-                "score": dy,
-                "coord": round(float((cy + oy) / 2.0), 3),
-                "pair_distance": dx,
-            })
-
-    if candidates:
-        candidates = sorted(candidates, key=lambda x: (x["score"], -x["pair_distance"]))
-        return candidates[0]
-
-    return None
-
-
 def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_length, text_gap, attach_gap):
-    """
-    Professional dynamic marker detector.
-
-    Main rule:
-        grid marker = circle + valid grid text inside
-
-    Axis orientation is detected dynamically:
-        1. same-label alignment
-        2. strict attached line
-        3. nearest grid line
-        4. virtual fallback from circle position
-
-    This avoids assuming any office convention.
-    """
     texts = extract_texts(doc, text_layer)
     circles = extract_circles(doc, circle_layer)
     lines = extract_axis_lines(doc, line_layer, min_length=min_grid_length)
 
-    bubbles = []
     rejected = []
+    bubbles = []
 
-    # Step 1: detect circle + single valid text inside.
+    # -------------------------------------------------
+    # Step 1: circle + one valid grid text inside
+    # -------------------------------------------------
     for c in circles:
         circle_center = c["center"]
         circle_radius = c["radius"]
@@ -620,8 +463,16 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
             t = candidate_texts[0]
             label = clean_text(t["text"])
 
+            if is_numeric_label(label):
+                family = "numeric"
+            elif is_alpha_label(label):
+                family = "alphabetic"
+            else:
+                family = "unknown"
+
             bubbles.append({
                 "label": label,
+                "family": family,
                 "text_entity": t["entity"],
                 "text_point": t["point"],
                 "text_source": t.get("source", "unknown"),
@@ -631,6 +482,7 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
                 "circle_radius": circle_radius,
                 "circle_source": c.get("source", "unknown"),
             })
+
         else:
             rejected.append({
                 "circle_center": circle_center,
@@ -641,97 +493,120 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
                 "reason": "No valid text in marker" if len(candidate_texts) == 0 else "Multiple texts in marker",
             })
 
+    # -------------------------------------------------
+    # Helper: cluster values
+    # -------------------------------------------------
+    def cluster_values(values, tol):
+        if not values:
+            return []
+
+        vals = sorted(float(v) for v in values)
+        clusters = [[vals[0]]]
+
+        for v in vals[1:]:
+            center = sum(clusters[-1]) / len(clusters[-1])
+            if abs(v - center) <= tol:
+                clusters[-1].append(v)
+            else:
+                clusters.append([v])
+
+        return [
+            {
+                "center": round(sum(c) / len(c), 3),
+                "values": c,
+                "count": len(c),
+            }
+            for c in clusters
+        ]
+
+    def nearest_cluster_center(value, clusters):
+        if not clusters:
+            return round(float(value), 3)
+        best = min(clusters, key=lambda c: abs(c["center"] - value))
+        return best["center"]
+
+    # -------------------------------------------------
+    # Helper: infer orientation separately for numeric/alpha
+    # -------------------------------------------------
+    def infer_family_orientation(family_bubbles):
+        if not family_bubbles:
+            return "vertical", [], []
+
+        xs = [b["circle_center"][0] for b in family_bubbles]
+        ys = [b["circle_center"][1] for b in family_bubbles]
+
+        cluster_tol = max(text_gap * 4.0, attach_gap * 4.0, 750.0)
+
+        x_clusters = cluster_values(xs, cluster_tol)
+        y_clusters = cluster_values(ys, cluster_tol)
+
+        x_count = len(x_clusters)
+        y_count = len(y_clusters)
+
+        # Many X positions and few Y rows = vertical grid axes.
+        # Many Y positions and few X columns = horizontal grid axes.
+        if x_count > y_count:
+            orientation = "vertical"
+        elif y_count > x_count:
+            orientation = "horizontal"
+        else:
+            x_spread = max(xs) - min(xs) if xs else 0
+            y_spread = max(ys) - min(ys) if ys else 0
+            orientation = "vertical" if x_spread >= y_spread else "horizontal"
+
+        return orientation, x_clusters, y_clusters
+
+    numeric_bubbles = [b for b in bubbles if b["family"] == "numeric"]
+    alpha_bubbles = [b for b in bubbles if b["family"] == "alphabetic"]
+    unknown_bubbles = [b for b in bubbles if b["family"] == "unknown"]
+
+    numeric_orientation, numeric_x_clusters, numeric_y_clusters = infer_family_orientation(numeric_bubbles)
+    alpha_orientation, alpha_x_clusters, alpha_y_clusters = infer_family_orientation(alpha_bubbles)
+
+    def nearest_real_line_for_coord(orientation, coord):
+        orientation_lines = [ln for ln in lines if ln["orientation"] == orientation]
+        if not orientation_lines:
+            return None
+        return min(orientation_lines, key=lambda ln: abs(ln["coord"] - coord))
+
     trusted_markers = []
 
+    # -------------------------------------------------
+    # Step 2: create markers using family orientation
+    # -------------------------------------------------
     for b in bubbles:
-        circle_center = b["circle_center"]
-        circle_radius = b["circle_radius"]
+        cx, cy = b["circle_center"]
 
-        best_line = None
-        orientation = None
-        coord = None
-        detection_mode = ""
-
-        # Step 2: infer from same-label alignment.
-        inferred = infer_marker_orientation_from_same_label(b, bubbles, text_gap)
-
-        if inferred is not None:
-            orientation = inferred["orientation"]
-            coord = inferred["coord"]
-
-            # Try to find a real line in that orientation close to this coordinate.
-            orientation_lines = [ln for ln in lines if ln["orientation"] == orientation]
-
-            if orientation_lines:
-                if orientation == "vertical":
-                    best_line = min(orientation_lines, key=lambda ln: abs(ln["coord"] - coord))
-                else:
-                    best_line = min(orientation_lines, key=lambda ln: abs(ln["coord"] - coord))
-
-                if abs(best_line["coord"] - coord) <= max(attach_gap * 8.0, 1500.0):
-                    coord = best_line["coord"]
-                    detection_mode = "same_label_alignment_plus_nearest_line"
-                else:
-                    best_line = make_virtual_line(circle_center, orientation, line_layer)
-                    best_line["coord"] = coord
-                    detection_mode = "same_label_alignment_virtual"
+        if b["family"] == "numeric":
+            orientation = numeric_orientation
+            if orientation == "vertical":
+                coord = nearest_cluster_center(cx, numeric_x_clusters)
             else:
-                best_line = make_virtual_line(circle_center, orientation, line_layer)
-                best_line["coord"] = coord
-                detection_mode = "same_label_alignment_virtual"
+                coord = nearest_cluster_center(cy, numeric_y_clusters)
+            detection_mode = f"family_position_numeric_{orientation}"
 
-        # Step 3: strict attached line fallback.
-        if best_line is None:
-            attached_candidates = [
-                ln for ln in lines
-                if line_attached_to_circle(ln, circle_center, circle_radius, attach_gap=attach_gap)
-            ]
-
-            if attached_candidates:
-                best_line = max(attached_candidates, key=lambda ln: ln["length"])
-                orientation = best_line["orientation"]
-                coord = best_line["coord"]
-                detection_mode = "attached_line"
-
-        # Step 4: nearest line fallback.
-        if best_line is None:
-            nearest = nearest_line_any_orientation(circle_center, lines, attach_gap)
-
-            if nearest is not None:
-                relaxed_limit = max(attach_gap * 10.0, 2000.0)
-
-                if nearest["main_dist"] <= relaxed_limit:
-                    best_line = nearest["line"]
-                    orientation = best_line["orientation"]
-                    coord = best_line["coord"]
-                    detection_mode = "nearest_line"
-
-        # Step 5: final virtual fallback.
-        if best_line is None:
-            # Use label distribution fallback.
-            same_label_points = [
-                x["circle_center"]
-                for x in bubbles
-                if x["label"] == b["label"]
-            ]
-
-            if len(same_label_points) >= 2:
-                xs = [p[0] for p in same_label_points]
-                ys = [p[1] for p in same_label_points]
-
-                if (max(ys) - min(ys)) >= (max(xs) - min(xs)):
-                    orientation = "vertical"
-                    coord = round(float(circle_center[0]), 3)
-                else:
-                    orientation = "horizontal"
-                    coord = round(float(circle_center[1]), 3)
+        elif b["family"] == "alphabetic":
+            orientation = alpha_orientation
+            if orientation == "vertical":
+                coord = nearest_cluster_center(cx, alpha_x_clusters)
             else:
-                orientation = "vertical"
-                coord = round(float(circle_center[0]), 3)
+                coord = nearest_cluster_center(cy, alpha_y_clusters)
+            detection_mode = f"family_position_alphabetic_{orientation}"
 
-            best_line = make_virtual_line(circle_center, orientation, line_layer)
-            best_line["coord"] = coord
-            detection_mode = "final_virtual"
+        else:
+            # Rare fallback.
+            orientation = "vertical"
+            coord = round(float(cx), 3)
+            detection_mode = "unknown_virtual"
+
+        best_line = nearest_real_line_for_coord(orientation, coord)
+
+        if best_line is not None and abs(best_line["coord"] - coord) <= max(attach_gap * 10.0, 2000.0):
+            line_data = dict(best_line)
+            line_data["coord"] = coord
+        else:
+            line_data = make_virtual_line(b["circle_center"], orientation, line_layer)
+            line_data["coord"] = coord
 
         trusted_markers.append({
             "label": b["label"],
@@ -743,12 +618,12 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
             "circle_center": b["circle_center"],
             "circle_radius": b["circle_radius"],
             "circle_source": b.get("circle_source", "unknown"),
-            "line_entity": best_line.get("entity"),
-            "orientation": best_line["orientation"],
-            "coord": best_line["coord"],
-            "line_start": best_line["start"],
-            "line_end": best_line["end"],
-            "line_length": best_line["length"],
+            "line_entity": line_data.get("entity"),
+            "orientation": orientation,
+            "coord": coord,
+            "line_start": line_data["start"],
+            "line_end": line_data["end"],
+            "line_length": line_data["length"],
             "detection_mode": detection_mode,
         })
 
@@ -758,16 +633,36 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
         "lines": lines,
         "trusted_markers": trusted_markers,
         "rejected_markers": rejected,
+        "family_orientation_debug": {
+            "numeric_orientation": numeric_orientation,
+            "alphabetic_orientation": alpha_orientation,
+            "numeric_bubbles": len(numeric_bubbles),
+            "alphabetic_bubbles": len(alpha_bubbles),
+            "unknown_bubbles": len(unknown_bubbles),
+            "numeric_x_clusters": len(numeric_x_clusters),
+            "numeric_y_clusters": len(numeric_y_clusters),
+            "alphabetic_x_clusters": len(alpha_x_clusters),
+            "alphabetic_y_clusters": len(alpha_y_clusters),
+        }
     }
 
 
 # =========================================================
-# AXIS GROUPING
+# AXIS GROUPING / FAMILY GROUPS
 # =========================================================
 def resolve_axis_group(group, orientation):
     coord = round(sum(m["coord"] for m in group) / len(group), 3)
+
     labels = [m["label"] for m in group if clean_text(m["label"])]
-    label = labels[0] if labels else ""
+
+    # Use most common label inside the group.
+    if labels:
+        label_counts = {}
+        for lb in labels:
+            label_counts[lb] = label_counts.get(lb, 0) + 1
+        label = sorted(label_counts.items(), key=lambda x: (-x[1], x[0]))[0][0]
+    else:
+        label = ""
 
     xs = [m["circle_center"][0] for m in group]
     ys = [m["circle_center"][1] for m in group]
@@ -819,14 +714,6 @@ def group_markers_by_axis(markers, tol=5.0):
 
 
 def get_family_groups_from_axis_groups(axis_groups):
-    """
-    Dynamic family extraction.
-
-    Does not assume orientation.
-
-    Numeric family = groups whose label is numeric.
-    Alphabetic family = groups whose label is alphabetic.
-    """
     numeric_groups = []
     alpha_groups = []
 
@@ -840,8 +727,8 @@ def get_family_groups_from_axis_groups(axis_groups):
             elif is_alpha_label(g["label"]):
                 alpha_groups.append(item)
 
-    numeric_groups = sorted(numeric_groups, key=lambda x: (x["family_orientation"], x["coord"]))
-    alpha_groups = sorted(alpha_groups, key=lambda x: (x["family_orientation"], x["coord"]))
+    numeric_groups = sorted(numeric_groups, key=lambda x: x["coord"])
+    alpha_groups = sorted(alpha_groups, key=lambda x: x["coord"])
 
     return numeric_groups, alpha_groups
 
@@ -855,19 +742,7 @@ def family_summary_from_axis_groups(axis_groups):
     h_num = len([g for g in horizontal if is_numeric_label(g["label"])])
     h_alpha = len([g for g in horizontal if is_alpha_label(g["label"])])
 
-    if v_num >= h_num:
-        numeric_orientation = "vertical"
-    else:
-        numeric_orientation = "horizontal"
-
-    if v_alpha >= h_alpha:
-        alpha_orientation = "vertical"
-    else:
-        alpha_orientation = "horizontal"
-
     return {
-        "numeric_orientation_detected": numeric_orientation,
-        "alpha_orientation_detected": alpha_orientation,
         "vertical_counts": {"numeric": v_num, "alpha": v_alpha},
         "horizontal_counts": {"numeric": h_num, "alpha": h_alpha},
     }
@@ -968,7 +843,6 @@ def build_structural_regions_by_empty_space(trusted_markers, min_region_markers=
             continue
 
         axis_groups = group_markers_by_axis(markers)
-
         numeric_groups, alpha_groups = get_family_groups_from_axis_groups(axis_groups)
 
         regions.append({
@@ -999,72 +873,29 @@ def build_structural_regions_by_empty_space(trusted_markers, min_region_markers=
 # =========================================================
 # SMART MAPPING
 # =========================================================
-def axis_spacing_values_from_groups(groups):
-    if len(groups) < 2:
-        return []
-
-    return [
-        round(abs(groups[i + 1]["coord"] - groups[i]["coord"]), 3)
-        for i in range(len(groups) - 1)
-    ]
-
-
 def best_window_indices(source_groups, target_groups, spacing_tol=50.0):
+    """
+    Safe ordered mapping.
+    This prevents wrong offset results like 3-10 instead of 1-8.
+    """
     ns = len(source_groups)
     nt = len(target_groups)
 
     if ns == 0 or nt == 0:
         return [], [], "empty", 0.0
 
+    count = min(ns, nt)
+    source_indices = list(range(count))
+    target_indices = list(range(count))
+
     if ns == nt:
-        return list(range(ns)), list(range(nt)), "equal_count", 1.0
+        mode = "equal_count_ordered"
+    elif ns > nt:
+        mode = "source_has_more_use_first_axes"
+    else:
+        mode = "target_has_more_use_first_axes"
 
-    def score_windows(src_window, tgt_window):
-        if len(src_window) <= 1 or len(tgt_window) <= 1:
-            return 1.0
-
-        src_sp = axis_spacing_values_from_groups(src_window)
-        tgt_sp = axis_spacing_values_from_groups(tgt_window)
-
-        check_count = min(len(src_sp), len(tgt_sp))
-
-        if check_count == 0:
-            return 1.0
-
-        matched = 0
-
-        for i in range(check_count):
-            if abs(src_sp[i] - tgt_sp[i]) <= spacing_tol:
-                matched += 1
-
-        return round(matched / check_count, 3)
-
-    if ns > nt:
-        best_start = 0
-        best_score = -1.0
-
-        for start in range(ns - nt + 1):
-            src_window = source_groups[start:start + nt]
-            score = score_windows(src_window, target_groups)
-
-            if score > best_score:
-                best_score = score
-                best_start = start
-
-        return list(range(best_start, best_start + nt)), list(range(nt)), "source_window", best_score
-
-    best_start = 0
-    best_score = -1.0
-
-    for start in range(nt - ns + 1):
-        tgt_window = target_groups[start:start + ns]
-        score = score_windows(source_groups, tgt_window)
-
-        if score > best_score:
-            best_score = score
-            best_start = start
-
-    return list(range(ns)), list(range(best_start, best_start + ns)), "target_window", best_score
+    return source_indices, target_indices, mode, 1.0
 
 
 def build_smart_mapping_preview(source_axis_groups, target_axis_groups, family_name, region_name, source_name, spacing_tol=50.0):
@@ -1086,7 +917,6 @@ def build_smart_mapping_preview(source_axis_groups, target_axis_groups, family_n
             "family": family_name,
             "position": pos,
             "mapping_mode": mode,
-            "mapping_score": score,
             "source_index": si + 1,
             "target_index": ti + 1,
             "source_label": src["label"],
@@ -1124,7 +954,6 @@ def apply_axis_group_labels_smart(source_axis_groups, target_axis_groups, writab
 
             try:
                 old = get_text_value(entity)
-
                 if old != new_label:
                     set_text_value(entity, new_label)
                     changed += 1
@@ -1156,12 +985,7 @@ def build_propagated_axis_groups_smart(source_axis_groups, target_axis_groups, s
 # =========================================================
 # SYNC STRATEGIES
 # =========================================================
-def prepare_direct_multi_plan_sync(
-    structural_regions,
-    numeric_arch_groups,
-    alpha_arch_groups,
-    tolerance
-):
+def prepare_direct_multi_plan_sync(structural_regions, numeric_arch_groups, alpha_arch_groups, tolerance):
     matched_regions = []
     mapping_preview = []
     region_match_report = []
@@ -1177,10 +1001,7 @@ def prepare_direct_multi_plan_sync(
         usable = numeric_count > 0 or alpha_count > 0
 
         if usable:
-            reason = (
-                f"Accepted. Numeric axes={numeric_count}, alphabetic axes={alpha_count}. "
-                "Dynamic orientation detection used."
-            )
+            reason = f"Accepted. Numeric axes={numeric_count}, alphabetic axes={alpha_count}."
 
             matched_regions.append({
                 "name": region["name"],
@@ -1221,7 +1042,7 @@ def prepare_direct_multi_plan_sync(
             score = 1.0
 
         else:
-            reason = "Rejected. No usable numeric or alphabetic grid axes detected."
+            reason = "Rejected. No usable grid axes detected."
             classification = "rejected"
             will_sync = False
             score = 0.0
@@ -1244,12 +1065,7 @@ def prepare_direct_multi_plan_sync(
     return None, matched_regions, mapping_preview, region_match_report
 
 
-def prepare_propagator_multi_plan_sync(
-    structural_regions,
-    numeric_arch_groups,
-    alpha_arch_groups,
-    tolerance
-):
+def prepare_propagator_multi_plan_sync(structural_regions, numeric_arch_groups, alpha_arch_groups, tolerance):
     matched_regions = []
     mapping_preview = []
     region_match_report = []
@@ -1283,27 +1099,8 @@ def prepare_propagator_multi_plan_sync(
     usable_candidates = [c for c in candidates if c["usable"]]
 
     if not usable_candidates:
-        for c in candidates:
-            region = c["region"]
-
-            region_match_report.append({
-                "region": region["name"],
-                "classification": "rejected",
-                "source_reference": "None",
-                "trusted_markers": len(region["markers"]),
-                "writable_markers": c["writable_count"],
-                "numeric_axes": c["numeric_count"],
-                "alphabetic_axes": c["alpha_count"],
-                "bbox_width": round(region["bbox"]["width"], 3),
-                "bbox_height": round(region["bbox"]["height"], 3),
-                "score": 0.0,
-                "reason": "Rejected. No usable grid axes detected.",
-                "will_sync": False,
-            })
-
         return None, matched_regions, mapping_preview, region_match_report
 
-    # Pick the most complete structural plan as the propagator.
     anchor_candidate = max(
         usable_candidates,
         key=lambda c: (
@@ -1560,7 +1357,7 @@ st.title("🏗️ iLoveStructural")
 
 
 # =========================================================
-# TOOL 1
+# TOOL 1 UI
 # =========================================================
 if tool_choice == "1. DXF Smart Purger":
     st.subheader("Tool 1: DXF Smart Purger")
@@ -1603,14 +1400,14 @@ if tool_choice == "1. DXF Smart Purger":
 
 
 # =========================================================
-# TOOL 2
+# TOOL 2 UI
 # =========================================================
 elif tool_choice == "2. Grid Label Sync":
     st.subheader("Tool 2: Grid Label Sync")
 
     st.caption(
         "Dynamic multi-plan grid label sync. "
-        "No fixed assumption about numeric/alphabetic orientation."
+        "This version does not assume numeric/alphabetic orientation."
     )
 
     init_state()
@@ -1842,15 +1639,7 @@ elif tool_choice == "2. Grid Label Sync":
                     st.rerun()
 
             if st.session_state.family_summary:
-                fam = st.session_state.family_summary
-
-                st.info(
-                    f"Dynamic reference detection: "
-                    f"Numeric family mostly = {fam['numeric_orientation_detected']} axes, "
-                    f"Alphabetic family mostly = {fam['alpha_orientation_detected']} axes. "
-                    f"Vertical counts = {fam['vertical_counts']}, "
-                    f"Horizontal counts = {fam['horizontal_counts']}."
-                )
+                st.info(f"Dynamic reference detection: {st.session_state.family_summary}")
 
             if st.session_state.anchor_region is not None:
                 st.markdown("### Propagator / Anchor Region")
@@ -1863,7 +1652,6 @@ elif tool_choice == "2. Grid Label Sync":
                         "trusted_markers": len(anchor_region["markers"]),
                         "numeric_axes": len(anchor_region["numeric_groups"]),
                         "alphabetic_axes": len(anchor_region["alpha_groups"]),
-                        "reason": "This region is synced from Architecture first, then used as the propagator.",
                     })
                 except Exception:
                     pass
@@ -1919,14 +1707,12 @@ elif tool_choice == "2. Grid Label Sync":
                                 f"across {len(st.session_state.matched_regions)} matched region(s)."
                             )
                         else:
-                            st.info(
-                                "No text changes were needed, or the detected labels already match."
-                            )
+                            st.info("No text changes were needed, or the detected labels already match.")
 
                         if skipped_non_writable > 0:
                             st.warning(
                                 f"{skipped_non_writable} text entities were skipped because they are not safely writable. "
-                                f"If your labels are inside blocks, try again with writable-only turned OFF."
+                                f"If labels are inside blocks, test with writable-only turned OFF."
                             )
 
                     except Exception as e:
@@ -1966,10 +1752,15 @@ elif tool_choice == "2. Grid Label Sync":
                     "detection_modes": arch_modes,
                     "numeric_arch_axes": len(st.session_state.numeric_arch_groups),
                     "alphabetic_arch_axes": len(st.session_state.alpha_arch_groups),
+                    "family_orientation_debug": arch_det.get("family_orientation_debug", {}),
                 })
 
                 st.write("#### Structural Detection")
-                st.write("#### Structural Detection")
+
+                struc_modes = {}
+                for m in struc_det.get("trusted_markers", []):
+                    mode = m.get("detection_mode", "unknown")
+                    struc_modes[mode] = struc_modes.get(mode, 0) + 1
 
                 st.write({
                     "texts_on_selected_text_layer": len(struc_det.get("texts", [])),
@@ -1980,11 +1771,8 @@ elif tool_choice == "2. Grid Label Sync":
                     "structural_regions_found": len(st.session_state.structural_regions),
                     "matched_regions": len(st.session_state.matched_regions),
                     "detection_modes": struc_modes,
+                    "family_orientation_debug": struc_det.get("family_orientation_debug", {}),
                 })
-
-                if st.session_state.family_summary:
-                    st.write("#### Dynamic Family Detection")
-                    st.write(st.session_state.family_summary)
 
                 if st.session_state.structural_regions:
                     st.write("#### Structural Region Summary")
@@ -2035,9 +1823,8 @@ elif tool_choice == "2. Grid Label Sync":
                     st.dataframe(sample_rows, use_container_width=True)
 
                 st.caption(
-                    "Dynamic detector uses circle + text first, then same-label alignment, "
-                    "attached lines, nearest lines, and virtual fallback. "
-                    "It does not assume alphabetic or numeric grid orientation."
+                    "This detector dynamically decides whether numeric/alphabetic labels are vertical or horizontal "
+                    "based on bubble distribution. It does not hardcode grid orientation."
                 )
 
     else:
