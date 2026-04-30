@@ -1969,11 +1969,7 @@ elif tool_choice == "2. Grid Label Sync":
                 })
 
                 st.write("#### Structural Detection")
-
-                struc_modes = {}
-                for m in struc_det.get("trusted_markers", []):
-                    mode = m.get("detection_mode", "unknown")
-                    struc_modes[mode] = struc_modes.get(mode, 0) + 1
+                st.write("#### Structural Detection")
 
                 st.write({
                     "texts_on_selected_text_layer": len(struc_det.get("texts", [])),
@@ -1982,4 +1978,67 @@ elif tool_choice == "2. Grid Label Sync":
                     "trusted_markers_found": len(struc_det.get("trusted_markers", [])),
                     "rejected_markers": len(struc_det.get("rejected_markers", [])),
                     "structural_regions_found": len(st.session_state.structural_regions),
-                    "matched_regions": len
+                    "matched_regions": len(st.session_state.matched_regions),
+                    "detection_modes": struc_modes,
+                })
+
+                if st.session_state.family_summary:
+                    st.write("#### Dynamic Family Detection")
+                    st.write(st.session_state.family_summary)
+
+                if st.session_state.structural_regions:
+                    st.write("#### Structural Region Summary")
+
+                    rows = []
+
+                    for r in st.session_state.structural_regions:
+                        writable_count = len([
+                            m for m in r["markers"]
+                            if is_entity_writable(m)
+                        ])
+
+                        rows.append({
+                            "region": r["name"],
+                            "trusted_markers": len(r["markers"]),
+                            "writable_markers": writable_count,
+                            "numeric_axes": len(r.get("numeric_groups", [])),
+                            "alphabetic_axes": len(r.get("alpha_groups", [])),
+                            "vertical_axes": len(r["axis_groups"].get("vertical", [])),
+                            "horizontal_axes": len(r["axis_groups"].get("horizontal", [])),
+                            "bbox_width": round(r["bbox"]["width"], 3),
+                            "bbox_height": round(r["bbox"]["height"], 3),
+                            "grid_bucket": r["grid_bucket"],
+                        })
+
+                    st.dataframe(rows, use_container_width=True)
+
+                if struc_det.get("rejected_markers"):
+                    st.write("#### Rejected Structural Markers")
+                    st.dataframe(struc_det["rejected_markers"], use_container_width=True)
+
+                if struc_det.get("trusted_markers"):
+                    st.write("#### Sample Trusted Structural Markers")
+
+                    sample_rows = []
+
+                    for m in struc_det.get("trusted_markers", [])[:100]:
+                        sample_rows.append({
+                            "label": m.get("label"),
+                            "orientation": m.get("orientation"),
+                            "coord": m.get("coord"),
+                            "text_source": m.get("text_source"),
+                            "detection_mode": m.get("detection_mode"),
+                            "circle_x": round(m.get("circle_center", (0, 0))[0], 3),
+                            "circle_y": round(m.get("circle_center", (0, 0))[1], 3),
+                        })
+
+                    st.dataframe(sample_rows, use_container_width=True)
+
+                st.caption(
+                    "Dynamic detector uses circle + text first, then same-label alignment, "
+                    "attached lines, nearest lines, and virtual fallback. "
+                    "It does not assume alphabetic or numeric grid orientation."
+                )
+
+    else:
+        st.info("Please upload both the Architectural DXF and Structural DXF.")
