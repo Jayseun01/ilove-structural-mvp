@@ -85,6 +85,7 @@ def audit_to_csv_bytes(audit_rows):
 def clean_text(value):
     if value is None:
         return ""
+
     txt = str(value)
     txt = txt.replace("\\P", " ")
     txt = txt.replace("\n", " ")
@@ -95,12 +96,14 @@ def clean_text(value):
 
 def probable_grid_label(text):
     text = clean_text(text)
+
     patterns = [
         r"[A-Z]{1,3}",
         r"[A-Z]{1,3}'",
         r"\d{1,3}",
         r"\d{1,3}[A-Z]?",
     ]
+
     return any(re.fullmatch(p, text) for p in patterns)
 
 
@@ -130,10 +133,19 @@ def get_layer_names(doc):
 
 def pick_default_layer(layers, candidates):
     upper = {x.upper(): x for x in layers}
+
     for c in candidates:
         if c.upper() in upper:
             return upper[c.upper()]
+
     return layers[0] if layers else None
+
+
+def get_entity_handle(entity):
+    try:
+        return entity.dxf.handle
+    except Exception:
+        return ""
 
 
 def get_insert_transform(insert_entity):
@@ -193,12 +205,16 @@ def get_text_value(entity):
     try:
         if entity.dxftype() == "TEXT":
             return clean_text(entity.dxf.text)
+
         if entity.dxftype() == "MTEXT":
             return clean_text(entity.text)
+
         if entity.dxftype() == "ATTRIB":
             return clean_text(entity.dxf.text)
+
     except Exception:
         pass
+
     return ""
 
 
@@ -207,26 +223,23 @@ def set_text_value(entity, new_value):
         if entity.dxftype() == "TEXT":
             entity.dxf.text = new_value
             return True
+
         if entity.dxftype() == "MTEXT":
             entity.text = new_value
             return True
+
         if entity.dxftype() == "ATTRIB":
             entity.dxf.text = new_value
             return True
+
     except Exception:
         pass
+
     return False
 
 
-def get_entity_handle(entity):
-    try:
-        return entity.dxf.handle
-    except Exception:
-        return ""
-
-
 # =========================================================
-# TOOL 1
+# TOOL 1 LOGIC
 # =========================================================
 
 def purge_layers_from_modelspace(doc, layers_to_keep):
@@ -423,7 +436,10 @@ def deduplicate_axis_lines(lines, tol=5.0):
     current = [lines[0]]
 
     for item in lines[1:]:
-        same = item["orientation"] == current[-1]["orientation"] and abs(item["coord"] - current[-1]["coord"]) <= tol
+        same = (
+            item["orientation"] == current[-1]["orientation"]
+            and abs(item["coord"] - current[-1]["coord"]) <= tol
+        )
 
         if same:
             current.append(item)
@@ -510,12 +526,14 @@ def line_attached_to_circle(line, center, radius, attach_gap):
     if line["orientation"] == "vertical":
         if abs(line["coord"] - cx) > attach_gap:
             return False
+
         if not point_projects_on_segment(cx, cy, x1, y1, x2, y2, pad=radius + attach_gap):
             return False
 
     elif line["orientation"] == "horizontal":
         if abs(line["coord"] - cy) > attach_gap:
             return False
+
         if not point_projects_on_segment(cx, cy, x1, y1, x2, y2, pad=radius + attach_gap):
             return False
 
@@ -544,17 +562,30 @@ def closest_grid_line_to_circle(center, lines, attach_gap):
             perp = abs(ln["coord"] - cx)
             span_min = min(y1, y2)
             span_max = max(y1, y2)
-            span_penalty = 0.0 if span_min - attach_gap * 8 <= cy <= span_max + attach_gap * 8 else min(abs(cy - span_min), abs(cy - span_max))
+
+            if span_min - attach_gap * 8 <= cy <= span_max + attach_gap * 8:
+                span_penalty = 0.0
+            else:
+                span_penalty = min(abs(cy - span_min), abs(cy - span_max))
+
         else:
             perp = abs(ln["coord"] - cy)
             span_min = min(x1, x2)
             span_max = max(x1, x2)
-            span_penalty = 0.0 if span_min - attach_gap * 8 <= cx <= span_max + attach_gap * 8 else min(abs(cx - span_min), abs(cx - span_max))
+
+            if span_min - attach_gap * 8 <= cx <= span_max + attach_gap * 8:
+                span_penalty = 0.0
+            else:
+                span_penalty = min(abs(cx - span_min), abs(cx - span_max))
 
         score = perp + 0.10 * span_penalty
 
         if best is None or score < best["score"]:
-            best = {"line": ln, "score": score, "perp": perp}
+            best = {
+                "line": ln,
+                "score": score,
+                "perp": perp,
+            }
 
     return best["line"], best["perp"]
 
@@ -572,6 +603,7 @@ def infer_orientation_from_same_label(bubble, bubbles, text_gap):
     for other in bubbles:
         if other is bubble:
             continue
+
         if other["label"] != label:
             continue
 
@@ -633,9 +665,7 @@ def make_virtual_axis(center, orientation, coord, line_layer):
 
 
 def marker_confidence(mode, text_matches, writable):
-    score = 0
-
-    score += 35
+    score = 35
 
     if text_matches == 1:
         score += 25
@@ -734,7 +764,10 @@ def build_trusted_markers(
         center = b["circle_center"]
         radius = b["circle_radius"]
 
-        attached = [ln for ln in lines if line_attached_to_circle(ln, center, radius, attach_gap)]
+        attached = [
+            ln for ln in lines
+            if line_attached_to_circle(ln, center, radius, attach_gap)
+        ]
 
         selected = None
         mode = ""
@@ -742,6 +775,7 @@ def build_trusted_markers(
         if attached:
             selected = max(attached, key=lambda x: x["length"])
             mode = "attached_gridline"
+
         else:
             close, perp = closest_grid_line_to_circle(center, lines, attach_gap)
             relaxed_limit = max(attach_gap * 6.0, 1200.0)
@@ -749,6 +783,7 @@ def build_trusted_markers(
             if close is not None and perp is not None and perp <= relaxed_limit:
                 selected = close
                 mode = "closest_gridline"
+
             else:
                 orient, coord = infer_orientation_from_same_label(b, bubbles, text_gap)
 
@@ -790,7 +825,11 @@ def build_trusted_markers(
         }
 
         marker["writable"] = is_marker_writable(marker, allow_block_text_write)
-        marker["confidence"] = marker_confidence(mode, marker["text_matches"], marker["writable"])
+        marker["confidence"] = marker_confidence(
+            mode,
+            marker["text_matches"],
+            marker["writable"],
+        )
 
         trusted.append(marker)
 
@@ -816,10 +855,15 @@ def resolve_axis_group(group, orientation):
         if label:
             counts[label] = counts.get(label, 0) + 1
 
-    label = sorted(counts.items(), key=lambda x: (-x[1], x[0]))[0][0] if counts else ""
+    sorted_counts = sorted(counts.items(), key=lambda x: (-x[1], x[0]))
+    label = sorted_counts[0][0] if sorted_counts else ""
 
     xs = [m["circle_center"][0] for m in group]
     ys = [m["circle_center"][1] for m in group]
+
+    label_count = len(counts)
+    majority_count = sorted_counts[0][1] if sorted_counts else 0
+    majority_ratio = majority_count / len(group) if group else 0.0
 
     return {
         "orientation": orientation,
@@ -830,6 +874,14 @@ def resolve_axis_group(group, orientation):
         "writable_marker_count": len([m for m in group if m.get("writable")]),
         "min_confidence": min([m.get("confidence", 0) for m in group]) if group else 0,
         "avg_confidence": round(sum([m.get("confidence", 0) for m in group]) / len(group), 1) if group else 0,
+
+        # Important safety diagnostics.
+        "label_count": label_count,
+        "label_counts": counts,
+        "mixed_labels": sorted(counts.keys()),
+        "majority_label_count": majority_count,
+        "majority_label_ratio": round(majority_ratio, 3),
+
         "bbox": {
             "min_x": min(xs),
             "max_x": max(xs),
@@ -843,12 +895,15 @@ def resolve_axis_group(group, orientation):
 
 
 def group_markers_by_axis(markers, tol=5.0):
-    grouped = {"vertical": [], "horizontal": []}
+    grouped = {
+        "vertical": [],
+        "horizontal": [],
+    }
 
     for orientation in ["vertical", "horizontal"]:
         subset = sorted(
             [m for m in markers if m["orientation"] == orientation],
-            key=lambda x: x["coord"]
+            key=lambda x: x["coord"],
         )
 
         if not subset:
@@ -894,8 +949,14 @@ def infer_families(axis_groups):
     return {
         "numeric_orientation": numeric_orientation,
         "alpha_orientation": alpha_orientation,
-        "vertical_counts": {"numeric": v_num, "alpha": v_alpha},
-        "horizontal_counts": {"numeric": h_num, "alpha": h_alpha},
+        "vertical_counts": {
+            "numeric": v_num,
+            "alpha": v_alpha,
+        },
+        "horizontal_counts": {
+            "numeric": h_num,
+            "alpha": h_alpha,
+        },
     }
 
 
@@ -905,6 +966,8 @@ def sort_groups(groups, orientation, order_mode, family):
     elif order_mode == "Descending":
         reverse = True
     else:
+        # Auto:
+        # Horizontal numeric axes are often read top-to-bottom, so descending Y.
         reverse = family == "numeric" and orientation == "horizontal"
 
     return sorted(groups, key=lambda x: x["coord"], reverse=reverse)
@@ -934,7 +997,7 @@ def get_family_groups(region_or_axis_groups, numeric_orientation, alpha_orientat
 
 
 # =========================================================
-# REGION SEGMENTATION
+# REGION SEGMENTATION / PERIMETER FILTER
 # =========================================================
 
 def bbox_from_markers(markers):
@@ -950,6 +1013,49 @@ def bbox_from_markers(markers):
         "height": max(ys) - min(ys),
         "centroid": (sum(xs) / len(xs), sum(ys) / len(ys)),
     }
+
+
+def marker_is_near_region_perimeter(marker, bbox, band_ratio=0.18, min_band=1500.0):
+    """
+    Keeps grid bubbles near the outside edge of a plan region.
+    This helps ignore slab/detail bubbles inside the plan.
+    """
+    x, y = marker["circle_center"]
+
+    width = max(float(bbox.get("width", 0.0)), 1.0)
+    height = max(float(bbox.get("height", 0.0)), 1.0)
+
+    band_x = max(width * band_ratio, min_band)
+    band_y = max(height * band_ratio, min_band)
+
+    near_left = abs(x - bbox["min_x"]) <= band_x
+    near_right = abs(x - bbox["max_x"]) <= band_x
+    near_bottom = abs(y - bbox["min_y"]) <= band_y
+    near_top = abs(y - bbox["max_y"]) <= band_y
+
+    return near_left or near_right or near_bottom or near_top
+
+
+def filter_region_perimeter_markers(region, axis_tol, band_ratio=0.18, min_band=1500.0):
+    bbox = region.get("bbox") or bbox_from_markers(region["markers"])
+
+    perimeter_markers = [
+        m for m in region["markers"]
+        if marker_is_near_region_perimeter(
+            m,
+            bbox,
+            band_ratio=band_ratio,
+            min_band=min_band,
+        )
+    ]
+
+    filtered = dict(region)
+    filtered["all_markers"] = region["markers"]
+    filtered["markers"] = perimeter_markers
+    filtered["interior_marker_count"] = len(region["markers"]) - len(perimeter_markers)
+    filtered["axis_groups"] = group_markers_by_axis(perimeter_markers, tol=axis_tol)
+
+    return filtered
 
 
 def squared_distance(p1, p2):
@@ -1060,9 +1166,11 @@ def build_regions(markers, axis_tol, expected_markers_per_region=None, forced_re
     if forced_region_count and forced_region_count > 0:
         k = int(forced_region_count)
         method_reason = "forced_region_count"
+
     elif expected_markers_per_region and expected_markers_per_region > 0:
         raw = total / expected_markers_per_region
         rounded = int(round(raw))
+
         if rounded >= 2 and abs(raw - rounded) <= 0.25:
             k = rounded
             method_reason = "marker_count_ratio"
@@ -1156,6 +1264,24 @@ def build_regions(markers, axis_tol, expected_markers_per_region=None, forced_re
 # SYNC / AUDIT
 # =========================================================
 
+def validate_axis_group_purity(groups, family_name):
+    blockers = []
+
+    for idx, g in enumerate(groups, start=1):
+        label_count = g.get("label_count", 1)
+        mixed_labels = g.get("mixed_labels", [])
+        label_counts = g.get("label_counts", {})
+        marker_count = g.get("marker_count", 0)
+
+        if label_count > 1:
+            blockers.append(
+                f"{family_name} axis position {idx} at coord {g.get('coord')} has mixed labels "
+                f"{mixed_labels}. Counts={label_counts}. Marker count={marker_count}."
+            )
+
+    return blockers
+
+
 def get_region_sync_plan(
     region,
     source_numeric,
@@ -1165,6 +1291,8 @@ def get_region_sync_plan(
     numeric_order,
     alpha_order,
     allow_block_text_write,
+    expected_reference_marker_count=None,
+    max_region_marker_ratio=1.5,
 ):
     numeric_groups, alpha_groups = get_family_groups(
         region,
@@ -1193,6 +1321,18 @@ def get_region_sync_plan(
             f"Alphabetic axis count mismatch: found {len(alpha_groups)}, expected {expected_alpha}"
         )
 
+    if expected_reference_marker_count and expected_reference_marker_count > 0:
+        max_allowed = int(math.ceil(expected_reference_marker_count * max_region_marker_ratio))
+
+        if len(region["markers"]) > max_allowed:
+            blockers.append(
+                f"Region has too many sync markers: found {len(region['markers'])}, "
+                f"maximum allowed {max_allowed}. This may mean detail/slab bubbles were included."
+            )
+
+    blockers.extend(validate_axis_group_purity(numeric_groups, "Numeric"))
+    blockers.extend(validate_axis_group_purity(alpha_groups, "Alphabetic"))
+
     non_writable_markers = [
         m for m in region["markers"]
         if not is_marker_writable(m, allow_block_text_write)
@@ -1217,6 +1357,8 @@ def build_region_report(
     numeric_order,
     alpha_order,
     allow_block_text_write,
+    expected_reference_marker_count=None,
+    max_region_marker_ratio=1.5,
 ):
     rows = []
 
@@ -1234,6 +1376,8 @@ def build_region_report(
             numeric_order,
             alpha_order,
             allow_block_text_write,
+            expected_reference_marker_count=expected_reference_marker_count,
+            max_region_marker_ratio=max_region_marker_ratio,
         )
 
         writable = len([m for m in r["markers"] if is_marker_writable(m, allow_block_text_write)])
@@ -1262,6 +1406,8 @@ def build_region_report(
             "ready_to_sync": ready,
             "complete": complete,
             "trusted_markers": len(r["markers"]),
+            "all_detected_markers": len(r.get("all_markers", r["markers"])),
+            "interior_markers_ignored": r.get("interior_marker_count", 0),
             "writable_markers": writable,
             "non_writable_markers": non_writable,
             "numeric_axes_found": len(num),
@@ -1292,6 +1438,7 @@ def build_preview_for_region(region, source_numeric, source_alpha, numeric_group
             "target_markers": t["marker_count"],
             "target_writable_markers": t["writable_marker_count"],
             "target_avg_confidence": t["avg_confidence"],
+            "target_mixed_labels": ", ".join(t.get("mixed_labels", [])),
         })
 
     for i, (s, t) in enumerate(zip(source_alpha, alpha_groups), start=1):
@@ -1305,6 +1452,7 @@ def build_preview_for_region(region, source_numeric, source_alpha, numeric_group
             "target_markers": t["marker_count"],
             "target_writable_markers": t["writable_marker_count"],
             "target_avg_confidence": t["avg_confidence"],
+            "target_mixed_labels": ", ".join(t.get("mixed_labels", [])),
         })
 
     return rows
@@ -1355,6 +1503,7 @@ def apply_group_labels(source_groups, target_groups, allow_block_text_write=Fals
 
             if old != new_label:
                 ok = set_text_value(entity, new_label)
+
                 if ok:
                     changed += 1
 
@@ -1370,6 +1519,7 @@ def apply_group_labels(source_groups, target_groups, allow_block_text_write=Fals
                     "confidence": marker.get("confidence"),
                     "entity_handle": marker.get("text_handle", get_entity_handle(entity)),
                 })
+
             else:
                 audit.append({
                     "region_axis_position": i,
@@ -1500,7 +1650,7 @@ elif tool_choice == "2. Grid Label Sync":
 
     st.subheader("Tool 2: Grid Label Sync")
     st.caption(
-        "Workflow: Detect → Review regions → Confirm mapping → Sync selected complete regions."
+        "Workflow: Detect → Ignore slab/detail bubbles → Review regions → Sync selected safe regions."
     )
 
     st.markdown("### 1. Detection Settings")
@@ -1552,16 +1702,54 @@ elif tool_choice == "2. Grid Label Sync":
         strict_mode = st.checkbox(
             "Strict mode: block incomplete or unsafe regions",
             value=True,
-            help="Recommended. Prevents partial sync when axis counts do not match or labels are not writable.",
+            help="Recommended. This app still blocks incomplete sync even if this is off.",
         )
 
     with e3:
         min_confidence_required = st.slider("Minimum Marker Confidence", 0, 100, 50, 5)
 
+    f1, f2, f3, f4 = st.columns(4)
+
+    with f1:
+        ignore_interior_detail_bubbles = st.checkbox(
+            "Ignore interior/detail bubbles",
+            value=True,
+            help="Recommended. Keeps only bubbles near region perimeter so slab/detail bubbles inside the plan are not relabeled.",
+        )
+
+    with f2:
+        perimeter_band_ratio = st.slider(
+            "Perimeter Band Ratio",
+            0.05,
+            0.40,
+            0.18,
+            0.01,
+            help="Higher keeps more markers near the plan edge. Lower is stricter.",
+        )
+
+    with f3:
+        perimeter_min_band = st.number_input(
+            "Minimum Perimeter Band",
+            min_value=100.0,
+            value=1500.0,
+            step=100.0,
+            help="Minimum drawing-unit distance from region edge to treat a bubble as perimeter.",
+        )
+
+    with f4:
+        max_region_marker_ratio = st.slider(
+            "Max Sync Marker Ratio",
+            1.0,
+            5.0,
+            1.5,
+            0.1,
+            help="Blocks regions with far more sync markers than the reference after filtering.",
+        )
+
     if not strict_mode:
         st.warning(
-            "Strict mode is off in the UI, but this version still prevents incomplete region sync "
-            "to avoid partial drawing corruption."
+            "Strict mode is off in the UI, but incomplete/unsafe region sync is still blocked "
+            "to avoid accidental drawing corruption."
         )
 
     st.markdown("### 2. Upload Files")
@@ -1737,6 +1925,32 @@ elif tool_choice == "2. Grid Label Sync":
                     min_region_markers=min_region_markers,
                 )
 
+                if ignore_interior_detail_bubbles:
+                    regions = [
+                        filter_region_perimeter_markers(
+                            r,
+                            axis_tol=axis_tol,
+                            band_ratio=perimeter_band_ratio,
+                            min_band=perimeter_min_band,
+                        )
+                        for r in regions
+                    ]
+
+                    seg["interior_detail_filter"] = "enabled"
+                    seg["perimeter_band_ratio"] = perimeter_band_ratio
+                    seg["perimeter_min_band"] = perimeter_min_band
+                    seg["interior_markers_removed_by_region"] = {
+                        r["name"]: r.get("interior_marker_count", 0)
+                        for r in regions
+                    }
+                    seg["sync_marker_counts_after_filter"] = {
+                        r["name"]: len(r["markers"])
+                        for r in regions
+                    }
+
+                else:
+                    seg["interior_detail_filter"] = "disabled"
+
                 report = build_region_report(
                     regions,
                     source_numeric,
@@ -1746,6 +1960,8 @@ elif tool_choice == "2. Grid Label Sync":
                     numeric_order,
                     alpha_order,
                     allow_block_text_write,
+                    expected_reference_marker_count=len(arch_trusted),
+                    max_region_marker_ratio=max_region_marker_ratio,
                 )
 
                 preview = []
@@ -1760,6 +1976,8 @@ elif tool_choice == "2. Grid Label Sync":
                         numeric_order,
                         alpha_order,
                         allow_block_text_write,
+                        expected_reference_marker_count=len(arch_trusted),
+                        max_region_marker_ratio=max_region_marker_ratio,
                     )
 
                     if ready:
@@ -1833,6 +2051,7 @@ elif tool_choice == "2. Grid Label Sync":
 
             with c2:
                 modes = {}
+
                 for m in struc_det.get("trusted_markers", []):
                     mode = m.get("detection_mode", "unknown")
                     modes[mode] = modes.get(mode, 0) + 1
@@ -1842,13 +2061,13 @@ elif tool_choice == "2. Grid Label Sync":
                     "texts_on_selected_layer": len(struc_det.get("texts", [])),
                     "circles_on_selected_layer": len(struc_det.get("circles", [])),
                     "axis_lines_on_selected_layer": len(struc_det.get("lines", [])),
-                    "trusted_markers_used": len(struc_det.get("trusted_markers", [])),
+                    "trusted_markers_used_before_filter": len(struc_det.get("trusted_markers", [])),
                     "rejected_markers": len(struc_det.get("rejected_markers", [])),
                     "regions_found": len(st.session_state.regions),
                     "detection_modes": modes,
                 })
 
-            st.markdown("### 5. Segmentation")
+            st.markdown("### 5. Segmentation / Interior Filter")
             st.write(st.session_state.segmentation)
 
             st.markdown("### 6. Region Completeness Dashboard")
@@ -1869,7 +2088,7 @@ elif tool_choice == "2. Grid Label Sync":
                 "Select regions to sync",
                 options=all_regions,
                 default=ready_regions,
-                help="Only ready regions are selected by default. Incomplete or blocked regions are not safe to sync.",
+                help="Only ready regions are selected by default.",
             )
 
             st.markdown("### 7. Sync Preview")
@@ -1909,6 +2128,8 @@ elif tool_choice == "2. Grid Label Sync":
                     numeric_order,
                     alpha_order,
                     allow_block_text_write,
+                    expected_reference_marker_count=len(st.session_state.arch_detection.get("trusted_markers", [])),
+                    max_region_marker_ratio=max_region_marker_ratio,
                 )
 
                 if not ready:
@@ -1945,6 +2166,8 @@ elif tool_choice == "2. Grid Label Sync":
                             numeric_order,
                             alpha_order,
                             allow_block_text_write,
+                            expected_reference_marker_count=len(st.session_state.arch_detection.get("trusted_markers", [])),
+                            max_region_marker_ratio=max_region_marker_ratio,
                         )
 
                         if not ready:
@@ -2024,7 +2247,7 @@ elif tool_choice == "2. Grid Label Sync":
                 st.write("#### Rejected Target Markers")
                 st.dataframe(struc_det.get("rejected_markers", []), use_container_width=True)
 
-                st.write("#### Sample Target Trusted Markers")
+                st.write("#### Sample Target Trusted Markers Before Interior Filter")
                 sample = []
 
                 for m in struc_det.get("trusted_markers", [])[:300]:
@@ -2037,13 +2260,4 @@ elif tool_choice == "2. Grid Label Sync":
                         "writable": m.get("writable"),
                         "confidence": m.get("confidence"),
                         "detection_mode": m.get("detection_mode"),
-                        "text_matches": m.get("text_matches"),
-                        "candidate_texts": m.get("candidate_texts"),
-                        "circle_x": round(m.get("circle_center", (0, 0))[0], 3),
-                        "circle_y": round(m.get("circle_center", (0, 0))[1], 3),
-                    })
-
-                st.dataframe(sample, use_container_width=True)
-
-    else:
-        st.info("Upload both the Reference DXF and Target DXF to continue.")
+                        "text
