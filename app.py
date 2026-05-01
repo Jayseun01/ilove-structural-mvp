@@ -8,6 +8,7 @@ import re
 
 st.set_page_config(page_title="iLoveStructural", page_icon="🏗️", layout="wide")
 
+
 # =========================================================
 # SIDEBAR / HEADER
 # =========================================================
@@ -646,7 +647,15 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
             if text_inside_circle(t["point"], circle_center, circle_radius, extra_gap=text_gap):
                 candidate_texts.append(t)
 
-        if len(candidate_texts) == 1:
+        if len(candidate_texts) >= 1:
+            # Important fix:
+            # If overlapping bubbles put A/B or other close texts inside one circle,
+            # do not reject the marker. Pick the text closest to the circle center.
+            candidate_texts = sorted(
+                candidate_texts,
+                key=lambda t: euclidean(t["point"], circle_center)
+            )
+
             t = candidate_texts[0]
 
             bubbles.append({
@@ -659,17 +668,19 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
                 "circle_center": circle_center,
                 "circle_radius": circle_radius,
                 "circle_source": c.get("source", "unknown"),
+                "text_matches_before_closest_pick": len(candidate_texts),
+                "candidate_texts": [ct["text"] for ct in candidate_texts[:10]],
             })
 
         else:
             rejected.append({
                 "circle_center": circle_center,
                 "circle_radius": circle_radius,
-                "text_matches": len(candidate_texts),
+                "text_matches": 0,
                 "line_matches": 0,
-                "candidate_texts": [t["text"] for t in candidate_texts[:10]],
+                "candidate_texts": [],
                 "circle_source": c.get("source", "unknown"),
-                "reason": "No valid text in marker" if len(candidate_texts) == 0 else "Multiple texts in marker",
+                "reason": "No valid text in marker",
             })
 
     trusted_markers = []
@@ -692,7 +703,9 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
 
         else:
             closest_line, score, perp = closest_grid_line_to_circle(circle_center, lines, attach_gap)
-            relaxed_limit = max(attach_gap * 12.0, 2500.0)
+
+            # Safer than the old 2500 / attach_gap*12 setting.
+            relaxed_limit = max(attach_gap * 6.0, 1200.0)
 
             if closest_line is not None and perp is not None and perp <= relaxed_limit:
                 selected_line = closest_line
@@ -708,9 +721,9 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
             rejected.append({
                 "circle_center": circle_center,
                 "circle_radius": circle_radius,
-                "text_matches": 1,
+                "text_matches": b.get("text_matches_before_closest_pick", 1),
                 "line_matches": 0,
-                "candidate_texts": [b["label"]],
+                "candidate_texts": b.get("candidate_texts", [b["label"]]),
                 "circle_source": b.get("circle_source", "unknown"),
                 "reason": "Text found, but no attached/closest/same-label gridline could be inferred",
             })
@@ -733,6 +746,8 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
             "line_end": selected_line["end"],
             "line_length": selected_line["length"],
             "detection_mode": detection_mode,
+            "text_matches_before_closest_pick": b.get("text_matches_before_closest_pick", 1),
+            "candidate_texts": b.get("candidate_texts", [b["label"]]),
         })
 
     return {
@@ -747,6 +762,24 @@ def build_trusted_markers(doc, line_layer, text_layer, circle_layer, min_grid_le
 # =========================================================
 # AXIS GROUPING / FAMILY / SYNC
 # =========================================================
+
+def sort_axis_groups_for_family(groups, orientation, family):
+    """
+    Sorting rule:
+    - Numeric vertical axes: left-to-right, coord ascending.
+    - Numeric horizontal axes: top-to-bottom, coord descending.
+    - Alphabetic vertical axes: left-to-right, coord ascending.
+    - Alphabetic horizontal axes: bottom-to-top, coord ascending.
+
+    This fixes cases where numeric horizontal grids were syncing as 10,9,8... instead of 1,2,3...
+    """
+    reverse = False
+
+    if family == "numeric" and orientation == "horizontal":
+        reverse = True
+
+    return sorted(groups, key=lambda x: x["coord"], reverse=reverse)
+
 
 def resolve_axis_group(group, orientation):
     coord = round(sum(m["coord"] for m in group) / len(group), 3)
@@ -836,8 +869,17 @@ def infer_arch_families(arch_groups):
             numeric_orientation = "horizontal"
             alpha_orientation = "vertical"
 
-    numeric_arch = sorted(arch_groups.get(numeric_orientation, []), key=lambda x: x["coord"])
-    alpha_arch = sorted(arch_groups.get(alpha_orientation, []), key=lambda x: x["coord"])
+    numeric_arch = sort_axis_groups_for_family(
+        arch_groups.get(numeric_orientation, []),
+        numeric_orientation,
+        "numeric"
+    )
+
+    alpha_arch = sort_axis_groups_for_family(
+        arch_groups.get(alpha_orientation, []),
+        alpha_orientation,
+        "alpha"
+    )
 
     return {
         "numeric_orientation": numeric_orientation,
@@ -907,6 +949,37 @@ def build_axis_count_warnings(matched_regions):
             })
 
     return warnings
+
+
+def validate_matched_regions_before_apply(matched_regions):
+    problems = []
+
+    for region in matched_regions:
+        source_num = len(region.get("source_numeric_groups", []))
+        target_num = len(region.get("numeric_groups", []))
+
+        source_alpha = len(region.get("source_alpha_groups", []))
+        target_alpha = len(region.get("alpha_groups", []))
+
+        if source_num != target_num:
+            problems.append({
+                "region": region.get("name", ""),
+                "family": "numeric",
+                "source_count": source_num,
+                "target_count": target_num,
+                "problem": f"Numeric axis mismatch: source has {source_num}, target has {target_num}."
+            })
+
+        if source_alpha != target_alpha:
+            problems.append({
+                "region": region.get("name", ""),
+                "family": "alphabetic",
+                "source_count": source_alpha,
+                "target_count": target_alpha,
+                "problem": f"Alphabetic axis mismatch: source has {source_alpha}, target has {target_alpha}."
+            })
+
+    return problems
 
 
 def apply_axis_group_labels(source_axis_groups, target_axis_groups, writable_only=True):
@@ -1018,10 +1091,142 @@ def assign_value_to_group(value, groups):
     return None
 
 
-def build_structural_regions_by_empty_space(trusted_markers, min_region_markers=6):
+def marker_center_xy(marker):
+    cx, cy = marker["circle_center"]
+    return float(cx), float(cy)
+
+
+def squared_distance(p1, p2):
+    return (p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2
+
+
+def cluster_markers_by_expected_count(trusted_markers, expected_region_markers, max_iter=80):
+    """
+    Marker-count-aware spatial clustering.
+
+    Example:
+    architectural reference = 17 trusted markers
+    structural target = 119 trusted markers
+    119 / 17 = 7 regions
+    """
+    if not trusted_markers:
+        return None
+
+    if not expected_region_markers or expected_region_markers <= 0:
+        return None
+
+    total = len(trusted_markers)
+    estimated_regions_float = total / expected_region_markers
+    estimated_regions = int(round(estimated_regions_float))
+
+    if estimated_regions < 2:
+        return None
+
+    # Only use this if total markers are close to a whole number of reference plans.
+    if abs(estimated_regions_float - estimated_regions) > 0.20:
+        return None
+
+    points = [marker_center_xy(m) for m in trusted_markers]
+
+    # Deterministic farthest-point initialization.
+    first_index = min(range(len(points)), key=lambda i: (points[i][0] + points[i][1], points[i][0]))
+    centers = [points[first_index]]
+
+    while len(centers) < estimated_regions:
+        farthest_index = max(
+            range(len(points)),
+            key=lambda i: min(squared_distance(points[i], c) for c in centers)
+        )
+        centers.append(points[farthest_index])
+
+    clusters = [[] for _ in range(estimated_regions)]
+
+    for _ in range(max_iter):
+        new_clusters = [[] for _ in range(estimated_regions)]
+
+        for marker, point in zip(trusted_markers, points):
+            nearest_index = min(
+                range(estimated_regions),
+                key=lambda i: squared_distance(point, centers[i])
+            )
+            new_clusters[nearest_index].append(marker)
+
+        if any(len(c) == 0 for c in new_clusters):
+            return None
+
+        new_centers = []
+
+        for cluster in new_clusters:
+            xs = [marker_center_xy(m)[0] for m in cluster]
+            ys = [marker_center_xy(m)[1] for m in cluster]
+            new_centers.append((sum(xs) / len(xs), sum(ys) / len(ys)))
+
+        movement = sum(squared_distance(a, b) for a, b in zip(centers, new_centers))
+        centers = new_centers
+        clusters = new_clusters
+
+        if movement < 1e-6:
+            break
+
+    # Require clusters to be reasonably close to the expected marker count.
+    allowed_difference = max(3, int(expected_region_markers * 0.30))
+
+    for cluster in clusters:
+        if abs(len(cluster) - expected_region_markers) > allowed_difference:
+            return None
+
+    return clusters
+
+
+def build_structural_regions_by_empty_space(
+    trusted_markers,
+    min_region_markers=6,
+    expected_region_markers=None,
+):
     if not trusted_markers:
         return [], {}
 
+    # FIRST TRY: marker-count-aware clustering.
+    count_based_clusters = cluster_markers_by_expected_count(
+        trusted_markers,
+        expected_region_markers=expected_region_markers,
+    )
+
+    if count_based_clusters:
+        regions = []
+        sortable_clusters = []
+
+        for cluster in count_based_clusters:
+            bbox = bbox_from_markers(cluster)
+            cx, cy = bbox["centroid"]
+            sortable_clusters.append((cy, cx, cluster, bbox))
+
+        # Top-to-bottom, then left-to-right.
+        sortable_clusters.sort(key=lambda item: (-item[0], item[1]))
+
+        for i, (_, _, markers, bbox) in enumerate(sortable_clusters, start=1):
+            axis_groups = group_markers_by_axis(markers)
+
+            regions.append({
+                "name": f"Region {i}",
+                "markers": markers,
+                "axis_groups": axis_groups,
+                "bbox": bbox,
+                "grid_bucket": ("count_cluster", i),
+                "marker_count": len(markers),
+            })
+
+        return regions, {
+            "segmentation_method": "marker_count_spatial_clustering",
+            "expected_region_markers": expected_region_markers,
+            "total_trusted_markers": len(trusted_markers),
+            "estimated_region_count": len(regions),
+            "cluster_marker_counts": [len(r["markers"]) for r in regions],
+            "regions_kept": len(regions),
+            "min_region_markers": min_region_markers,
+        }
+
+    # FALLBACK: original empty-space method.
     xs = [m["circle_center"][0] for m in trusted_markers]
     ys = [m["circle_center"][1] for m in trusted_markers]
 
@@ -1063,6 +1268,9 @@ def build_structural_regions_by_empty_space(trusted_markers, min_region_markers=
         n += 1
 
     return regions, {
+        "segmentation_method": "empty_space_fallback",
+        "expected_region_markers": expected_region_markers,
+        "total_trusted_markers": len(trusted_markers),
         "x_gap_threshold": x_gap_threshold,
         "y_gap_threshold": y_gap_threshold,
         "x_group_count": len(x_groups),
@@ -1081,14 +1289,16 @@ def get_region_family_groups(region, numeric_orientation, alpha_orientation, str
     """
     axis_groups = region["axis_groups"]
 
-    numeric_groups = sorted(
+    numeric_groups = sort_axis_groups_for_family(
         axis_groups.get(numeric_orientation, []),
-        key=lambda x: x["coord"]
+        numeric_orientation,
+        "numeric"
     )
 
-    alpha_groups = sorted(
+    alpha_groups = sort_axis_groups_for_family(
         axis_groups.get(alpha_orientation, []),
-        key=lambda x: x["coord"]
+        alpha_orientation,
+        "alpha"
     )
 
     if strict_label_filter:
@@ -1114,10 +1324,12 @@ def score_region_for_anchor(region, numeric_arch_groups, alpha_arch_groups, nume
     num_score = min(rn, an) / max(rn, an) if rn and an else 0.0
     alp_score = min(ra, aa) / max(ra, aa) if ra and aa else 0.0
 
-    expected_marker_count = max(1, (an + aa) * 2)
+    expected_marker_count = max(1, an + aa)
     marker_score = min(1.0, region["marker_count"] / expected_marker_count)
 
-    total = round(0.4 * num_score + 0.4 * alp_score + 0.2 * marker_score, 3)
+    full_count_bonus = 0.2 if (rn == an and ra == aa) else 0.0
+
+    total = round(0.35 * num_score + 0.35 * alp_score + 0.10 * marker_score + full_count_bonus, 3)
 
     return total, numeric_groups, alpha_groups
 
@@ -1152,11 +1364,18 @@ def prepare_propagator_sync(
             "region": region,
             "numeric_groups": numeric_groups,
             "alpha_groups": alpha_groups,
+            "complete": (
+                len(numeric_groups) == len(numeric_arch_groups)
+                and len(alpha_groups) == len(alpha_arch_groups)
+            )
         })
 
-    scored.sort(key=lambda x: x["score"], reverse=True)
+    # Prefer complete regions as anchor. If none complete, pick best but mark as problematic.
+    complete_items = [item for item in scored if item["complete"]]
+    candidate_pool = complete_items if complete_items else scored
+    candidate_pool.sort(key=lambda x: x["score"], reverse=True)
 
-    anchor_item = scored[0]
+    anchor_item = candidate_pool[0]
     anchor_region = anchor_item["region"]
     anchor_numeric = anchor_item["numeric_groups"]
     anchor_alpha = anchor_item["alpha_groups"]
@@ -1164,36 +1383,42 @@ def prepare_propagator_sync(
     synced_anchor_numeric = build_propagated_axis_groups(numeric_arch_groups, anchor_numeric)
     synced_anchor_alpha = build_propagated_axis_groups(alpha_arch_groups, anchor_alpha)
 
-    matched_regions.append({
-        "name": anchor_region["name"],
-        "bbox": anchor_region["bbox"],
-        "numeric_groups": anchor_numeric,
-        "alpha_groups": anchor_alpha,
-        "source_numeric_groups": numeric_arch_groups,
-        "source_alpha_groups": alpha_arch_groups,
-        "synced_numeric_groups": synced_anchor_numeric,
-        "synced_alpha_groups": synced_anchor_alpha,
-        "grid_bucket": anchor_region["grid_bucket"],
-        "match_mode": "anchor",
-        "source_reference": "Architecture",
-        "marker_count": anchor_region["marker_count"],
-    })
+    anchor_complete = (
+        len(anchor_numeric) == len(numeric_arch_groups)
+        and len(anchor_alpha) == len(alpha_arch_groups)
+    )
 
-    mapping_preview.extend(build_axis_mapping_preview(
-        numeric_arch_groups,
-        anchor_numeric,
-        "numeric",
-        anchor_region["name"],
-        "Architecture"
-    ))
+    if anchor_complete:
+        matched_regions.append({
+            "name": anchor_region["name"],
+            "bbox": anchor_region["bbox"],
+            "numeric_groups": anchor_numeric,
+            "alpha_groups": anchor_alpha,
+            "source_numeric_groups": numeric_arch_groups,
+            "source_alpha_groups": alpha_arch_groups,
+            "synced_numeric_groups": synced_anchor_numeric,
+            "synced_alpha_groups": synced_anchor_alpha,
+            "grid_bucket": anchor_region["grid_bucket"],
+            "match_mode": "anchor",
+            "source_reference": "Architecture",
+            "marker_count": anchor_region["marker_count"],
+        })
 
-    mapping_preview.extend(build_axis_mapping_preview(
-        alpha_arch_groups,
-        anchor_alpha,
-        "alphabetic",
-        anchor_region["name"],
-        "Architecture"
-    ))
+        mapping_preview.extend(build_axis_mapping_preview(
+            numeric_arch_groups,
+            anchor_numeric,
+            "numeric",
+            anchor_region["name"],
+            "Architecture"
+        ))
+
+        mapping_preview.extend(build_axis_mapping_preview(
+            alpha_arch_groups,
+            anchor_alpha,
+            "alphabetic",
+            anchor_region["name"],
+            "Architecture"
+        ))
 
     for item in scored:
         region = item["region"]
@@ -1202,21 +1427,35 @@ def prepare_propagator_sync(
         writable_count = len([m for m in region["markers"] if is_entity_writable(m)])
 
         if region["name"] == anchor_region["name"]:
+            classification = "anchor" if anchor_complete else "rejected"
+            reason = (
+                "Best complete structural region selected as propagator anchor."
+                if anchor_complete
+                else "Best anchor candidate is incomplete, so sync is blocked for this anchor."
+            )
+            will_sync = anchor_complete
+
             region_match_report.append({
                 "region": region["name"],
-                "classification": "anchor",
+                "classification": classification,
                 "source_reference": "Architecture",
                 "trusted_markers": region["marker_count"],
                 "writable_markers": writable_count,
                 "numeric_axes": len(numeric_groups),
                 "alphabetic_axes": len(alpha_groups),
+                "expected_numeric_axes": len(numeric_arch_groups),
+                "expected_alphabetic_axes": len(alpha_arch_groups),
                 "score": item["score"],
-                "reason": "Best structural region selected as propagator anchor.",
-                "will_sync": True,
+                "reason": reason,
+                "will_sync": will_sync,
             })
             continue
 
-        usable = len(numeric_groups) > 0 or len(alpha_groups) > 0
+        usable = (
+            anchor_complete
+            and len(numeric_groups) == len(synced_anchor_numeric)
+            and len(alpha_groups) == len(synced_anchor_alpha)
+        )
 
         if usable:
             matched_regions.append({
@@ -1249,12 +1488,16 @@ def prepare_propagator_sync(
             ))
 
             classification = "propagated"
-            reason = f"Synced from propagator {anchor_region['name']}."
+            reason = f"Complete region synced from propagator {anchor_region['name']}."
             will_sync = True
 
         else:
             classification = "rejected"
-            reason = "No usable numeric or alphabetic axis group found."
+            reason = (
+                "Incomplete region or axis count mismatch. "
+                f"Expected numeric={len(synced_anchor_numeric)}, alphabetic={len(synced_anchor_alpha)}; "
+                f"found numeric={len(numeric_groups)}, alphabetic={len(alpha_groups)}."
+            )
             will_sync = False
 
         region_match_report.append({
@@ -1265,6 +1508,8 @@ def prepare_propagator_sync(
             "writable_markers": writable_count,
             "numeric_axes": len(numeric_groups),
             "alphabetic_axes": len(alpha_groups),
+            "expected_numeric_axes": len(synced_anchor_numeric),
+            "expected_alphabetic_axes": len(synced_anchor_alpha),
             "score": item["score"],
             "reason": reason,
             "will_sync": will_sync,
@@ -1293,7 +1538,11 @@ def prepare_direct_sync(
         )
 
         writable_count = len([m for m in region["markers"] if is_entity_writable(m)])
-        usable = len(numeric_groups) > 0 or len(alpha_groups) > 0
+
+        usable = (
+            len(numeric_groups) == len(numeric_arch_groups)
+            and len(alpha_groups) == len(alpha_arch_groups)
+        )
 
         if usable:
             matched_regions.append({
@@ -1326,13 +1575,17 @@ def prepare_direct_sync(
             ))
 
             classification = "direct"
-            reason = "Direct Architecture to Structural region sync."
+            reason = "Complete region. Direct Architecture to Structural region sync."
             will_sync = True
             score = 1.0
 
         else:
             classification = "rejected"
-            reason = "No usable grid axes detected in this structural region."
+            reason = (
+                "Incomplete region or axis count mismatch. "
+                f"Expected numeric={len(numeric_arch_groups)}, alphabetic={len(alpha_arch_groups)}; "
+                f"found numeric={len(numeric_groups)}, alphabetic={len(alpha_groups)}."
+            )
             will_sync = False
             score = 0.0
 
@@ -1344,6 +1597,8 @@ def prepare_direct_sync(
             "writable_markers": writable_count,
             "numeric_axes": len(numeric_groups),
             "alphabetic_axes": len(alpha_groups),
+            "expected_numeric_axes": len(numeric_arch_groups),
+            "expected_alphabetic_axes": len(alpha_arch_groups),
             "score": score,
             "reason": reason,
             "will_sync": will_sync,
@@ -1496,8 +1751,8 @@ if tool_choice == "1. DXF Smart Purger":
 elif tool_choice == "2. Grid Label Sync":
     st.subheader("Tool 2: Grid Label Sync")
     st.caption(
-        "Hybrid detection: circle + valid grid text + attached gridline OR closest gridline. "
-        "Supports multiple structural plans using propagator sync."
+        "Hybrid detection: circle + closest valid grid text + attached gridline OR closest gridline. "
+        "Incomplete regions are blocked from syncing."
     )
 
     init_sync_state()
@@ -1601,13 +1856,13 @@ elif tool_choice == "2. Grid Label Sync":
             arch_layers = get_layer_names(st.session_state.arch_doc)
             struc_layers = get_layer_names(st.session_state.struc_doc)
 
-            arch_line_default = pick_default_layer(arch_layers, ["S-GRID"])
-            arch_text_default = pick_default_layer(arch_layers, ["S-GRID-IDEN"])
-            arch_circle_default = pick_default_layer(arch_layers, ["S-GRID-IDEN"])
+            arch_line_default = pick_default_layer(arch_layers, ["S-GRID", "GRID", "GRIDLINELAYER"])
+            arch_text_default = pick_default_layer(arch_layers, ["S-GRID-IDEN", "DEFAULTLAYER", "GRID-ID"])
+            arch_circle_default = pick_default_layer(arch_layers, ["S-GRID-IDEN", "DEFAULTLAYER", "GRID-ID"])
 
-            struc_line_default = pick_default_layer(struc_layers, ["GRIDLINELAYER", "S-GRID"])
-            struc_text_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-STRS-IDEN", "S-GRID-IDEN"])
-            struc_circle_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-GRID-IDEN"])
+            struc_line_default = pick_default_layer(struc_layers, ["GRIDLINELAYER", "S-GRID", "GRID"])
+            struc_text_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-STRS-IDEN", "S-GRID-IDEN", "GRID-ID"])
+            struc_circle_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-GRID-IDEN", "GRID-ID"])
 
             st.markdown("### Layer Setup")
 
@@ -1687,6 +1942,18 @@ elif tool_choice == "2. Grid Label Sync":
                         st.session_state.arch_detection = arch_detection
                         st.session_state.struc_detection = struc_detection
 
+                        if arch_detection["rejected_markers"]:
+                            st.warning(
+                                f"Reference drawing has {len(arch_detection['rejected_markers'])} rejected marker(s). "
+                                "The reference may be incomplete. Review rejected markers before applying sync."
+                            )
+
+                        if struc_detection["rejected_markers"]:
+                            st.warning(
+                                f"Structural drawing has {len(struc_detection['rejected_markers'])} rejected marker(s). "
+                                "Some regions may be incomplete."
+                            )
+
                         arch_axis_groups = group_markers_by_axis(
                             arch_detection["trusted_markers"],
                             tol=tolerance
@@ -1700,22 +1967,27 @@ elif tool_choice == "2. Grid Label Sync":
                         numeric_orientation = fam["numeric_orientation"]
                         alpha_orientation = fam["alpha_orientation"]
 
-                        numeric_arch_groups = sorted(
+                        numeric_arch_groups = sort_axis_groups_for_family(
                             arch_axis_groups.get(numeric_orientation, []),
-                            key=lambda x: x["coord"]
+                            numeric_orientation,
+                            "numeric"
                         )
 
-                        alpha_arch_groups = sorted(
+                        alpha_arch_groups = sort_axis_groups_for_family(
                             arch_axis_groups.get(alpha_orientation, []),
-                            key=lambda x: x["coord"]
+                            alpha_orientation,
+                            "alpha"
                         )
 
                         st.session_state.numeric_arch_groups = numeric_arch_groups
                         st.session_state.alpha_arch_groups = alpha_arch_groups
 
+                        expected_region_markers = len(arch_detection["trusted_markers"])
+
                         structural_regions, segmentation_summary = build_structural_regions_by_empty_space(
                             struc_detection["trusted_markers"],
                             min_region_markers=min_region_markers,
+                            expected_region_markers=expected_region_markers,
                         )
 
                         st.session_state.structural_regions = structural_regions
@@ -1747,12 +2019,12 @@ elif tool_choice == "2. Grid Label Sync":
                         if matched_regions:
                             st.success(
                                 f"Detected {len(structural_regions)} structural region(s). "
-                                f"{len(matched_regions)} region(s) are ready for sync."
+                                f"{len(matched_regions)} complete region(s) are ready for sync."
                             )
                         else:
                             st.warning(
                                 f"Detected {len(structural_regions)} structural region(s), "
-                                f"but 0 region(s) qualified for sync. Check diagnostics below."
+                                f"but 0 complete region(s) qualified for sync. Check diagnostics below."
                             )
 
                     except Exception as e:
@@ -1783,14 +2055,14 @@ elif tool_choice == "2. Grid Label Sync":
                         "anchor_region": anchor_region["name"],
                         "score": st.session_state.anchor_region["score"],
                         "trusted_markers": len(anchor_region["markers"]),
-                        "reason": "This structural region is synced from Architecture first, then used as the propagator.",
+                        "reason": "This structural region is selected as the propagator anchor only if complete.",
                     })
 
                 except Exception:
                     pass
 
             if st.session_state.segmentation_summary:
-                st.markdown("### Empty-Space Segmentation Summary")
+                st.markdown("### Segmentation Summary")
                 st.write(st.session_state.segmentation_summary)
 
             if st.session_state.region_match_report:
@@ -1808,58 +2080,68 @@ elif tool_choice == "2. Grid Label Sync":
                 if axis_count_warnings:
                     st.warning(
                         "Some matched regions have different source/target axis counts. "
-                        "Review carefully before applying the sync."
+                        "These will block Apply Sync."
                     )
                     st.dataframe(axis_count_warnings, use_container_width=True)
             else:
-                st.info("No sync preview yet.")
+                st.info("No sync preview yet, or all regions were rejected as incomplete.")
 
             st.markdown("### Apply Sync")
 
             if st.session_state.apply_ready:
-                if st.button("✍️ Apply Label Sync"):
-                    try:
-                        changed = 0
-                        skipped_non_writable = 0
+                apply_blockers = validate_matched_regions_before_apply(st.session_state.matched_regions)
 
-                        for region in st.session_state.matched_regions:
-                            c1, s1 = apply_axis_group_labels(
-                                region["source_numeric_groups"],
-                                region["numeric_groups"],
-                                writable_only=writable_only,
-                            )
+                if apply_blockers:
+                    st.error(
+                        "Sync is blocked because at least one matched region has incomplete/mismatched axis counts. "
+                        "Fix detection/segmentation first, then prepare again."
+                    )
+                    st.dataframe(apply_blockers, use_container_width=True)
 
-                            c2, s2 = apply_axis_group_labels(
-                                region["source_alpha_groups"],
-                                region["alpha_groups"],
-                                writable_only=writable_only,
-                            )
+                else:
+                    if st.button("✍️ Apply Label Sync"):
+                        try:
+                            changed = 0
+                            skipped_non_writable = 0
 
-                            changed += c1 + c2
-                            skipped_non_writable += s1 + s2
+                            for region in st.session_state.matched_regions:
+                                c1, s1 = apply_axis_group_labels(
+                                    region["source_numeric_groups"],
+                                    region["numeric_groups"],
+                                    writable_only=writable_only,
+                                )
 
-                        st.session_state.labels_changed_count = changed
-                        st.session_state.skipped_non_writable_count = skipped_non_writable
+                                c2, s2 = apply_axis_group_labels(
+                                    region["source_alpha_groups"],
+                                    region["alpha_groups"],
+                                    writable_only=writable_only,
+                                )
 
-                        if changed > 0:
-                            st.session_state.last_apply_message = (
-                                f"Label sync complete. {changed} trusted structural marker text entities updated "
-                                f"across {len(st.session_state.matched_regions)} matched region(s)."
-                            )
-                            st.success(st.session_state.last_apply_message)
-                        else:
-                            st.info("No text changes were needed, or detected labels already match.")
+                                changed += c1 + c2
+                                skipped_non_writable += s1 + s2
 
-                        if skipped_non_writable > 0:
-                            st.warning(
-                                f"{skipped_non_writable} marker text entities were skipped because they are not safely writable. "
-                                f"If labels are inside block definitions, convert them to attributes or test on a copied DXF."
-                            )
+                            st.session_state.labels_changed_count = changed
+                            st.session_state.skipped_non_writable_count = skipped_non_writable
 
-                    except Exception as e:
-                        st.error(f"Failed to apply label sync: {e}")
+                            if changed > 0:
+                                st.session_state.last_apply_message = (
+                                    f"Label sync complete. {changed} trusted structural marker text entities updated "
+                                    f"across {len(st.session_state.matched_regions)} matched region(s)."
+                                )
+                                st.success(st.session_state.last_apply_message)
+                            else:
+                                st.info("No text changes were needed, or detected labels already match.")
+
+                            if skipped_non_writable > 0:
+                                st.warning(
+                                    f"{skipped_non_writable} marker text entities were skipped because they are not safely writable. "
+                                    f"If labels are inside block definitions, convert them to attributes or test on a copied DXF."
+                                )
+
+                        except Exception as e:
+                            st.error(f"Failed to apply label sync: {e}")
             else:
-                st.info("Prepare Label Sync first.")
+                st.info("Prepare Label Sync first. If no region qualifies, check the Region Match Report.")
 
             st.markdown("### Download")
 
@@ -1915,81 +2197,4 @@ elif tool_choice == "2. Grid Label Sync":
                     "axis_lines_on_selected_line_layer": len(struc_det.get("lines", [])),
                     "trusted_markers_found": len(struc_det.get("trusted_markers", [])),
                     "rejected_markers": len(struc_det.get("rejected_markers", [])),
-                    "structural_regions_found": len(st.session_state.structural_regions),
-                    "matched_regions": len(st.session_state.matched_regions),
-                    "detection_modes": struc_modes,
-                })
-
-                if st.session_state.family_summary:
-                    st.write("#### Architectural Family Inference")
-                    st.write(st.session_state.family_summary)
-
-                if st.session_state.structural_regions:
-                    st.write("#### Structural Region Summary")
-
-                    rows = []
-
-                    for r in st.session_state.structural_regions:
-                        writable_count = len([m for m in r["markers"] if is_entity_writable(m)])
-
-                        rows.append({
-                            "region": r["name"],
-                            "trusted_markers": len(r["markers"]),
-                            "writable_markers": writable_count,
-                            "vertical_axes": len(r["axis_groups"].get("vertical", [])),
-                            "horizontal_axes": len(r["axis_groups"].get("horizontal", [])),
-                            "bbox_width": round(r["bbox"]["width"], 3),
-                            "bbox_height": round(r["bbox"]["height"], 3),
-                            "grid_bucket": r["grid_bucket"],
-                        })
-
-                    st.dataframe(rows, use_container_width=True)
-
-                if st.session_state.matched_regions:
-                    st.write("#### Matched Region Sync Summary")
-
-                    matched_rows = []
-
-                    for r in st.session_state.matched_regions:
-                        matched_rows.append({
-                            "region": r.get("name"),
-                            "match_mode": r.get("match_mode"),
-                            "source_reference": r.get("source_reference"),
-                            "source_numeric_axes": len(r.get("source_numeric_groups", [])),
-                            "target_numeric_axes": len(r.get("numeric_groups", [])),
-                            "source_alphabetic_axes": len(r.get("source_alpha_groups", [])),
-                            "target_alphabetic_axes": len(r.get("alpha_groups", [])),
-                            "target_markers": r.get("marker_count"),
-                        })
-
-                    st.dataframe(matched_rows, use_container_width=True)
-
-                if struc_det.get("rejected_markers"):
-                    st.write("#### Rejected Structural Markers")
-                    st.dataframe(struc_det["rejected_markers"], use_container_width=True)
-
-                if struc_det.get("trusted_markers"):
-                    st.write("#### Sample Trusted Structural Markers")
-
-                    sample_rows = []
-
-                    for m in struc_det.get("trusted_markers", [])[:150]:
-                        sample_rows.append({
-                            "label": m.get("label"),
-                            "orientation": m.get("orientation"),
-                            "coord": m.get("coord"),
-                            "text_source": m.get("text_source"),
-                            "detection_mode": m.get("detection_mode"),
-                            "circle_x": round(m.get("circle_center", (0, 0))[0], 3),
-                            "circle_y": round(m.get("circle_center", (0, 0))[1], 3),
-                        })
-
-                    st.dataframe(sample_rows, use_container_width=True)
-
-                st.caption(
-                    "Hybrid marker authentication: circle + valid grid text + attached gridline OR closest gridline. "
-                    "Multiple structural plans are segmented by empty space, then synced by region."
-                )
-
-    else:
-        st.info("Please upload both the Architectural DXF and Structural DXF files.")
+                    "struct
