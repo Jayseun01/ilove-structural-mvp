@@ -2017,13 +2017,31 @@ elif tool_choice == "2. Grid Label Sync":
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
-        axis_tol = st.slider("Axis Group Tolerance", 0.0, 500.0, 10.0, 0.5)
+        axis_tol = st.slider(
+            "Axis Group Tolerance",
+            0.0,
+            500.0,
+            10.0,
+            0.5,
+        )
 
     with c2:
-        text_gap = st.slider("Text-in-Bubble Gap", 20.0, 2000.0, 180.0, 10.0)
+        text_gap = st.slider(
+            "Text-in-Bubble Gap",
+            20.0,
+            2000.0,
+            180.0,
+            10.0,
+        )
 
-         with c3:
-        attach_gap = st.slider("Gridline Attach Gap", 20.0, 3000.0, 180.0, 10.0)
+    with c3:
+        attach_gap = st.slider(
+            "Gridline Attach Gap",
+            20.0,
+            3000.0,
+            180.0,
+            10.0,
+        )
 
     with c4:
         min_grid_length = st.number_input(
@@ -2144,9 +2162,7 @@ elif tool_choice == "2. Grid Label Sync":
             5,
             1,
             help="If reference numeric labels are 1–17, extra 5 allows candidates up to 22 but rejects slab labels like 145.",
-        )
-
-    st.markdown("### 2. Upload Files")
+        )    st.markdown("### 1. Detection Settings")
 
     u1, u2 = st.columns(2)
 
