@@ -511,7 +511,17 @@ def extract_axis_lines(doc, layer_name, min_length=1000.0):
             if e.dxftype() == "LINE":
                 x1, y1, _ = e.dxf.start
                 x2, y2, _ = e.dxf.end
-                add_axis_segment(lines, e, x1, y1, x2, y2, e.dxf.layer, min_length)
+
+                add_axis_segment(
+                    lines,
+                    e,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    e.dxf.layer,
+                    min_length,
+                )
 
             elif e.dxftype() == "LWPOLYLINE":
                 pts = list(e.get_points())
@@ -519,7 +529,17 @@ def extract_axis_lines(doc, layer_name, min_length=1000.0):
                 for i in range(len(pts) - 1):
                     x1, y1 = float(pts[i][0]), float(pts[i][1])
                     x2, y2 = float(pts[i + 1][0]), float(pts[i + 1][1])
-                    add_axis_segment(lines, e, x1, y1, x2, y2, e.dxf.layer, min_length)
+
+                    add_axis_segment(
+                        lines,
+                        e,
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        e.dxf.layer,
+                        min_length,
+                    )
 
             elif e.dxftype() == "POLYLINE":
                 pts = [
@@ -530,7 +550,22 @@ def extract_axis_lines(doc, layer_name, min_length=1000.0):
                 for i in range(len(pts) - 1):
                     x1, y1 = pts[i]
                     x2, y2 = pts[i + 1]
-                    add_axis_segment(lines, e, x1, y1, x2, y2, e.dxf.layer, min_length)
+
+                    add_axis_segment(
+                        lines,
+                        e,
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        e.dxf.layer,
+                        min_length,
+                    )
+
+        except Exception:
+            continue
+
+    return deduplicate_axis_lines(lines)
 
 # =========================================================
 # MARKER DETECTION
