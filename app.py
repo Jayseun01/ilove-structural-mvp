@@ -115,6 +115,14 @@ def is_alpha_label(text):
     return bool(re.fullmatch(r"[A-Z]{1,3}'?", clean_text(text)))
 
 
+def numeric_label_value(text):
+    txt = clean_text(text)
+    m = re.fullmatch(r"(\d{1,3})([A-Z]?)", txt)
+    if not m:
+        return None
+    return int(m.group(1))
+
+
 def euclidean(p1, p2):
     return math.dist((p1[0], p1[1]), (p2[0], p2[1]))
 
@@ -874,14 +882,11 @@ def resolve_axis_group(group, orientation):
         "writable_marker_count": len([m for m in group if m.get("writable")]),
         "min_confidence": min([m.get("confidence", 0) for m in group]) if group else 0,
         "avg_confidence": round(sum([m.get("confidence", 0) for m in group]) / len(group), 1) if group else 0,
-
-        # Important safety diagnostics.
         "label_count": label_count,
         "label_counts": counts,
         "mixed_labels": sorted(counts.keys()),
         "majority_label_count": majority_count,
         "majority_label_ratio": round(majority_ratio, 3),
-
         "bbox": {
             "min_x": min(xs),
             "max_x": max(xs),
@@ -966,11 +971,20 @@ def sort_groups(groups, orientation, order_mode, family):
     elif order_mode == "Descending":
         reverse = True
     else:
-        # Auto:
-        # Horizontal numeric axes are often read top-to-bottom, so descending Y.
         reverse = family == "numeric" and orientation == "horizontal"
 
     return sorted(groups, key=lambda x: x["coord"], reverse=reverse)
+
+
+def sort_axis_lines_for_family(lines, orientation, order_mode, family):
+    if order_mode == "Ascending":
+        reverse = False
+    elif order_mode == "Descending":
+        reverse = True
+    else:
+        reverse = family == "numeric" and orientation == "horizontal"
+
+    return sorted(lines, key=lambda x: x["coord"], reverse=reverse)
 
 
 def get_family_groups(region_or_axis_groups, numeric_orientation, alpha_orientation, numeric_order, alpha_order):
@@ -1016,10 +1030,6 @@ def bbox_from_markers(markers):
 
 
 def marker_is_near_region_perimeter(marker, bbox, band_ratio=0.18, min_band=1500.0):
-    """
-    Keeps grid bubbles near the outside edge of a plan region.
-    This helps ignore slab/detail bubbles inside the plan.
-    """
     x, y = marker["circle_center"]
 
     width = max(float(bbox.get("width", 0.0)), 1.0)
@@ -1261,7 +1271,7 @@ def build_regions(markers, axis_tol, expected_markers_per_region=None, forced_re
 
 
 # =========================================================
-# SYNC / AUDIT
+# STRICT NORMAL SYNC
 # =========================================================
 
 def validate_axis_group_purity(groups, family_name):
@@ -1478,7 +1488,7 @@ def apply_group_labels(source_groups, target_groups, allow_block_text_write=Fals
         }]
 
     for i, (s, t) in enumerate(zip(source_groups, target_groups), start=1):
-        new_label = s["label"]
+        new_label = clean_text(s["label"])
 
         for marker in t["markers"]:
             entity = marker["text_entity"]
@@ -1533,6 +1543,355 @@ def apply_group_labels(source_groups, target_groups, allow_block_text_write=Fals
                     "confidence": marker.get("confidence"),
                     "entity_handle": marker.get("text_handle", get_entity_handle(entity)),
                 })
+
+    return changed, skipped, audit
+
+
+# =========================================================
+# SLAB / DETAIL ENDPOINT RECOVERY SYNC
+# =========================================================
+
+def source_numeric_range(source_numeric, extra=5):
+    vals = []
+
+    for g in source_numeric:
+        v = numeric_label_value(g.get("label", ""))
+        if v is not None:
+            vals.append(v)
+
+    if not vals:
+        return 1, 999
+
+    return max(1, min(vals) - extra), max(vals) + extra
+
+
+def plausible_recovery_label(label, family, source_numeric, source_alpha, numeric_extra=5):
+    label = clean_text(label)
+
+    if family == "numeric":
+        v = numeric_label_value(label)
+
+        if v is None:
+            return False
+
+        lo, hi = source_numeric_range(source_numeric, extra=numeric_extra)
+
+        return lo <= v <= hi
+
+    if family == "alphabetic":
+        if not is_alpha_label(label):
+            return False
+
+        source_labels = {clean_text(g.get("label", "")) for g in source_alpha}
+
+        if label in source_labels:
+            return True
+
+        # Allow nearby alphabetic mistakes, but not long text.
+        return bool(re.fullmatch(r"[A-Z]{1,2}'?", label))
+
+    return False
+
+
+def line_overlaps_region_bbox(line, bbox, margin=2000.0):
+    x1, y1 = line["start"]
+    x2, y2 = line["end"]
+
+    if line["orientation"] == "vertical":
+        coord = line["coord"]
+
+        if coord < bbox["min_x"] - margin or coord > bbox["max_x"] + margin:
+            return False
+
+        seg_min = min(y1, y2)
+        seg_max = max(y1, y2)
+
+        return seg_max >= bbox["min_y"] - margin and seg_min <= bbox["max_y"] + margin
+
+    if line["orientation"] == "horizontal":
+        coord = line["coord"]
+
+        if coord < bbox["min_y"] - margin or coord > bbox["max_y"] + margin:
+            return False
+
+        seg_min = min(x1, x2)
+        seg_max = max(x1, x2)
+
+        return seg_max >= bbox["min_x"] - margin and seg_min <= bbox["max_x"] + margin
+
+    return False
+
+
+def get_region_axis_lines(region, all_lines, orientation, order_mode, family, search_margin):
+    bbox = region["bbox"]
+
+    lines = [
+        ln for ln in all_lines
+        if ln.get("orientation") == orientation
+        and line_overlaps_region_bbox(ln, bbox, margin=search_margin)
+    ]
+
+    return sort_axis_lines_for_family(lines, orientation, order_mode, family)
+
+
+def endpoint_points_for_axis_line(line, bbox):
+    if line["orientation"] == "vertical":
+        x = line["coord"]
+        return [
+            (x, bbox["min_y"]),
+            (x, bbox["max_y"]),
+        ]
+
+    y = line["coord"]
+    return [
+        (bbox["min_x"], y),
+        (bbox["max_x"], y),
+    ]
+
+
+def marker_endpoint_distance(marker, endpoints):
+    p = marker["circle_center"]
+    distances = [euclidean(p, ep) for ep in endpoints]
+    return min(distances), distances.index(min(distances))
+
+
+def build_endpoint_recovery_plan(
+    region,
+    source_numeric,
+    source_alpha,
+    numeric_orientation,
+    alpha_orientation,
+    numeric_order,
+    alpha_order,
+    all_lines,
+    endpoint_radius,
+    allow_block_text_write,
+    numeric_extra=5,
+):
+    blockers = []
+    warnings = []
+    plan_rows = []
+
+    bbox = region["bbox"]
+    candidate_markers = region.get("all_markers", region.get("markers", []))
+
+    numeric_lines = get_region_axis_lines(
+        region,
+        all_lines,
+        numeric_orientation,
+        numeric_order,
+        "numeric",
+        search_margin=endpoint_radius,
+    )
+
+    alpha_lines = get_region_axis_lines(
+        region,
+        all_lines,
+        alpha_orientation,
+        alpha_order,
+        "alpha",
+        search_margin=endpoint_radius,
+    )
+
+    if len(numeric_lines) != len(source_numeric):
+        blockers.append(
+            f"Recovery numeric axis-line count mismatch: found {len(numeric_lines)}, expected {len(source_numeric)}."
+        )
+
+    if len(alpha_lines) != len(source_alpha):
+        blockers.append(
+            f"Recovery alphabetic axis-line count mismatch: found {len(alpha_lines)}, expected {len(source_alpha)}."
+        )
+
+    families = [
+        ("numeric", source_numeric, numeric_lines),
+        ("alphabetic", source_alpha, alpha_lines),
+    ]
+
+    seen_handles = set()
+
+    for family_name, source_groups, axis_lines in families:
+        if len(source_groups) != len(axis_lines):
+            continue
+
+        for pos, (source_group, line) in enumerate(zip(source_groups, axis_lines), start=1):
+            new_label = clean_text(source_group.get("label", ""))
+            endpoints = endpoint_points_for_axis_line(line, bbox)
+
+            endpoint_candidates = {
+                0: [],
+                1: [],
+            }
+
+            for marker in candidate_markers:
+                old_label = clean_text(marker.get("label", ""))
+
+                if not plausible_recovery_label(
+                    old_label,
+                    family_name,
+                    source_numeric,
+                    source_alpha,
+                    numeric_extra=numeric_extra,
+                ):
+                    continue
+
+                d, endpoint_index = marker_endpoint_distance(marker, endpoints)
+
+                if d <= endpoint_radius:
+                    endpoint_candidates[endpoint_index].append((d, marker))
+
+            selected = []
+
+            for endpoint_index in [0, 1]:
+                cands = endpoint_candidates[endpoint_index]
+
+                if not cands:
+                    continue
+
+                cands.sort(key=lambda x: x[0])
+
+                # Pick nearest plausible label at this grid-line end.
+                selected.append((endpoint_index, cands[0][0], cands[0][1]))
+
+            if not selected:
+                blockers.append(
+                    f"Recovery could not find endpoint grid-label candidate for {family_name} axis position {pos}, source label {new_label}."
+                )
+                continue
+
+            for endpoint_index, distance, marker in selected:
+                entity = marker["text_entity"]
+                handle = marker.get("text_handle", get_entity_handle(entity))
+
+                if handle in seen_handles:
+                    continue
+
+                seen_handles.add(handle)
+
+                old_label = get_text_value(entity)
+                writable = is_marker_writable(marker, allow_block_text_write)
+
+                if not writable:
+                    blockers.append(
+                        f"Recovery candidate for {family_name} axis position {pos} is not writable. Handle={handle}."
+                    )
+
+                plan_rows.append({
+                    "region": region["name"],
+                    "family": family_name,
+                    "axis_position": pos,
+                    "source_label": new_label,
+                    "old_label": old_label,
+                    "new_label": new_label,
+                    "endpoint": "A" if endpoint_index == 0 else "B",
+                    "distance_to_endpoint": round(distance, 3),
+                    "axis_coord": line["coord"],
+                    "line_handle": line.get("handle", ""),
+                    "text_handle": handle,
+                    "text_source": marker.get("text_source"),
+                    "confidence": marker.get("confidence"),
+                    "writable": writable,
+                    "entity": entity,
+                    "marker": marker,
+                })
+
+    ready = len(blockers) == 0
+
+    return ready, blockers, warnings, plan_rows
+
+
+def recovery_preview_rows(plan_rows):
+    rows = []
+
+    for r in plan_rows:
+        rows.append({
+            "region": r["region"],
+            "family": r["family"],
+            "axis_position": r["axis_position"],
+            "old_label": r["old_label"],
+            "new_label": r["new_label"],
+            "endpoint": r["endpoint"],
+            "distance_to_endpoint": r["distance_to_endpoint"],
+            "axis_coord": r["axis_coord"],
+            "text_handle": r["text_handle"],
+            "text_source": r["text_source"],
+            "confidence": r["confidence"],
+            "writable": r["writable"],
+        })
+
+    return rows
+
+
+def apply_endpoint_recovery_plan(plan_rows):
+    changed = 0
+    skipped = 0
+    audit = []
+
+    for r in plan_rows:
+        entity = r["entity"]
+        old = get_text_value(entity)
+        new = clean_text(r["new_label"])
+
+        if not r.get("writable"):
+            skipped += 1
+            audit.append({
+                "region": r["region"],
+                "family": r["family"],
+                "region_axis_position": r["axis_position"],
+                "old_label": old,
+                "new_label": new,
+                "changed": False,
+                "skipped": True,
+                "reason": "recovery_not_writable",
+                "sync_mode": "endpoint_recovery",
+                "endpoint": r["endpoint"],
+                "distance_to_endpoint": r["distance_to_endpoint"],
+                "entity_handle": r["text_handle"],
+                "text_source": r["text_source"],
+                "confidence": r["confidence"],
+            })
+            continue
+
+        if old != new:
+            ok = set_text_value(entity, new)
+
+            if ok:
+                changed += 1
+
+            audit.append({
+                "region": r["region"],
+                "family": r["family"],
+                "region_axis_position": r["axis_position"],
+                "old_label": old,
+                "new_label": new,
+                "changed": ok,
+                "skipped": False,
+                "reason": "endpoint_recovery_updated" if ok else "endpoint_recovery_write_failed",
+                "sync_mode": "endpoint_recovery",
+                "endpoint": r["endpoint"],
+                "distance_to_endpoint": r["distance_to_endpoint"],
+                "entity_handle": r["text_handle"],
+                "text_source": r["text_source"],
+                "confidence": r["confidence"],
+            })
+
+        else:
+            audit.append({
+                "region": r["region"],
+                "family": r["family"],
+                "region_axis_position": r["axis_position"],
+                "old_label": old,
+                "new_label": new,
+                "changed": False,
+                "skipped": False,
+                "reason": "already_matches",
+                "sync_mode": "endpoint_recovery",
+                "endpoint": r["endpoint"],
+                "distance_to_endpoint": r["distance_to_endpoint"],
+                "entity_handle": r["text_handle"],
+                "text_source": r["text_source"],
+                "confidence": r["confidence"],
+            })
 
     return changed, skipped, audit
 
@@ -1650,7 +2009,7 @@ elif tool_choice == "2. Grid Label Sync":
 
     st.subheader("Tool 2: Grid Label Sync")
     st.caption(
-        "Workflow: Detect → Ignore slab/detail bubbles → Review regions → Sync selected safe regions."
+        "Workflow: Detect → Sync clean regions → Use endpoint recovery for slab/detail regions."
     )
 
     st.markdown("### 1. Detection Settings")
@@ -1663,19 +2022,32 @@ elif tool_choice == "2. Grid Label Sync":
     with c2:
         text_gap = st.slider("Text-in-Bubble Gap", 20.0, 2000.0, 180.0, 10.0)
 
-    with c3:
+         with c3:
         attach_gap = st.slider("Gridline Attach Gap", 20.0, 3000.0, 180.0, 10.0)
 
     with c4:
-        min_grid_length = st.number_input("Min Grid Line Length", min_value=1.0, value=1000.0, step=100.0)
+        min_grid_length = st.number_input(
+            "Min Grid Line Length",
+            min_value=1.0,
+            value=1000.0,
+            step=100.0,
+        )
 
     d1, d2, d3, d4 = st.columns(4)
 
     with d1:
-        numeric_order = st.selectbox("Numeric Axis Order", ["Auto", "Ascending", "Descending"], index=0)
+        numeric_order = st.selectbox(
+            "Numeric Axis Order",
+            ["Auto", "Ascending", "Descending"],
+            index=0,
+        )
 
     with d2:
-        alpha_order = st.selectbox("Alphabetic Axis Order", ["Auto", "Ascending", "Descending"], index=0)
+        alpha_order = st.selectbox(
+            "Alphabetic Axis Order",
+            ["Auto", "Ascending", "Descending"],
+            index=0,
+        )
 
     with d3:
         forced_region_count = st.number_input(
@@ -1683,11 +2055,16 @@ elif tool_choice == "2. Grid Label Sync":
             min_value=0,
             value=0,
             step=1,
-            help="Use 0 for auto. If the target has 9 plans, enter 9.",
+            help="Use 0 for auto. If the target has 8 plans, enter 8.",
         )
 
     with d4:
-        min_region_markers = st.number_input("Min Markers Per Region", min_value=1, value=4, step=1)
+        min_region_markers = st.number_input(
+            "Min Markers Per Region",
+            min_value=1,
+            value=4,
+            step=1,
+        )
 
     e1, e2, e3 = st.columns(3)
 
@@ -1699,22 +2076,31 @@ elif tool_choice == "2. Grid Label Sync":
         )
 
     with e2:
-        strict_mode = st.checkbox(
-            "Strict mode: block incomplete or unsafe regions",
-            value=True,
-            help="Recommended. This app still blocks incomplete sync even if this is off.",
+        min_confidence_required = st.slider(
+            "Minimum Marker Confidence",
+            0,
+            100,
+            50,
+            5,
         )
 
     with e3:
-        min_confidence_required = st.slider("Minimum Marker Confidence", 0, 100, 50, 5)
+        max_region_marker_ratio = st.slider(
+            "Max Sync Marker Ratio",
+            1.0,
+            5.0,
+            1.5,
+            0.1,
+            help="Blocks clean-mode sync if a region still has far more markers than the reference.",
+        )
 
-    f1, f2, f3, f4 = st.columns(4)
+    f1, f2, f3 = st.columns(3)
 
     with f1:
         ignore_interior_detail_bubbles = st.checkbox(
-            "Ignore interior/detail bubbles",
+            "Ignore interior/detail bubbles for normal sync",
             value=True,
-            help="Recommended. Keeps only bubbles near region perimeter so slab/detail bubbles inside the plan are not relabeled.",
+            help="Recommended. Normal sync keeps only perimeter markers so slab/detail bubbles are not touched.",
         )
 
     with f2:
@@ -1736,20 +2122,28 @@ elif tool_choice == "2. Grid Label Sync":
             help="Minimum drawing-unit distance from region edge to treat a bubble as perimeter.",
         )
 
-    with f4:
-        max_region_marker_ratio = st.slider(
-            "Max Sync Marker Ratio",
-            1.0,
-            5.0,
-            1.5,
-            0.1,
-            help="Blocks regions with far more sync markers than the reference after filtering.",
+    st.markdown("#### Slab/Grid Recovery Settings")
+
+    r1, r2 = st.columns(2)
+
+    with r1:
+        recovery_endpoint_radius = st.slider(
+            "Recovery Endpoint Search Radius",
+            500.0,
+            10000.0,
+            2500.0,
+            100.0,
+            help="Recovery mode searches this distance around the ends of grid lines for grid-label bubbles.",
         )
 
-    if not strict_mode:
-        st.warning(
-            "Strict mode is off in the UI, but incomplete/unsafe region sync is still blocked "
-            "to avoid accidental drawing corruption."
+    with r2:
+        recovery_numeric_extra = st.slider(
+            "Recovery Numeric Label Extra Range",
+            0,
+            20,
+            5,
+            1,
+            help="If reference numeric labels are 1–17, extra 5 allows candidates up to 22 but rejects slab labels like 145.",
         )
 
     st.markdown("### 2. Upload Files")
@@ -1757,10 +2151,18 @@ elif tool_choice == "2. Grid Label Sync":
     u1, u2 = st.columns(2)
 
     with u1:
-        arch_file = st.file_uploader("Reference DXF", type=["dxf"], key="arch")
+        arch_file = st.file_uploader(
+            "Reference DXF",
+            type=["dxf"],
+            key="arch",
+        )
 
     with u2:
-        struc_file = st.file_uploader("Target DXF", type=["dxf"], key="struc")
+        struc_file = st.file_uploader(
+            "Target DXF",
+            type=["dxf"],
+            key="struc",
+        )
 
     arch_sig = uploaded_file_signature(arch_file)
     struc_sig = uploaded_file_signature(struc_file)
@@ -1803,13 +2205,31 @@ elif tool_choice == "2. Grid Label Sync":
 
         st.markdown("### 3. Layer Setup")
 
-        arch_line_default = pick_default_layer(arch_layers, ["S-GRID", "GRID", "GRIDLINELAYER"])
-        arch_text_default = pick_default_layer(arch_layers, ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"])
-        arch_circle_default = pick_default_layer(arch_layers, ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"])
+        arch_line_default = pick_default_layer(
+            arch_layers,
+            ["S-GRID", "GRID", "GRIDLINELAYER"],
+        )
+        arch_text_default = pick_default_layer(
+            arch_layers,
+            ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"],
+        )
+        arch_circle_default = pick_default_layer(
+            arch_layers,
+            ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"],
+        )
 
-        struc_line_default = pick_default_layer(struc_layers, ["GRIDLINELAYER", "S-GRID", "GRID"])
-        struc_text_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-STRS-IDEN", "S-GRID-IDEN", "GRID-ID"])
-        struc_circle_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-GRID-IDEN", "GRID-ID"])
+        struc_line_default = pick_default_layer(
+            struc_layers,
+            ["GRIDLINELAYER", "S-GRID", "GRID"],
+        )
+        struc_text_default = pick_default_layer(
+            struc_layers,
+            ["DEFAULTLAYER", "S-STRS-IDEN", "S-GRID-IDEN", "GRID-ID"],
+        )
+        struc_circle_default = pick_default_layer(
+            struc_layers,
+            ["DEFAULTLAYER", "S-GRID-IDEN", "GRID-ID"],
+        )
 
         la, lb, lc = st.columns(3)
 
@@ -2009,7 +2429,7 @@ elif tool_choice == "2. Grid Label Sync":
                 ready_count = len([r for r in report if r.get("ready_to_sync")])
 
                 st.success(
-                    f"Analysis complete. Regions found: {len(regions)}. Ready regions: {ready_count}."
+                    f"Analysis complete. Regions found: {len(regions)}. Ready clean-sync regions: {ready_count}."
                 )
 
                 if arch_det["rejected_markers"]:
@@ -2085,13 +2505,13 @@ elif tool_choice == "2. Grid Label Sync":
             ]
 
             selected_regions = st.multiselect(
-                "Select regions to sync",
+                "Select clean regions to sync",
                 options=all_regions,
                 default=ready_regions,
-                help="Only ready regions are selected by default.",
+                help="Only clean ready regions are selected by default. Slab/detail regions can be handled in Recovery Mode below.",
             )
 
-            st.markdown("### 7. Sync Preview")
+            st.markdown("### 7. Clean Sync Preview")
 
             filtered_preview = [
                 row for row in st.session_state.preview
@@ -2101,9 +2521,9 @@ elif tool_choice == "2. Grid Label Sync":
             if filtered_preview:
                 st.dataframe(filtered_preview, use_container_width=True)
             else:
-                st.info("No preview rows. This usually means no complete/ready regions are selected.")
+                st.info("No clean-sync preview rows. This usually means no clean ready regions are selected.")
 
-            st.markdown("### 8. Apply Sync")
+            st.markdown("### 8. Apply Clean Sync")
 
             region_by_name = {r["name"]: r for r in st.session_state.regions}
 
@@ -2140,13 +2560,13 @@ elif tool_choice == "2. Grid Label Sync":
 
             if blocked_selected:
                 st.error(
-                    "One or more selected regions are not safe to sync. "
-                    "No sync will be applied until these regions are unselected or fixed."
+                    "One or more selected clean-sync regions are not safe. "
+                    "Unselect them or use Recovery Mode where appropriate."
                 )
                 st.dataframe(blocked_selected, use_container_width=True)
 
             else:
-                if st.button("✍️ Apply Sync to Selected Regions"):
+                if st.button("✍️ Apply Clean Sync to Selected Regions"):
                     total_changed = 0
                     total_skipped = 0
                     audit = []
@@ -2195,26 +2615,122 @@ elif tool_choice == "2. Grid Label Sync":
                         for row in au1:
                             row["region"] = region_name
                             row["family"] = "numeric"
+                            row["sync_mode"] = "clean_sync"
 
                         for row in au2:
                             row["region"] = region_name
                             row["family"] = "alphabetic"
+                            row["sync_mode"] = "clean_sync"
 
                         total_changed += ch1 + ch2
                         total_skipped += sk1 + sk2
                         audit.extend(au1 + au2)
 
-                    st.session_state.changed = total_changed
-                    st.session_state.skipped = total_skipped
-                    st.session_state.audit = audit
+                    st.session_state.changed += total_changed
+                    st.session_state.skipped += total_skipped
+                    st.session_state.audit.extend(audit)
 
                     if total_changed:
-                        st.success(f"Sync complete. Changed {total_changed} text entities.")
+                        st.success(f"Clean sync complete. Changed {total_changed} text entities.")
                     else:
-                        st.info("No labels changed. They may already match.")
+                        st.info("Clean sync completed. No labels needed changing.")
 
                     if total_skipped:
-                        st.warning(f"Skipped {total_skipped} text entities.")
+                        st.warning(f"Clean sync skipped {total_skipped} text entities.")
+
+            st.markdown("### 8B. Slab/Grid Endpoint Recovery Mode")
+
+            st.caption(
+                "Use this for slab/detail regions. It does not trust all bubbles. "
+                "It finds actual grid-line ends and searches only near those endpoints for plausible grid labels."
+            )
+
+            recovery_candidates = [
+                row["region"]
+                for row in st.session_state.region_report
+                if not row.get("ready_to_sync")
+            ]
+
+            if recovery_candidates:
+                selected_recovery_regions = st.multiselect(
+                    "Select blocked/review slab-detail regions for endpoint recovery",
+                    options=recovery_candidates,
+                    default=[],
+                    help="Select slab/detail regions that still need grid-label sync.",
+                )
+
+                recovery_preview = []
+                recovery_blocked = []
+                recovery_plan_rows_all = []
+
+                for region_name in selected_recovery_regions:
+                    r = region_by_name.get(region_name)
+
+                    if not r:
+                        recovery_blocked.append({
+                            "region": region_name,
+                            "reason": "Region not found",
+                        })
+                        continue
+
+                    rec_ready, rec_blockers, rec_warnings, rec_plan_rows = build_endpoint_recovery_plan(
+                        r,
+                        st.session_state.source_numeric,
+                        st.session_state.source_alpha,
+                        family["numeric_orientation"],
+                        family["alpha_orientation"],
+                        numeric_order,
+                        alpha_order,
+                        st.session_state.struc_detection.get("lines", []),
+                        recovery_endpoint_radius,
+                        allow_block_text_write,
+                        numeric_extra=recovery_numeric_extra,
+                    )
+
+                    if not rec_ready:
+                        recovery_blocked.append({
+                            "region": region_name,
+                            "reason": "; ".join(rec_blockers),
+                        })
+
+                    if rec_plan_rows:
+                        recovery_plan_rows_all.extend(rec_plan_rows)
+                        recovery_preview.extend(recovery_preview_rows(rec_plan_rows))
+
+                if recovery_blocked:
+                    st.warning(
+                        "Some selected recovery regions are not safe for endpoint recovery yet. "
+                        "Try increasing Recovery Endpoint Search Radius, or verify the selected layers."
+                    )
+                    st.dataframe(recovery_blocked, use_container_width=True)
+
+                if recovery_preview:
+                    st.write("#### Endpoint Recovery Preview")
+                    st.dataframe(recovery_preview, use_container_width=True)
+
+                if selected_recovery_regions and recovery_plan_rows_all and not recovery_blocked:
+                    if st.button("🩹 Apply Endpoint Recovery Sync"):
+                        ch, sk, au = apply_endpoint_recovery_plan(recovery_plan_rows_all)
+
+                        st.session_state.changed += ch
+                        st.session_state.skipped += sk
+                        st.session_state.audit.extend(au)
+
+                        if ch:
+                            st.success(f"Endpoint recovery complete. Changed {ch} grid-label text entities.")
+                        else:
+                            st.info("Endpoint recovery completed. No labels needed changing.")
+
+                        if sk:
+                            st.warning(f"Endpoint recovery skipped {sk} text entities.")
+
+                elif selected_recovery_regions and not recovery_plan_rows_all:
+                    st.info(
+                        "No endpoint recovery candidates found. Try increasing the Recovery Endpoint Search Radius."
+                    )
+
+            else:
+                st.info("No blocked/review regions are available for recovery.")
 
             if st.session_state.audit:
                 st.markdown("### 9. Audit Report")
