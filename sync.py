@@ -2822,6 +2822,5 @@ if st.session_state.prepared:
         file_name=f"RELABELED_{st.session_state.struc_name}",
         mime="application/dxf",
     )
-            continue
 
     return deduplicate_axis_lines(lines)
