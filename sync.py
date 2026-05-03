@@ -1329,7 +1329,6 @@ def build_regions(markers, axis_tol, expected_markers_per_region=None, forced_re
         "small_buckets_skipped": skipped,
         "region_marker_counts": [r["marker_count"] for r in regions],
     }
-        except Exception:
 # =========================================================
 # CLEAN SYNC VALIDATION / PREVIEW / APPLY
 # =========================================================
