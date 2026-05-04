@@ -2170,9 +2170,9 @@ with r1:
         "Recovery Endpoint Search Radius",
         500.0,
         10000.0,
-        2500.0,
+        1500.0,
         100.0,
-        help="Recovery mode searches this distance around grid-line ends for grid-label bubbles.",
+        help="Recovery mode searches this distance around grid-line ends for grid-label bubbles. Lower values reduce false slab/detail detections.",
     )
 
 with r2:
