@@ -3823,7 +3823,7 @@ if st.session_state.prepared:
                         "family",
                         "axis_position",
                         "old_label",
-                        "new_label",
+                        "proposed_new_label",
                         "endpoint",
                         "distance_to_endpoint",
                         "axis_distance",
