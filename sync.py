@@ -488,14 +488,19 @@ def set_text_value(entity, new_value):
 # ENTITY EXTRACTION
 # =========================================================
 
-def extract_texts(doc, layer_name):
+def extract_texts(
+    doc,
+    layer_name,
+    allow_nested_layer0_from_selected_insert=True,
+    strict_nested_block_layer_match=False,
+):
     texts = []
     msp = doc.modelspace()
 
     for e in msp:
         try:
             if e.dxftype() in ("TEXT", "MTEXT", "ATTRIB"):
-                if e.dxf.layer != layer_name:
+                if not layer_matches(e.dxf.layer, layer_name):
                     continue
 
                 texts.append({
@@ -506,50 +511,71 @@ def extract_texts(doc, layer_name):
                     "type": e.dxftype(),
                     "source": "modelspace",
                     "parent_insert": None,
+                    "parent_layer": "",
                     "handle": get_entity_handle(e),
                 })
 
             elif e.dxftype() == "INSERT":
-                parent_layer_matches = e.dxf.layer == layer_name
+                parent_layer = e.dxf.layer
 
+                # INSERT attributes are instance-specific and usually safer than block definition text.
                 try:
                     for att in e.attribs:
-                        if parent_layer_matches or att.dxf.layer == layer_name:
-                            texts.append({
-                                "entity": att,
-                                "text": get_text_value(att),
-                                "point": get_text_point(att),
-                                "layer": att.dxf.layer,
-                                "type": "ATTRIB",
-                                "source": "insert_attrib",
-                                "parent_insert": e,
-                                "handle": get_entity_handle(att),
-                            })
+                        if not attrib_layer_allowed_for_text(
+                            att.dxf.layer,
+                            layer_name,
+                            parent_insert_layer=parent_layer,
+                            allow_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+                            strict_nested_block_layer_match=strict_nested_block_layer_match,
+                        ):
+                            continue
+
+                        texts.append({
+                            "entity": att,
+                            "text": get_text_value(att),
+                            "point": get_text_point(att),
+                            "layer": att.dxf.layer,
+                            "type": "ATTRIB",
+                            "source": "insert_attrib",
+                            "parent_insert": e,
+                            "parent_layer": parent_layer,
+                            "handle": get_entity_handle(att),
+                        })
                 except Exception:
                     pass
 
+                # Block definition TEXT/MTEXT is detected for matching, but write safety is controlled separately.
                 try:
                     if e.dxf.name in doc.blocks:
                         block = doc.blocks[e.dxf.name]
 
                         for be in block:
-                            if be.dxftype() in ("TEXT", "MTEXT"):
-                                if not parent_layer_matches and be.dxf.layer not in (layer_name, "0"):
-                                    continue
+                            if be.dxftype() not in ("TEXT", "MTEXT"):
+                                continue
 
-                                lp = get_text_point(be)
-                                wp = transform_block_point(lp, e)
+                            if not nested_entity_layer_allowed(
+                                be.dxf.layer,
+                                layer_name,
+                                parent_layer=parent_layer,
+                                allow_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+                                strict_nested_block_layer_match=strict_nested_block_layer_match,
+                            ):
+                                continue
 
-                                texts.append({
-                                    "entity": be,
-                                    "text": get_text_value(be),
-                                    "point": wp,
-                                    "layer": e.dxf.layer,
-                                    "type": be.dxftype(),
-                                    "source": "block_text",
-                                    "parent_insert": e,
-                                    "handle": get_entity_handle(be),
-                                })
+                            lp = get_text_point(be)
+                            wp = transform_block_point(lp, e)
+
+                            texts.append({
+                                "entity": be,
+                                "text": get_text_value(be),
+                                "point": wp,
+                                "layer": be.dxf.layer,
+                                "type": be.dxftype(),
+                                "source": "block_text",
+                                "parent_insert": e,
+                                "parent_layer": parent_layer,
+                                "handle": get_entity_handle(be),
+                            })
                 except Exception:
                     pass
 
@@ -559,14 +585,19 @@ def extract_texts(doc, layer_name):
     return texts
 
 
-def extract_circles(doc, layer_name):
+def extract_circles(
+    doc,
+    layer_name,
+    allow_nested_layer0_from_selected_insert=True,
+    strict_nested_block_layer_match=False,
+):
     circles = []
     msp = doc.modelspace()
 
     for e in msp:
         try:
             if e.dxftype() == "CIRCLE":
-                if e.dxf.layer != layer_name:
+                if not layer_matches(e.dxf.layer, layer_name):
                     continue
 
                 c = e.dxf.center
@@ -578,33 +609,44 @@ def extract_circles(doc, layer_name):
                     "layer": e.dxf.layer,
                     "source": "modelspace",
                     "parent_insert": None,
+                    "parent_layer": "",
                     "handle": get_entity_handle(e),
                 })
 
             elif e.dxftype() == "INSERT":
-                parent_layer_matches = e.dxf.layer == layer_name
+                parent_layer = e.dxf.layer
 
                 try:
                     if e.dxf.name in doc.blocks:
                         block = doc.blocks[e.dxf.name]
 
                         for be in block:
-                            if be.dxftype() == "CIRCLE":
-                                if not parent_layer_matches and be.dxf.layer not in (layer_name, "0"):
-                                    continue
+                            if be.dxftype() != "CIRCLE":
+                                continue
 
-                                c = be.dxf.center
+                            if not nested_entity_layer_allowed(
+                                be.dxf.layer,
+                                layer_name,
+                                parent_layer=parent_layer,
+                                allow_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+                                strict_nested_block_layer_match=strict_nested_block_layer_match,
+                            ):
+                                continue
 
-                                circles.append({
-                                    "entity": e,
-                                    "nested_entity": be,
-                                    "center": transform_block_point((float(c.x), float(c.y)), e),
-                                    "radius": transform_block_radius(float(be.dxf.radius), e),
-                                    "layer": e.dxf.layer,
-                                    "source": "block_circle",
-                                    "parent_insert": e,
-                                    "handle": get_entity_handle(e),
-                                })
+                            c = be.dxf.center
+
+                            circles.append({
+                                "entity": e,
+                                "nested_entity": be,
+                                "center": transform_block_point((float(c.x), float(c.y)), e),
+                                "radius": transform_block_radius(float(be.dxf.radius), e),
+                                "layer": be.dxf.layer,
+                                "source": "block_circle",
+                                "parent_insert": e,
+                                "parent_layer": parent_layer,
+                                "handle": get_entity_handle(e),
+                                "nested_handle": get_entity_handle(be),
+                            })
                 except Exception:
                     pass
 
@@ -614,35 +656,52 @@ def extract_circles(doc, layer_name):
     return circles
 
 
-def add_axis_segment(lines, entity, x1, y1, x2, y2, layer_name, min_length):
+def add_axis_segment(
+    lines,
+    entity,
+    x1,
+    y1,
+    x2,
+    y2,
+    layer_name,
+    min_length,
+    source="modelspace",
+    parent_insert=None,
+):
     length = math.dist((x1, y1), (x2, y2))
 
     if length < min_length:
         return
 
+    base = {
+        "entity": entity,
+        "length": round(float(length), 3),
+        "layer": layer_name,
+        "handle": get_entity_handle(entity),
+        "source": source,
+        "parent_insert": parent_insert,
+        "parent_insert_handle": get_entity_handle(parent_insert) if parent_insert is not None else "",
+    }
+
     if is_vertical(x1, y1, x2, y2):
-        lines.append({
-            "entity": entity,
+        row = dict(base)
+        row.update({
             "orientation": "vertical",
             "coord": round(float((x1 + x2) / 2.0), 3),
             "start": (float(x1), float(y1)),
             "end": (float(x2), float(y2)),
-            "length": round(float(length), 3),
-            "layer": layer_name,
-            "handle": get_entity_handle(entity),
         })
+        lines.append(row)
 
     elif is_horizontal(x1, y1, x2, y2):
-        lines.append({
-            "entity": entity,
+        row = dict(base)
+        row.update({
             "orientation": "horizontal",
             "coord": round(float((y1 + y2) / 2.0), 3),
             "start": (float(x1), float(y1)),
             "end": (float(x2), float(y2)),
-            "length": round(float(length), 3),
-            "layer": layer_name,
-            "handle": get_entity_handle(entity),
         })
+        lines.append(row)
 
 
 def resolve_line_group(group):
@@ -677,41 +736,168 @@ def deduplicate_axis_lines(lines, tol=5.0):
     return result
 
 
-def extract_axis_lines(doc, layer_name, min_length=1000.0):
+def add_polyline_segments_from_points(lines, entity, pts, layer_name, min_length, source, parent_insert=None):
+    for i in range(len(pts) - 1):
+        x1, y1 = float(pts[i][0]), float(pts[i][1])
+        x2, y2 = float(pts[i + 1][0]), float(pts[i + 1][1])
+
+        add_axis_segment(
+            lines,
+            entity,
+            x1,
+            y1,
+            x2,
+            y2,
+            layer_name,
+            min_length,
+            source=source,
+            parent_insert=parent_insert,
+        )
+
+
+def extract_axis_lines(
+    doc,
+    layer_name,
+    min_length=1000.0,
+    allow_nested_layer0_from_selected_insert=True,
+    strict_nested_block_layer_match=False,
+):
     lines = []
     msp = doc.modelspace()
 
     for e in msp:
         try:
-            if e.dxf.layer != layer_name:
-                continue
-
             if e.dxftype() == "LINE":
+                if not layer_matches(e.dxf.layer, layer_name):
+                    continue
+
                 x1, y1, _ = e.dxf.start
                 x2, y2, _ = e.dxf.end
 
-                add_axis_segment(lines, e, x1, y1, x2, y2, e.dxf.layer, min_length)
+                add_axis_segment(
+                    lines,
+                    e,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    e.dxf.layer,
+                    min_length,
+                    source="modelspace",
+                )
 
             elif e.dxftype() == "LWPOLYLINE":
+                if not layer_matches(e.dxf.layer, layer_name):
+                    continue
+
                 pts = list(e.get_points())
-
-                for i in range(len(pts) - 1):
-                    x1, y1 = float(pts[i][0]), float(pts[i][1])
-                    x2, y2 = float(pts[i + 1][0]), float(pts[i + 1][1])
-
-                    add_axis_segment(lines, e, x1, y1, x2, y2, e.dxf.layer, min_length)
+                add_polyline_segments_from_points(
+                    lines,
+                    e,
+                    pts,
+                    e.dxf.layer,
+                    min_length,
+                    source="modelspace",
+                )
 
             elif e.dxftype() == "POLYLINE":
+                if not layer_matches(e.dxf.layer, layer_name):
+                    continue
+
                 pts = [
                     (float(v.dxf.location.x), float(v.dxf.location.y))
                     for v in e.vertices
                 ]
+                add_polyline_segments_from_points(
+                    lines,
+                    e,
+                    pts,
+                    e.dxf.layer,
+                    min_length,
+                    source="modelspace",
+                )
 
-                for i in range(len(pts) - 1):
-                    x1, y1 = pts[i]
-                    x2, y2 = pts[i + 1]
+            elif e.dxftype() == "INSERT":
+                parent_layer = e.dxf.layer
 
-                    add_axis_segment(lines, e, x1, y1, x2, y2, e.dxf.layer, min_length)
+                try:
+                    if e.dxf.name not in doc.blocks:
+                        continue
+
+                    block = doc.blocks[e.dxf.name]
+
+                    for be in block:
+                        if be.dxftype() not in ("LINE", "LWPOLYLINE", "POLYLINE"):
+                            continue
+
+                        if not nested_entity_layer_allowed(
+                            be.dxf.layer,
+                            layer_name,
+                            parent_layer=parent_layer,
+                            allow_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+                            strict_nested_block_layer_match=strict_nested_block_layer_match,
+                        ):
+                            continue
+
+                        if be.dxftype() == "LINE":
+                            x1, y1, _ = be.dxf.start
+                            x2, y2, _ = be.dxf.end
+
+                            p1 = transform_block_point((float(x1), float(y1)), e)
+                            p2 = transform_block_point((float(x2), float(y2)), e)
+
+                            add_axis_segment(
+                                lines,
+                                be,
+                                p1[0],
+                                p1[1],
+                                p2[0],
+                                p2[1],
+                                be.dxf.layer,
+                                min_length,
+                                source="block_line",
+                                parent_insert=e,
+                            )
+
+                        elif be.dxftype() == "LWPOLYLINE":
+                            raw_pts = list(be.get_points())
+                            pts = [
+                                transform_block_point((float(p[0]), float(p[1])), e)
+                                for p in raw_pts
+                            ]
+
+                            add_polyline_segments_from_points(
+                                lines,
+                                be,
+                                pts,
+                                be.dxf.layer,
+                                min_length,
+                                source="block_polyline",
+                                parent_insert=e,
+                            )
+
+                        elif be.dxftype() == "POLYLINE":
+                            raw_pts = [
+                                (float(v.dxf.location.x), float(v.dxf.location.y))
+                                for v in be.vertices
+                            ]
+                            pts = [
+                                transform_block_point(p, e)
+                                for p in raw_pts
+                            ]
+
+                            add_polyline_segments_from_points(
+                                lines,
+                                be,
+                                pts,
+                                be.dxf.layer,
+                                min_length,
+                                source="block_polyline",
+                                parent_insert=e,
+                            )
+
+                except Exception:
+                    pass
 
         except Exception:
             continue
