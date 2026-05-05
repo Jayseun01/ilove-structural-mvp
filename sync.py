@@ -5066,9 +5066,9 @@ if analyze:
             alpha_order,
         )
 
-        expected_markers = len(arch_trusted)
+            expected_markers = len(arch_trusted)
 
-        regions, seg = build_regions(
+            regions, seg = build_regions(
             struc_trusted,
             axis_tol=axis_tol,
             expected_markers_per_region=expected_markers,
