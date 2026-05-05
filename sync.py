@@ -101,6 +101,11 @@ def clean_text(value):
 
 
 def probable_grid_label(text):
+    """
+    Accepts common structural grid labels:
+    A, B, C, AA, A'
+    1, 2, 10, 1', 2A, 2A'
+    """
     text = clean_text(text)
 
     patterns = [
@@ -108,13 +113,14 @@ def probable_grid_label(text):
         r"[A-Z]{1,3}'",
         r"\d{1,3}",
         r"\d{1,3}[A-Z]?",
+        r"\d{1,3}[A-Z]?'?",
     ]
 
     return any(re.fullmatch(p, text) for p in patterns)
 
 
 def is_numeric_label(text):
-    return bool(re.fullmatch(r"\d{1,3}[A-Z]?", clean_text(text)))
+    return bool(re.fullmatch(r"\d{1,3}[A-Z]?'?", clean_text(text)))
 
 
 def is_alpha_label(text):
@@ -123,7 +129,7 @@ def is_alpha_label(text):
 
 def numeric_label_value(text):
     txt = clean_text(text)
-    m = re.fullmatch(r"(\d{1,3})([A-Z]?)", txt)
+    m = re.fullmatch(r"(\d{1,3})([A-Z]?)(?:')?", txt)
 
     if not m:
         return None
@@ -566,6 +572,7 @@ def extract_axis_lines(doc, layer_name, min_length=1000.0):
             continue
 
     return deduplicate_axis_lines(lines)
+
 
 # =========================================================
 # MARKER DETECTION
@@ -1043,7 +1050,6 @@ def sort_groups(groups, orientation, order_mode, family):
     elif order_mode == "Descending":
         reverse = True
     else:
-        # Auto: horizontal numeric grids are often read top-to-bottom.
         reverse = family == "numeric" and orientation == "horizontal"
 
     return sorted(groups, key=lambda x: x["coord"], reverse=reverse)
@@ -1080,10 +1086,7 @@ def get_family_groups(region_or_axis_groups, numeric_orientation, alpha_orientat
         "alpha",
     )
 
-    return numeric, alpha
-
-
-# =========================================================
+    return numeric, alpha# =========================================================
 # REGION SEGMENTATION / PERIMETER FILTER
 # =========================================================
 
@@ -1329,6 +1332,8 @@ def build_regions(markers, axis_tol, expected_markers_per_region=None, forced_re
         "small_buckets_skipped": skipped,
         "region_marker_counts": [r["marker_count"] for r in regions],
     }
+
+
 # =========================================================
 # CLEAN SYNC VALIDATION / PREVIEW / APPLY
 # =========================================================
@@ -1610,6 +1615,168 @@ def apply_group_labels(source_groups, target_groups, allow_block_text_write=Fals
 # ENDPOINT RECOVERY LOGIC
 # =========================================================
 
+def source_label_set(source_groups):
+    return {
+        clean_text(g.get("label", ""))
+        for g in source_groups
+        if clean_text(g.get("label", ""))
+    }
+
+
+def label_matches_family(label, family_name):
+    label = clean_text(label)
+
+    if family_name == "numeric":
+        return is_numeric_label(label)
+
+    if family_name == "alphabetic":
+        return is_alpha_label(label)
+
+    return False
+
+
+def axis_distance_for_marker(marker, orientation, coord):
+    x, y = marker["circle_center"]
+
+    if orientation == "vertical":
+        return abs(float(x) - float(coord))
+
+    if orientation == "horizontal":
+        return abs(float(y) - float(coord))
+
+    return 999999999.0
+
+
+def median_value(values):
+    values = sorted([float(v) for v in values if v is not None])
+
+    if not values:
+        return None
+
+    n = len(values)
+
+    if n % 2 == 1:
+        return values[n // 2]
+
+    return (values[n // 2 - 1] + values[n // 2]) / 2.0
+
+
+def source_grid_bubble_radius_range(source_numeric, source_alpha, min_ratio=0.55, max_ratio=1.80):
+    radii = []
+
+    for group in source_numeric + source_alpha:
+        for marker in group.get("markers", []):
+            r = marker.get("circle_radius")
+
+            if r and r > 0:
+                radii.append(float(r))
+
+    med = median_value(radii)
+
+    if med is None:
+        return None, None, None
+
+    return med * min_ratio, med * max_ratio, med
+
+
+def marker_radius_ok(marker, min_radius, max_radius):
+    if min_radius is None or max_radius is None:
+        return True
+
+    r = marker.get("circle_radius")
+
+    if r is None:
+        return True
+
+    return min_radius <= float(r) <= max_radius
+
+
+def build_grid_frame_from_target_groups(target_numeric_groups, target_alpha_groups, fallback_bbox):
+    vertical_coords = []
+    horizontal_coords = []
+
+    for g in target_numeric_groups + target_alpha_groups:
+        if g.get("orientation") == "vertical":
+            vertical_coords.append(float(g["coord"]))
+
+        elif g.get("orientation") == "horizontal":
+            horizontal_coords.append(float(g["coord"]))
+
+    if len(vertical_coords) >= 2 and len(horizontal_coords) >= 2:
+        return {
+            "min_x": min(vertical_coords),
+            "max_x": max(vertical_coords),
+            "min_y": min(horizontal_coords),
+            "max_y": max(horizontal_coords),
+            "width": max(vertical_coords) - min(vertical_coords),
+            "height": max(horizontal_coords) - min(horizontal_coords),
+            "source": "target_axis_groups",
+        }
+
+    frame = dict(fallback_bbox)
+    frame["source"] = "region_bbox_fallback"
+    return frame
+
+
+def endpoint_points_for_axis_group_using_frame(axis_group, frame):
+    coord = float(axis_group["coord"])
+
+    if axis_group["orientation"] == "vertical":
+        return [
+            (coord, frame["min_y"]),
+            (coord, frame["max_y"]),
+        ]
+
+    return [
+        (frame["min_x"], coord),
+        (frame["max_x"], coord),
+    ]
+
+
+def strict_slab_recovery_label_ok(
+    label,
+    family_name,
+    source_numeric,
+    source_alpha,
+    numeric_extra=5,
+    strict_source_labels=True,
+):
+    label = clean_text(label)
+
+    if not label_matches_family(label, family_name):
+        return False
+
+    if family_name == "numeric":
+        source_labels = source_label_set(source_numeric)
+
+        if strict_source_labels:
+            return label in source_labels
+
+        return plausible_recovery_label(
+            label,
+            family_name,
+            source_numeric,
+            source_alpha,
+            numeric_extra=numeric_extra,
+        )
+
+    if family_name == "alphabetic":
+        source_labels = source_label_set(source_alpha)
+
+        if strict_source_labels:
+            return label in source_labels
+
+        return plausible_recovery_label(
+            label,
+            family_name,
+            source_numeric,
+            source_alpha,
+            numeric_extra=numeric_extra,
+        )
+
+    return False
+
+
 def source_numeric_range(source_numeric, extra=5):
     vals = []
 
@@ -1738,58 +1905,71 @@ def build_endpoint_recovery_plan(
     endpoint_radius,
     allow_block_text_write,
     numeric_extra=5,
+    axis_snap_tolerance=250.0,
+    strict_source_labels=True,
+    allow_virtual_axis_recovery=False,
 ):
+    """
+    Slab/detail-safe endpoint recovery.
+
+    This does not try to sync every detected marker in the region.
+    It only selects likely grid bubbles near the outer grid-frame endpoints.
+    """
+
     blockers = []
     warnings = []
     plan_rows = []
 
-    bbox = region["bbox"]
-
-    # Use all markers before perimeter filtering if available.
     candidate_markers = region.get("all_markers", region.get("markers", []))
 
-    numeric_lines = get_region_axis_lines(
+    target_numeric_groups, target_alpha_groups = get_family_groups(
         region,
-        all_lines,
         numeric_orientation,
-        numeric_order,
-        "numeric",
-        search_margin=endpoint_radius,
-    )
-
-    alpha_lines = get_region_axis_lines(
-        region,
-        all_lines,
         alpha_orientation,
+        numeric_order,
         alpha_order,
-        "alphabetic",
-        search_margin=endpoint_radius,
     )
 
-    if len(numeric_lines) != len(source_numeric):
+    if len(target_numeric_groups) != len(source_numeric):
         blockers.append(
-            f"Recovery numeric axis-line count mismatch: found {len(numeric_lines)}, expected {len(source_numeric)}."
+            f"Recovery numeric axis-group count mismatch: found {len(target_numeric_groups)}, "
+            f"expected {len(source_numeric)}."
         )
 
-    if len(alpha_lines) != len(source_alpha):
+    if len(target_alpha_groups) != len(source_alpha):
         blockers.append(
-            f"Recovery alphabetic axis-line count mismatch: found {len(alpha_lines)}, expected {len(source_alpha)}."
+            f"Recovery alphabetic axis-group count mismatch: found {len(target_alpha_groups)}, "
+            f"expected {len(source_alpha)}."
         )
+            if blockers:
+        return False, blockers, warnings, plan_rows
+
+    frame = build_grid_frame_from_target_groups(
+        target_numeric_groups,
+        target_alpha_groups,
+        region["bbox"],
+    )
+
+    min_radius, max_radius, source_median_radius = source_grid_bubble_radius_range(
+        source_numeric,
+        source_alpha,
+    )
 
     families = [
-        ("numeric", source_numeric, numeric_lines),
-        ("alphabetic", source_alpha, alpha_lines),
+        ("numeric", source_numeric, target_numeric_groups),
+        ("alphabetic", source_alpha, target_alpha_groups),
     ]
 
     seen_handles = set()
 
-    for family_name, source_groups, axis_lines in families:
-        if len(source_groups) != len(axis_lines):
-            continue
-
-        for pos, (source_group, line) in enumerate(zip(source_groups, axis_lines), start=1):
+    for family_name, source_groups, target_groups in families:
+        for pos, (source_group, target_group) in enumerate(zip(source_groups, target_groups), start=1):
             new_label = clean_text(source_group.get("label", ""))
-            endpoints = endpoint_points_for_axis_line(line, bbox)
+
+            orientation = target_group["orientation"]
+            coord = float(target_group["coord"])
+
+            endpoints = endpoint_points_for_axis_group_using_frame(target_group, frame)
 
             endpoint_candidates = {
                 0: [],
@@ -1799,19 +1979,73 @@ def build_endpoint_recovery_plan(
             for marker in candidate_markers:
                 old_label = clean_text(marker.get("label", ""))
 
-                if not plausible_recovery_label(
+                # 1. Label must belong to correct family and, by default, already exist in reference.
+                if not strict_slab_recovery_label_ok(
                     old_label,
                     family_name,
                     source_numeric,
                     source_alpha,
                     numeric_extra=numeric_extra,
+                    strict_source_labels=strict_source_labels,
                 ):
                     continue
 
-                d, endpoint_index = marker_endpoint_distance(marker, endpoints)
+                # 2. Marker orientation must match the axis orientation.
+                if marker.get("orientation") != orientation:
+                    continue
 
-                if d <= endpoint_radius:
-                    endpoint_candidates[endpoint_index].append((d, marker))
+                # 3. Avoid weak virtual-axis markers in slab details.
+                detection_mode = marker.get("detection_mode", "")
+
+                if not allow_virtual_axis_recovery and detection_mode == "same_label_virtual_axis":
+                    continue
+
+                # 4. Must be writable.
+                if not is_marker_writable(marker, allow_block_text_write):
+                    continue
+
+                # 5. Bubble radius should look like reference grid bubbles.
+                if not marker_radius_ok(marker, min_radius, max_radius):
+                    continue
+
+                # 6. Must sit close to the correct axis line.
+                axis_distance = axis_distance_for_marker(marker, orientation, coord)
+
+                if axis_distance > axis_snap_tolerance:
+                    continue
+
+                # 7. Must sit close to one of the grid-frame endpoints.
+                endpoint_distance, endpoint_index = marker_endpoint_distance(marker, endpoints)
+
+                if endpoint_distance > endpoint_radius:
+                    continue
+
+                confidence = float(marker.get("confidence", 0) or 0)
+
+                if detection_mode == "attached_gridline":
+                    mode_penalty = 0.0
+                elif detection_mode == "closest_gridline":
+                    mode_penalty = 250.0
+                elif detection_mode == "same_label_virtual_axis":
+                    mode_penalty = 1000.0
+                else:
+                    mode_penalty = 500.0
+
+                score = (
+                    endpoint_distance
+                    + axis_distance * 5.0
+                    + mode_penalty
+                    - confidence * 2.0
+                )
+
+                endpoint_candidates[endpoint_index].append({
+                    "score": score,
+                    "endpoint_distance": endpoint_distance,
+                    "axis_distance": axis_distance,
+                    "marker": marker,
+                    "detection_mode": detection_mode,
+                    "confidence": confidence,
+                })
 
             selected = []
 
@@ -1819,33 +2053,40 @@ def build_endpoint_recovery_plan(
                 cands = endpoint_candidates[endpoint_index]
 
                 if not cands:
+                    warnings.append(
+                        f"No safe endpoint candidate found for {family_name} axis position {pos}, "
+                        f"source label {new_label}, endpoint {'A' if endpoint_index == 0 else 'B'}."
+                    )
                     continue
 
-                cands.sort(key=lambda x: x[0])
-                selected.append((endpoint_index, cands[0][0], cands[0][1]))
+                cands.sort(key=lambda x: x["score"])
+                best = cands[0]
 
-            if not selected:
-                blockers.append(
-                    f"Recovery could not find endpoint grid-label candidate for {family_name} axis position {pos}, source label {new_label}."
-                )
-                continue
+                if len(cands) > 1:
+                    second = cands[1]
 
-            for endpoint_index, distance, marker in selected:
+                    if second["score"] <= best["score"] + 300.0:
+                        warnings.append(
+                            f"Ambiguous candidates for {family_name} axis position {pos}, "
+                            f"source label {new_label}, endpoint {'A' if endpoint_index == 0 else 'B'}. "
+                            f"Best score={round(best['score'], 1)}, second={round(second['score'], 1)}."
+                        )
+
+                selected.append((endpoint_index, best))
+
+            for endpoint_index, best in selected:
+                marker = best["marker"]
                 entity = marker["text_entity"]
-                handle = marker.get("text_handle", get_entity_handle(entity))
 
-                if handle in seen_handles:
+                handle = marker.get("text_handle", get_entity_handle(entity))
+                handle_key = handle or f"entity_{id(entity)}"
+
+                if handle_key in seen_handles:
                     continue
 
-                seen_handles.add(handle)
+                seen_handles.add(handle_key)
 
                 old_label = get_text_value(entity)
-                writable = is_marker_writable(marker, allow_block_text_write)
-
-                if not writable:
-                    blockers.append(
-                        f"Recovery candidate for {family_name} axis position {pos} is not writable. Handle={handle}."
-                    )
 
                 plan_rows.append({
                     "region": region["name"],
@@ -1855,16 +2096,26 @@ def build_endpoint_recovery_plan(
                     "old_label": old_label,
                     "new_label": new_label,
                     "endpoint": "A" if endpoint_index == 0 else "B",
-                    "distance_to_endpoint": round(distance, 3),
-                    "axis_coord": line["coord"],
-                    "line_handle": line.get("handle", ""),
+                    "distance_to_endpoint": round(best["endpoint_distance"], 3),
+                    "axis_distance": round(best["axis_distance"], 3),
+                    "axis_coord": coord,
+                    "grid_frame_source": frame.get("source", ""),
+                    "source_median_radius": source_median_radius,
                     "text_handle": handle,
                     "text_source": marker.get("text_source"),
+                    "detection_mode": marker.get("detection_mode"),
                     "confidence": marker.get("confidence"),
-                    "writable": writable,
+                    "recovery_score": round(best["score"], 3),
+                    "writable": True,
                     "entity": entity,
                     "marker": marker,
                 })
+
+    if not plan_rows:
+        blockers.append(
+            "Recovery found no safe endpoint candidates. For slab/detail regions, try increasing "
+            "Endpoint Search Radius slightly or Axis Snap Tolerance slightly. Do not disable strict mode unless necessary."
+        )
 
     ready = len(blockers) == 0
 
@@ -1883,7 +2134,11 @@ def recovery_preview_rows(plan_rows):
             "new_label": r["new_label"],
             "endpoint": r["endpoint"],
             "distance_to_endpoint": r["distance_to_endpoint"],
+            "axis_distance": r.get("axis_distance", ""),
             "axis_coord": r["axis_coord"],
+            "grid_frame_source": r.get("grid_frame_source", ""),
+            "recovery_score": r.get("recovery_score", ""),
+            "detection_mode": r.get("detection_mode", ""),
             "text_handle": r["text_handle"],
             "text_source": r["text_source"],
             "confidence": r["confidence"],
@@ -1918,9 +2173,12 @@ def apply_endpoint_recovery_plan(plan_rows):
                 "sync_mode": "endpoint_recovery",
                 "endpoint": r["endpoint"],
                 "distance_to_endpoint": r["distance_to_endpoint"],
+                "axis_distance": r.get("axis_distance", ""),
                 "entity_handle": r["text_handle"],
                 "text_source": r["text_source"],
+                "detection_mode": r.get("detection_mode", ""),
                 "confidence": r["confidence"],
+                "recovery_score": r.get("recovery_score", ""),
             })
 
             continue
@@ -1943,9 +2201,12 @@ def apply_endpoint_recovery_plan(plan_rows):
                 "sync_mode": "endpoint_recovery",
                 "endpoint": r["endpoint"],
                 "distance_to_endpoint": r["distance_to_endpoint"],
+                "axis_distance": r.get("axis_distance", ""),
                 "entity_handle": r["text_handle"],
                 "text_source": r["text_source"],
+                "detection_mode": r.get("detection_mode", ""),
                 "confidence": r["confidence"],
+                "recovery_score": r.get("recovery_score", ""),
             })
 
         else:
@@ -1961,9 +2222,12 @@ def apply_endpoint_recovery_plan(plan_rows):
                 "sync_mode": "endpoint_recovery",
                 "endpoint": r["endpoint"],
                 "distance_to_endpoint": r["distance_to_endpoint"],
+                "axis_distance": r.get("axis_distance", ""),
                 "entity_handle": r["text_handle"],
                 "text_source": r["text_source"],
+                "detection_mode": r.get("detection_mode", ""),
                 "confidence": r["confidence"],
+                "recovery_score": r.get("recovery_score", ""),
             })
 
     return changed, skipped, audit
@@ -2027,6 +2291,8 @@ def reset_state():
     ]:
         if k in st.session_state:
             del st.session_state[k]
+
+
 # =========================================================
 # MAIN UI
 # =========================================================
@@ -2163,7 +2429,7 @@ with f3:
 
 st.markdown("#### Slab/Grid Endpoint Recovery Settings")
 
-r1, r2 = st.columns(2)
+r1, r2, r3 = st.columns(3)
 
 with r1:
     recovery_endpoint_radius = st.slider(
@@ -2172,7 +2438,7 @@ with r1:
         10000.0,
         1500.0,
         100.0,
-        help="Recovery mode searches this distance around grid-line ends for grid-label bubbles. Lower values reduce false slab/detail detections.",
+        help="Search distance around actual grid-frame endpoints. Lower values reject slab/detail bubbles.",
     )
 
 with r2:
@@ -2182,7 +2448,33 @@ with r2:
         20,
         5,
         1,
-        help="If reference numeric labels are 1–17, extra 5 allows candidates up to 22 but rejects slab labels like 145.",
+        help="Used only when strict source labels is OFF.",
+    )
+
+with r3:
+    recovery_axis_snap_tolerance = st.slider(
+        "Recovery Axis Snap Tolerance",
+        25.0,
+        1000.0,
+        200.0,
+        25.0,
+        help="Candidate bubble must be close to the actual grid axis. Lower is safer for slab/detail drawings.",
+    )
+
+r4, r5 = st.columns(2)
+
+with r4:
+    recovery_strict_source_labels = st.checkbox(
+        "Recovery: only use labels already in reference",
+        value=True,
+        help="Recommended ON. This rejects slab/detail numbers like 01, 02, 58, 103, 116.",
+    )
+
+with r5:
+    recovery_allow_virtual_axis = st.checkbox(
+        "Recovery: allow virtual-axis markers",
+        value=False,
+        help="Recommended OFF for slab/detail regions.",
     )
 
 
@@ -2264,10 +2556,12 @@ arch_line_default = pick_default_layer(
     arch_layers,
     ["S-GRID", "GRID", "GRIDLINELAYER"],
 )
+
 arch_text_default = pick_default_layer(
     arch_layers,
     ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"],
 )
+
 arch_circle_default = pick_default_layer(
     arch_layers,
     ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"],
@@ -2277,10 +2571,12 @@ struc_line_default = pick_default_layer(
     struc_layers,
     ["GRIDLINELAYER", "S-GRID", "GRID"],
 )
+
 struc_text_default = pick_default_layer(
     struc_layers,
     ["DEFAULTLAYER", "S-STRS-IDEN", "S-GRID-IDEN", "GRID-ID"],
 )
+
 struc_circle_default = pick_default_layer(
     struc_layers,
     ["DEFAULTLAYER", "S-GRID-IDEN", "GRID-ID"],
@@ -2317,8 +2613,7 @@ with sa:
         struc_layers,
         index=struc_layers.index(struc_line_default) if struc_line_default in struc_layers else 0,
     )
-
-with sb:
+    with sb:
     struc_text_layer = st.selectbox(
         "Target Grid Text Layer",
         struc_layers,
@@ -2709,7 +3004,7 @@ if st.session_state.prepared:
     st.markdown("### 8B. Slab/Grid Endpoint Recovery Mode")
 
     st.caption(
-        "Use this for slab/detail regions. It finds actual grid-line ends and searches only near those endpoints for plausible grid labels."
+        "Use this for slab/detail regions. It ignores most interior slab/detail bubbles and searches only near outer grid-frame endpoints."
     )
 
     recovery_candidates = [
@@ -2728,6 +3023,7 @@ if st.session_state.prepared:
 
         recovery_preview = []
         recovery_blocked = []
+        recovery_warnings = []
         recovery_plan_rows_all = []
 
         for region_name in selected_recovery_regions:
@@ -2752,7 +3048,16 @@ if st.session_state.prepared:
                 recovery_endpoint_radius,
                 allow_block_text_write,
                 numeric_extra=recovery_numeric_extra,
+                axis_snap_tolerance=recovery_axis_snap_tolerance,
+                strict_source_labels=recovery_strict_source_labels,
+                allow_virtual_axis_recovery=recovery_allow_virtual_axis,
             )
+
+            for w in rec_warnings:
+                recovery_warnings.append({
+                    "region": region_name,
+                    "warning": w,
+                })
 
             if not rec_ready:
                 recovery_blocked.append({
@@ -2766,10 +3071,18 @@ if st.session_state.prepared:
 
         if recovery_blocked:
             st.warning(
-                "Some selected recovery regions are not safe for endpoint recovery yet. "
-                "Try increasing Recovery Endpoint Search Radius, or verify selected layers."
+                "Some selected recovery regions are not fully safe for endpoint recovery yet. "
+                "Try increasing Endpoint Search Radius slightly, increasing Axis Snap Tolerance slightly, "
+                "or verify selected layers."
             )
             st.dataframe(recovery_blocked, use_container_width=True)
+
+        if recovery_warnings:
+            st.info(
+                "Recovery warnings found. This is normal for slab/detail regions. "
+                "Review the preview carefully before applying."
+            )
+            st.dataframe(recovery_warnings, use_container_width=True)
 
         if recovery_preview:
             st.write("#### Endpoint Recovery Preview")
@@ -2793,7 +3106,8 @@ if st.session_state.prepared:
 
         elif selected_recovery_regions and not recovery_plan_rows_all:
             st.info(
-                "No endpoint recovery candidates found. Try increasing the Recovery Endpoint Search Radius."
+                "No endpoint recovery candidates found. Try increasing Endpoint Search Radius "
+                "or Axis Snap Tolerance slightly."
             )
 
     else:
