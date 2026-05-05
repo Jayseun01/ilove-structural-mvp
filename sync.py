@@ -4657,3 +4657,12 @@ def reset_state():
     ]:
         if k in st.session_state:
             del st.session_state[k]
+
+
+# =========================================================
+# MAIN UI
+# =========================================================
+
+init_state()
+
+st.markdown("### 1. Detection Settings")
