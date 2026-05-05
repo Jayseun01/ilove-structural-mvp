@@ -1794,7 +1794,9 @@ def source_numeric_range(source_numeric, extra=5):
 
     return max(1, min(vals) - extra), max(vals) + extra
 
-
+def is_zero_padded_detail_number(label):
+    label = clean_text(label)
+    return bool(re.fullmatch(r"0\d{1,3}", label))
 def plausible_recovery_label(label, family, source_numeric, source_alpha, numeric_extra=5):
     label = clean_text(label)
 
@@ -1819,18 +1821,6 @@ def plausible_recovery_label(label, family, source_numeric, source_alpha, numeri
 
         # In recovery, old target alpha labels may differ from source.
         # Example: target old A' becomes source M.
-        return bool(re.fullmatch(r"[A-Z]{1,2}'?", label))
-
-    return False
-
-        source_labels = {
-            clean_text(g.get("label", ""))
-            for g in source_alpha
-        }
-
-        if label in source_labels:
-            return True
-
         return bool(re.fullmatch(r"[A-Z]{1,2}'?", label))
 
     return False
