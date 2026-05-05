@@ -3746,6 +3746,7 @@ if st.session_state.prepared:
         recovery_blocked = []
         recovery_warnings = []
         recovery_plan_rows_all = []
+        recovery_axis_diagnostics = []
 
         for region_name in selected_recovery_regions:
             r = region_by_name.get(region_name)
@@ -3756,7 +3757,17 @@ if st.session_state.prepared:
                     "reason": "Region not found",
                 })
                 continue
-
+            recovery_axis_diagnostics.extend(
+                build_recovery_axis_diagnostics(
+                    r,
+                    st.session_state.source_numeric,
+                    st.session_state.source_alpha,
+                    family["numeric_orientation"],
+                    family["alpha_orientation"],
+                    numeric_order,
+                    alpha_order,
+                )
+            )
             rec_ready, rec_blockers, rec_warnings, rec_plan_rows = build_endpoint_recovery_plan(
                 r,
                 st.session_state.source_numeric,
@@ -3790,7 +3801,9 @@ if st.session_state.prepared:
             if rec_plan_rows:
                 recovery_plan_rows_all.extend(rec_plan_rows)
                 recovery_preview.extend(recovery_preview_rows(rec_plan_rows))
-
+        if recovery_axis_diagnostics:
+            with st.expander("Recovery Axis Group Diagnostics", expanded=False):
+                st.dataframe(recovery_axis_diagnostics, use_container_width=True)
         if recovery_blocked:
             st.warning(
                 "Some selected recovery regions are not fully safe for endpoint recovery yet. "
