@@ -214,6 +214,7 @@ def get_entity_handle(entity):
     except Exception:
         return ""
 
+
 # =========================================================
 # LAYER WHITELIST / WRITE MODE HELPERS
 # =========================================================
@@ -238,15 +239,6 @@ def nested_entity_layer_allowed(
     allow_layer0_from_selected_insert=True,
     strict_nested_block_layer_match=False,
 ):
-    """
-    Selected grid layers are the whitelist.
-
-    Default behavior:
-    - Nested entity on selected layer is allowed.
-    - Nested entity on layer 0 is allowed only when parent INSERT is on selected layer.
-    - Unrelated nested layers are ignored.
-    - Strict mode requires nested entity layer to match selected layer exactly.
-    """
     nested = norm_layer_name(nested_layer)
     selected = norm_layer_name(selected_layer)
     parent = norm_layer_name(parent_layer)
@@ -270,12 +262,6 @@ def attrib_layer_allowed_for_text(
     allow_layer0_from_selected_insert=True,
     strict_nested_block_layer_match=False,
 ):
-    """
-    ATTRIB rule:
-    - ATTRIB layer matches selected text layer, OR
-    - parent INSERT is on selected text layer.
-    - Optional layer 0 allowance only applies when parent INSERT is selected.
-    """
     attrib = norm_layer_name(attrib_layer)
     selected = norm_layer_name(selected_text_layer)
     parent = norm_layer_name(parent_insert_layer)
@@ -296,10 +282,6 @@ def attrib_layer_allowed_for_text(
 
 
 def marker_write_profile(marker, write_mode=None, allow_block_text_write=False):
-    """
-    Returns write safety metadata for a detected marker.
-    Backward compatible with older allow_block_text_write bool.
-    """
     if write_mode is None:
         write_mode = WRITE_MODE_DANGEROUS if allow_block_text_write else WRITE_MODE_ATTRIB
 
@@ -393,6 +375,8 @@ def marker_layer(marker):
 def marker_entity_handle(marker):
     entity = marker.get("text_entity")
     return marker.get("text_handle") or get_entity_handle(entity)
+
+
 def get_insert_transform(insert_entity):
     try:
         ins = insert_entity.dxf.insert
@@ -518,7 +502,6 @@ def extract_texts(
             elif e.dxftype() == "INSERT":
                 parent_layer = e.dxf.layer
 
-                # INSERT attributes are instance-specific and usually safer than block definition text.
                 try:
                     for att in e.attribs:
                         if not attrib_layer_allowed_for_text(
@@ -544,7 +527,6 @@ def extract_texts(
                 except Exception:
                     pass
 
-                # Block definition TEXT/MTEXT is detected for matching, but write safety is controlled separately.
                 try:
                     if e.dxf.name in doc.blocks:
                         block = doc.blocks[e.dxf.name]
@@ -903,7 +885,7 @@ def extract_axis_lines(
             continue
 
     return deduplicate_axis_lines(lines)
-
+    
 
 # =========================================================
 # MARKER DETECTION
@@ -1288,6 +1270,7 @@ def build_trusted_markers(
         "rejected_markers": rejected,
     }
 
+
 # =========================================================
 # AXIS GROUPING / FAMILY INFERENCE
 # =========================================================
@@ -1594,7 +1577,7 @@ def assign_value(value, groups):
             return i
 
     return None
-
+    
 
 def build_regions(markers, axis_tol, expected_markers_per_region=None, forced_region_count=0, min_region_markers=4):
     if not markers:
@@ -1700,7 +1683,9 @@ def build_regions(markers, axis_tol, expected_markers_per_region=None, forced_re
         "small_buckets_skipped": skipped,
         "region_marker_counts": [r["marker_count"] for r in regions],
     }
-    # =========================================================
+
+
+# =========================================================
 # CLEAN SYNC VALIDATION / PREVIEW / APPLY
 # =========================================================
 
@@ -2199,9 +2184,6 @@ def strict_slab_recovery_label_ok(
         if clean_text(x)
     }
 
-    # If strict mode is ON and this old label was already detected as part of
-    # the target axis group, allow it even if its family looks different.
-    # This fixes old target label "10" needing to become an alpha source label.
     if strict_source_labels:
         if allowed_old_labels:
             return label in allowed_old_labels
@@ -2217,7 +2199,6 @@ def strict_slab_recovery_label_ok(
 
         return False
 
-    # Non-strict mode still requires the label to look like the correct family.
     if not label_matches_family(label, family_name):
         return False
 
@@ -2229,16 +2210,8 @@ def strict_slab_recovery_label_ok(
         numeric_extra=numeric_extra,
     )
 
+
 def axis_group_recovery_quality(group):
-    """
-    Scores a target axis group for endpoint recovery when the target has
-    one or more extra detected groups.
-
-    Higher is better.
-
-    This does NOT change labels by itself. It only helps choose the most
-    grid-like axis groups when target count is slightly larger than source count.
-    """
     markers = group.get("markers", []) or []
 
     marker_count = len(markers)
@@ -2266,8 +2239,6 @@ def axis_group_recovery_quality(group):
 
     label_count = int(group.get("label_count", 1) or 1)
 
-    # Real grid axes usually have 2 endpoint bubbles, good confidence,
-    # and attached/closest gridline detection. Virtual axes are less trusted.
     return (
         marker_count * 1000.0
         + attached_count * 350.0
@@ -2283,16 +2254,24 @@ def axis_group_label_summary(group):
     labels = []
 
     main = clean_text(group.get("label", ""))
+
     if main:
         labels.append(main)
 
     for lab in group.get("mixed_labels", []):
         lab = clean_text(lab)
+
+        if lab and lab not in labels:
+            labels.append(lab)
+
+    for lab in (group.get("label_counts", {}) or {}).keys():
+        lab = clean_text(lab)
+
         if lab and lab not in labels:
             labels.append(lab)
 
     return ", ".join(labels)
-
+    
 
 def select_axis_groups_for_recovery(
     source_groups,
@@ -2300,16 +2279,6 @@ def select_axis_groups_for_recovery(
     family_name,
     max_extra_groups=2,
 ):
-    """
-    Endpoint recovery originally required exact source/target axis counts.
-    That is safest, but slab/detail drawings can create one extra detected axis
-    from a legitimate-looking endpoint/detail bubble.
-
-    This helper allows a small number of extra target groups by selecting the
-    most grid-like target groups.
-
-    Missing target groups are still blocked.
-    """
     expected = len(source_groups)
     found = len(target_groups)
 
@@ -2375,6 +2344,8 @@ def select_axis_groups_for_recovery(
     )
 
     return chosen_groups, blockers, warnings
+
+
 def marker_endpoint_distance(marker, endpoints):
     p = marker["circle_center"]
 
@@ -2405,7 +2376,7 @@ def build_endpoint_recovery_plan(
     allow_virtual_axis_recovery=False,
     write_mode=None,
 ):
-     blockers = []
+    blockers = []
     warnings = []
     plan_rows = []
 
@@ -2466,32 +2437,23 @@ def build_endpoint_recovery_plan(
             orientation = target_group["orientation"]
             coord = float(target_group["coord"])
 
-                      allowed_old_labels = set()
-
-            # Important:
-            # In slab/detail endpoint recovery, the OLD target labels may be from
-            # a different family than the NEW source labels.
-            #
-            # Example:
-            # - Old target endpoint label "10" or "72" may need to become source label "G".
-            # - Same physical axis may have different old labels at opposite ends.
-            #
-            # Therefore, if the label was already detected as part of this target
-            # axis group, allow it, regardless of numeric/alphabetic family.
-            # Still reject zero-padded detail numbers like 01, 02, 08, 09.
+            allowed_old_labels = set()
             group_labels = []
 
             main_old_label = clean_text(target_group.get("label", ""))
+
             if main_old_label:
                 group_labels.append(main_old_label)
 
             for lab in target_group.get("mixed_labels", []):
                 lab = clean_text(lab)
+
                 if lab:
                     group_labels.append(lab)
 
             for lab in (target_group.get("label_counts", {}) or {}).keys():
                 lab = clean_text(lab)
+
                 if lab:
                     group_labels.append(lab)
 
@@ -2508,6 +2470,7 @@ def build_endpoint_recovery_plan(
                     continue
 
                 allowed_old_labels.add(lab)
+
             endpoints = endpoint_points_for_axis_group_using_frame(target_group, frame)
 
             endpoint_candidates = {
@@ -3335,6 +3298,7 @@ if analyze:
             allow_nested_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
             strict_nested_block_layer_match=strict_nested_block_layer_match,
         )
+
         arch_trusted = [
             m for m in arch_det["trusted_markers"]
             if m.get("confidence", 0) >= min_confidence_required
@@ -3422,7 +3386,7 @@ if analyze:
                 allow_block_text_write,
                 expected_reference_marker_count=len(arch_trusted),
                 max_region_marker_ratio=max_region_marker_ratio,
-                 write_mode=write_mode,
+                write_mode=write_mode,
             )
 
             if ready:
@@ -3576,6 +3540,7 @@ if st.session_state.prepared:
             allow_block_text_write,
             expected_reference_marker_count=len(st.session_state.arch_detection.get("trusted_markers", [])),
             max_region_marker_ratio=max_region_marker_ratio,
+            write_mode=write_mode,
         )
 
         if not ready:
@@ -3583,6 +3548,8 @@ if st.session_state.prepared:
                 "region": region_name,
                 "reason": "; ".join(blockers),
             })
+
+    clean_confirm = False
 
     if blocked_selected:
         st.error(
@@ -3592,7 +3559,25 @@ if st.session_state.prepared:
         st.dataframe(blocked_selected, use_container_width=True)
 
     else:
-        if st.button("✍️ Apply Clean Sync to Selected Regions", key="apply_clean_sync_button"):
+        approved_clean_count = len(filtered_preview)
+
+        st.write({
+            "selected_clean_regions": len(selected_regions),
+            "clean_preview_axis_rows": approved_clean_count,
+            "write_mode": write_mode,
+        })
+
+        clean_confirm = st.checkbox(
+            "I reviewed the clean sync preview and understand these changes will modify the DXF.",
+            value=False,
+            key="confirm_clean_sync_apply",
+        )
+
+        if st.button(
+            "✍️ Apply Clean Sync to Selected Regions",
+            key="apply_clean_sync_button",
+            disabled=not clean_confirm or not selected_regions,
+        ):
             total_changed = 0
             total_skipped = 0
             audit = []
@@ -3614,12 +3599,15 @@ if st.session_state.prepared:
                     allow_block_text_write,
                     expected_reference_marker_count=len(st.session_state.arch_detection.get("trusted_markers", [])),
                     max_region_marker_ratio=max_region_marker_ratio,
+                    write_mode=write_mode,
                 )
 
                 if not ready:
                     audit.append({
                         "region": region_name,
                         "family": "region",
+                        "sync_mode": "clean_sync",
+                        "approved_by_user": True,
                         "changed": False,
                         "skipped": True,
                         "reason": "Region preflight failed: " + "; ".join(blockers),
@@ -3630,12 +3618,14 @@ if st.session_state.prepared:
                     st.session_state.source_numeric,
                     num,
                     allow_block_text_write=allow_block_text_write,
+                    write_mode=write_mode,
                 )
 
                 ch2, sk2, au2 = apply_group_labels(
                     st.session_state.source_alpha,
                     alp,
                     allow_block_text_write=allow_block_text_write,
+                    write_mode=write_mode,
                 )
 
                 for row in au1:
@@ -3715,6 +3705,7 @@ if st.session_state.prepared:
                 axis_snap_tolerance=recovery_axis_snap_tolerance,
                 strict_source_labels=recovery_strict_source_labels,
                 allow_virtual_axis_recovery=recovery_allow_virtual_axis,
+                write_mode=write_mode,
             )
 
             for w in rec_warnings:
@@ -3748,25 +3739,129 @@ if st.session_state.prepared:
             )
             st.dataframe(recovery_warnings, use_container_width=True)
 
+        approved_plan_rows = []
+        unapproved_plan_rows = []
+
         if recovery_preview:
-            st.write("#### Endpoint Recovery Preview")
-            st.dataframe(recovery_preview, use_container_width=True)
+            st.write("#### Endpoint Recovery Manual Approval Preview")
 
-        if selected_recovery_regions and recovery_plan_rows_all and not recovery_blocked:
-            if st.button("🩹 Apply Endpoint Recovery Sync", key="apply_endpoint_recovery_button"):
-                ch, sk, au = apply_endpoint_recovery_plan(recovery_plan_rows_all)
+            try:
+                edited_recovery_preview = st.data_editor(
+                    recovery_preview,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="endpoint_recovery_approval_editor",
+                    column_config={
+                        "apply": st.column_config.CheckboxColumn(
+                            "Apply?",
+                            help="Uncheck rows that should not be modified.",
+                            default=True,
+                        ),
+                    },
+                    disabled=[
+                        "approval_id",
+                        "region",
+                        "family",
+                        "axis_position",
+                        "old_label",
+                        "new_label",
+                        "endpoint",
+                        "distance_to_endpoint",
+                        "axis_distance",
+                        "axis_coord",
+                        "grid_frame_source",
+                        "recovery_score",
+                        "detection_mode",
+                        "text_handle",
+                        "text_source",
+                        "write_source",
+                        "write_risk",
+                        "write_reason",
+                        "layer",
+                        "confidence",
+                        "writable",
+                    ],
+                )
+            except Exception:
+                st.warning("Editable preview table failed. Falling back to read-only preview.")
+                st.dataframe(recovery_preview, use_container_width=True)
+                edited_recovery_preview = recovery_preview
 
-                st.session_state.changed += ch
-                st.session_state.skipped += sk
-                st.session_state.audit.extend(au)
+            approved_ids = approved_ids_from_editor(edited_recovery_preview)
 
-                if ch:
-                    st.success(f"Endpoint recovery complete. Changed {ch} grid-label text entities.")
-                else:
-                    st.info("Endpoint recovery completed. No labels needed changing.")
+            approved_plan_rows = [
+                row for row in recovery_plan_rows_all
+                if row.get("approval_id") in approved_ids
+            ]
 
-                if sk:
-                    st.warning(f"Endpoint recovery skipped {sk} text entities.")
+            unapproved_plan_rows = [
+                row for row in recovery_plan_rows_all
+                if row.get("approval_id") not in approved_ids
+            ]
+
+            counts = recovery_plan_apply_counts(approved_plan_rows)
+
+            st.write("#### Endpoint Recovery Apply Summary")
+            st.write({
+                "approved_rows": counts["approved_rows"],
+                "will_change": counts["will_change"],
+                "already_match": counts["already_match"],
+                "high_risk_writes": counts["high_risk"],
+                "unwritable": counts["unwritable"],
+                "unchecked_rows": len(unapproved_plan_rows),
+                "write_mode": write_mode,
+            })
+
+            recovery_confirm = st.checkbox(
+                "I reviewed the endpoint recovery preview and understand these changes will modify the DXF.",
+                value=False,
+                key="confirm_endpoint_recovery_apply",
+            )
+
+            dangerous_confirm = True
+
+            if write_mode == WRITE_MODE_DANGEROUS:
+                dangerous_confirm = st.checkbox(
+                    "I understand block definition edits may affect repeated symbols.",
+                    value=False,
+                    key="confirm_dangerous_block_write_endpoint",
+                )
+
+            can_apply_recovery = (
+                selected_recovery_regions
+                and approved_plan_rows
+                and not recovery_blocked
+                and recovery_confirm
+                and dangerous_confirm
+            )
+
+            if selected_recovery_regions and recovery_plan_rows_all and not recovery_blocked:
+                if st.button(
+                    "🩹 Apply Approved Endpoint Recovery Sync",
+                    key="apply_endpoint_recovery_button",
+                    disabled=not can_apply_recovery,
+                ):
+                    ch, sk, au = apply_endpoint_recovery_plan(
+                        approved_plan_rows,
+                        approved_by_user=True,
+                    )
+
+                    skipped_audit = build_unapproved_recovery_audit_rows(unapproved_plan_rows)
+
+                    st.session_state.changed += ch
+                    st.session_state.skipped += sk + len(unapproved_plan_rows)
+                    st.session_state.audit.extend(au + skipped_audit)
+
+                    if ch:
+                        st.success(f"Endpoint recovery complete. Changed {ch} grid-label text entities.")
+                    else:
+                        st.info("Endpoint recovery completed. No labels needed changing.")
+
+                    if sk:
+                        st.warning(f"Endpoint recovery skipped {sk} text entities.")
+
+                    if unapproved_plan_rows:
+                        st.info(f"{len(unapproved_plan_rows)} rows were intentionally unchecked and skipped.")
 
         elif selected_recovery_regions and not recovery_plan_rows_all:
             st.info(
