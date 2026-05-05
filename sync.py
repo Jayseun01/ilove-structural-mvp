@@ -2715,7 +2715,60 @@ def approved_ids_from_editor(editor_result):
 
     return approved
 
+def recovery_plan_from_editor(plan_rows, editor_result):
+    """
+    Builds approved/unapproved recovery plan rows from editable Streamlit table.
 
+    Allows user to manually override new_label in the 8B approval table.
+    """
+    editor_rows = editor_result_to_rows(editor_result)
+
+    editor_by_id = {}
+
+    for row in editor_rows:
+        approval_id = row.get("approval_id", "")
+
+        if approval_id:
+            editor_by_id[approval_id] = row
+
+    approved = []
+    unapproved = []
+    invalid = []
+
+    for original in plan_rows:
+        approval_id = original.get("approval_id", "")
+        edited = editor_by_id.get(approval_id, {})
+
+        apply_row = checkbox_truthy(edited.get("apply", False))
+
+        row_copy = dict(original)
+
+        edited_new_label = clean_text(edited.get("new_label", original.get("new_label", "")))
+
+        if not apply_row:
+            unapproved.append(row_copy)
+            continue
+
+        if not edited_new_label:
+            bad = dict(row_copy)
+            bad["invalid_reason"] = "Edited new_label is blank"
+            invalid.append(bad)
+            continue
+
+        if not probable_grid_label(edited_new_label):
+            bad = dict(row_copy)
+            bad["invalid_reason"] = f"Edited new_label '{edited_new_label}' is not a probable grid label"
+            invalid.append(bad)
+            continue
+
+        row_copy["user_edited_new_label"] = edited_new_label
+        row_copy["original_proposed_new_label"] = row_copy.get("new_label", "")
+        row_copy["new_label"] = edited_new_label
+
+        approved.append(row_copy)
+
+    return approved, unapproved, invalid
+    
 def recovery_plan_apply_counts(plan_rows):
     approved_count = len(plan_rows)
     will_change_count = 0
