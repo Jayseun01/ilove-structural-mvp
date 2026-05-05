@@ -1789,6 +1789,101 @@ def get_region_sync_plan(
 
     return ready, blockers, numeric_groups, alpha_groups
 
+def build_segmentation_diagnostics_rows(
+    regions,
+    source_numeric,
+    source_alpha,
+    numeric_orientation,
+    alpha_orientation,
+    numeric_order,
+    alpha_order,
+    axis_tol,
+):
+    """
+    Build rows for Section 5.
+
+    This compares:
+    - all markers detected in each region before the interior/perimeter filter
+    - markers kept after the filter for clean sync
+
+    This helps identify when a numeric or alphabetic axis disappears because
+    the perimeter filter removed it.
+    """
+    rows = []
+
+    expected_numeric = len(source_numeric)
+    expected_alpha = len(source_alpha)
+
+    for r in regions:
+        all_markers = r.get("all_markers", r.get("markers", []))
+        sync_markers = r.get("markers", [])
+
+        raw_axis_groups = group_markers_by_axis(all_markers, tol=axis_tol)
+
+        sync_axis_groups = r.get(
+            "axis_groups",
+            group_markers_by_axis(sync_markers, tol=axis_tol),
+        )
+
+        raw_numeric, raw_alpha = get_family_groups(
+            raw_axis_groups,
+            numeric_orientation,
+            alpha_orientation,
+            numeric_order,
+            alpha_order,
+        )
+
+        sync_numeric, sync_alpha = get_family_groups(
+            {"axis_groups": sync_axis_groups},
+            numeric_orientation,
+            alpha_orientation,
+            numeric_order,
+            alpha_order,
+        )
+
+        raw_numeric_labels = [g["label"] for g in raw_numeric]
+        sync_numeric_labels = [g["label"] for g in sync_numeric]
+
+        raw_alpha_labels = [g["label"] for g in raw_alpha]
+        sync_alpha_labels = [g["label"] for g in sync_alpha]
+
+        removed_numeric_labels = [
+            x for x in raw_numeric_labels
+            if x not in sync_numeric_labels
+        ]
+
+        removed_alpha_labels = [
+            x for x in raw_alpha_labels
+            if x not in sync_alpha_labels
+        ]
+
+        rows.append({
+            "region": r.get("name", ""),
+
+            "all_detected_markers": len(all_markers),
+            "clean_sync_markers_after_filter": len(sync_markers),
+            "interior_markers_removed": r.get("interior_marker_count", 0),
+
+            "raw_numeric_axes_before_filter": len(raw_numeric),
+            "sync_numeric_axes_after_filter": len(sync_numeric),
+            "expected_numeric_axes": expected_numeric,
+            "raw_numeric_labels_before_filter": ", ".join(raw_numeric_labels),
+            "sync_numeric_labels_after_filter": ", ".join(sync_numeric_labels),
+            "numeric_labels_removed_by_filter": ", ".join(removed_numeric_labels),
+
+            "raw_alpha_axes_before_filter": len(raw_alpha),
+            "sync_alpha_axes_after_filter": len(sync_alpha),
+            "expected_alpha_axes": expected_alpha,
+            "raw_alpha_labels_before_filter": ", ".join(raw_alpha_labels),
+            "sync_alpha_labels_after_filter": ", ".join(sync_alpha_labels),
+            "alpha_labels_removed_by_filter": ", ".join(removed_alpha_labels),
+
+            "clean_sync_uses": "perimeter_filtered_markers",
+            "endpoint_recovery_should_use": "all_detected_markers",
+        })
+
+    return rows
+
 
 def build_region_report(
     regions,
