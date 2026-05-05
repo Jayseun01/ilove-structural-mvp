@@ -3901,7 +3901,7 @@ if st.session_state.prepared:
                     key="confirm_dangerous_block_write_endpoint",
                 )
 
-                     can_apply_recovery = (
+            can_apply_recovery = (
                 selected_recovery_regions
                 and approved_plan_rows
                 and not recovery_blocked
@@ -3909,7 +3909,6 @@ if st.session_state.prepared:
                 and recovery_confirm
                 and dangerous_confirm
             )
-
             if selected_recovery_regions and recovery_plan_rows_all and not recovery_blocked:
                 if st.button(
                     "🩹 Apply Approved Endpoint Recovery Sync",
