@@ -1746,47 +1746,6 @@ def plausible_recovery_label(label, family, source_numeric, source_alpha, numeri
 
 
 def strict_slab_recovery_label_ok(
-    label,
-    family_name,
-    source_numeric,
-    source_alpha,
-    numeric_extra=5,
-    strict_source_labels=True,
-    allowed_old_labels=None,
-):
-    label = clean_text(label)
-
-    if not label_matches_family(label, family_name):
-        return False
-
-    if is_zero_padded_detail_number(label):
-        return False
-
-    allowed_old_labels = {
-        clean_text(x)
-        for x in (allowed_old_labels or [])
-        if clean_text(x)
-    }
-
-    if strict_source_labels:
-        if allowed_old_labels:
-            return label in allowed_old_labels
-
-        if family_name == "numeric":
-            return label in source_label_set(source_numeric)
-
-        if family_name == "alphabetic":
-            return label in source_label_set(source_alpha)
-
-        return False
-
-    return plausible_recovery_label(
-        label,
-        family_name,
-        source_numeric,
-        source_alpha,
-        numeric_extra=numeric_extra,
-    )
 
 
 def marker_endpoint_distance(marker, endpoints):
