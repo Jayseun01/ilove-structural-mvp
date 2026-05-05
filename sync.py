@@ -2405,13 +2405,13 @@ def build_endpoint_recovery_plan(
     allow_virtual_axis_recovery=False,
     write_mode=None,
 ):
-    blockers = []
+     blockers = []
     warnings = []
     plan_rows = []
 
     candidate_markers = region.get("all_markers", region.get("markers", []))
 
-  raw_target_numeric_groups, raw_target_alpha_groups = get_family_groups(
+    raw_target_numeric_groups, raw_target_alpha_groups = get_family_groups(
         region,
         numeric_orientation,
         alpha_orientation,
