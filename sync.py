@@ -5076,7 +5076,7 @@ if analyze:
             min_region_markers=min_region_markers,
         )
 
-       if ignore_interior_detail_bubbles:
+        if ignore_interior_detail_bubbles:
             regions = [
                 filter_region_perimeter_markers(
                     r,
