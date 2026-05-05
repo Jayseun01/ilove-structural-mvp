@@ -636,8 +636,7 @@ def extract_circles(
             continue
 
     return circles
-
-
+    
 def add_axis_segment(
     lines,
     entity,
@@ -885,7 +884,7 @@ def extract_axis_lines(
             continue
 
     return deduplicate_axis_lines(lines)
-    
+
 
 # =========================================================
 # MARKER DETECTION
@@ -1479,13 +1478,15 @@ def filter_region_perimeter_markers(region, axis_tol, band_ratio=0.18, min_band=
     filtered["axis_groups"] = group_markers_by_axis(perimeter_markers, tol=axis_tol)
 
     return filtered
+
+
 def region_for_endpoint_recovery(region, axis_tol):
     """
-    Endpoint recovery should use all detected markers to reconstruct axis groups,
-    even if clean sync uses only perimeter-filtered markers.
+    Endpoint recovery uses all detected markers, not only the perimeter-filtered
+    markers used for clean sync.
 
-    This prevents recovery from failing when Section 5 filtered out one valid
-    endpoint bubble/axis group.
+    This fixes cases where Section 5 removes a valid numeric/alphabetic endpoint
+    bubble and recovery then reports fewer axis groups than expected.
     """
     recovery_region = dict(region)
 
@@ -1496,6 +1497,7 @@ def region_for_endpoint_recovery(region, axis_tol):
     recovery_region["recovery_uses_all_markers"] = True
 
     return recovery_region
+
 
 def marker_xy(marker):
     x, y = marker["circle_center"]
@@ -1593,7 +1595,7 @@ def assign_value(value, groups):
             return i
 
     return None
-    
+
 
 def build_regions(markers, axis_tol, expected_markers_per_region=None, forced_region_count=0, min_region_markers=4):
     if not markers:
@@ -1699,7 +1701,7 @@ def build_regions(markers, axis_tol, expected_markers_per_region=None, forced_re
         "small_buckets_skipped": skipped,
         "region_marker_counts": [r["marker_count"] for r in regions],
     }
-
+    
 
 # =========================================================
 # CLEAN SYNC VALIDATION / PREVIEW / APPLY
@@ -1789,6 +1791,7 @@ def get_region_sync_plan(
 
     return ready, blockers, numeric_groups, alpha_groups
 
+
 def build_segmentation_diagnostics_rows(
     regions,
     source_numeric,
@@ -1800,14 +1803,14 @@ def build_segmentation_diagnostics_rows(
     axis_tol,
 ):
     """
-    Build rows for Section 5.
+    Build diagnostic rows for Section 5.
 
     This compares:
-    - all markers detected in each region before the interior/perimeter filter
-    - markers kept after the filter for clean sync
+    - all detected markers before the interior/perimeter filter
+    - clean-sync markers after the perimeter filter
 
-    This helps identify when a numeric or alphabetic axis disappears because
-    the perimeter filter removed it.
+    It helps show when a numeric or alphabetic axis disappears because
+    Section 5 removed one or more bubbles.
     """
     rows = []
 
@@ -1879,7 +1882,7 @@ def build_segmentation_diagnostics_rows(
             "alpha_labels_removed_by_filter": ", ".join(removed_alpha_labels),
 
             "clean_sync_uses": "perimeter_filtered_markers",
-            "endpoint_recovery_should_use": "all_detected_markers",
+            "endpoint_recovery_uses": "all_detected_markers",
         })
 
     return rows
@@ -1926,6 +1929,7 @@ def build_region_report(
         non_writable = len(r["markers"]) - writable
 
         risk_counts = {}
+
         for m in r["markers"]:
             prof = marker_write_profile(
                 m,
@@ -2382,7 +2386,7 @@ def axis_group_label_summary(group):
             labels.append(lab)
 
     return ", ".join(labels)
-    
+
 
 def select_axis_groups_for_recovery(
     source_groups,
@@ -2550,6 +2554,8 @@ def build_recovery_axis_diagnostics(
             })
 
     return rows
+
+
 def marker_endpoint_distance(marker, endpoints):
     p = marker["circle_center"]
 
@@ -2920,6 +2926,7 @@ def approved_ids_from_editor(editor_result):
 
     return approved
 
+
 def recovery_plan_from_editor(plan_rows, editor_result):
     """
     Builds approved/unapproved recovery plan rows from editable Streamlit table.
@@ -2973,7 +2980,8 @@ def recovery_plan_from_editor(plan_rows, editor_result):
         approved.append(row_copy)
 
     return approved, unapproved, invalid
-    
+
+
 def recovery_plan_apply_counts(plan_rows):
     approved_count = len(plan_rows)
     will_change_count = 0
@@ -3171,1059 +3179,1481 @@ def reset_state():
     ]:
         if k in st.session_state:
             del st.session_state[k]
-
-
-# =========================================================
-# MAIN UI
-# =========================================================
-
-init_state()
-
-st.markdown("### 1. Detection Settings")
-
-c1, c2, c3, c4 = st.columns(4)
-
-with c1:
-    axis_tol = st.slider("Axis Group Tolerance", 0.0, 500.0, 10.0, 0.5, key="axis_tol")
-
-with c2:
-    text_gap = st.slider("Text-in-Bubble Gap", 20.0, 2000.0, 180.0, 10.0, key="text_gap")
-
-with c3:
-    attach_gap = st.slider("Gridline Attach Gap", 20.0, 3000.0, 180.0, 10.0, key="attach_gap")
-
-with c4:
-    min_grid_length = st.number_input(
-        "Min Grid Line Length",
-        min_value=1.0,
-        value=1000.0,
-        step=100.0,
-        key="min_grid_length",
-    )
-
-d1, d2, d3, d4 = st.columns(4)
-
-with d1:
-    numeric_order = st.selectbox(
-        "Numeric Axis Order",
-        ["Auto", "Ascending", "Descending"],
-        index=0,
-        key="numeric_order",
-    )
-
-with d2:
-    alpha_order = st.selectbox(
-        "Alphabetic Axis Order",
-        ["Auto", "Ascending", "Descending"],
-        index=0,
-        key="alpha_order",
-    )
-
-with d3:
-    forced_region_count = st.number_input(
-        "Target Region Count Override",
-        min_value=0,
-        value=0,
-        step=1,
-        help="Use 0 for auto. If the target has 8 plans, enter 8.",
-        key="forced_region_count",
-    )
-
-with d4:
-    min_region_markers = st.number_input(
-        "Min Markers Per Region",
-        min_value=1,
-        value=4,
-        step=1,
-        key="min_region_markers",
-    )
-
-e1, e2, e3 = st.columns(3)
-
-with e1:
-    write_mode = st.selectbox(
-        "Write Mode",
-        [
-            WRITE_MODE_SAFE,
-            WRITE_MODE_ATTRIB,
-            WRITE_MODE_DANGEROUS,
-        ],
-        index=1,
-        help=(
-            "Safe mode writes only modelspace TEXT/MTEXT. "
-            "Attribute mode also writes INSERT attributes. "
-            "Dangerous mode allows block definition TEXT/MTEXT edits and may affect repeated symbols."
-        ),
-        key="write_mode_select",
-    )
-
-    allow_block_text_write = write_mode == WRITE_MODE_DANGEROUS
-
-with e2:
-    min_confidence_required = st.slider(
-        "Minimum Marker Confidence",
-        0,
-        100,
-        50,
-        5,
-        key="min_confidence_required",
-    )
-
-with e3:
-    max_region_marker_ratio = st.slider(
-        "Max Sync Marker Ratio",
-        1.0,
-        5.0,
-        1.5,
-        0.1,
-        help="Blocks clean sync if a region still has far more markers than the reference.",
-        key="max_region_marker_ratio",
-    )
-
-if write_mode == WRITE_MODE_DANGEROUS:
-    st.warning(
-        "Dangerous write mode is enabled. Block definition TEXT/MTEXT edits can affect every repeated instance of that block."
-    )
-
-with st.expander("Advanced nested block layer handling", expanded=False):
-    allow_nested_layer0_from_selected_insert = st.checkbox(
-        "Allow nested block entities on layer 0 when parent INSERT is on selected grid layer",
-        value=True,
-        help="Recommended ON. Common CAD convention: block geometry/text is drawn on layer 0 and inherits the INSERT layer.",
-        key="allow_nested_layer0_from_selected_insert",
-    )
-
-    strict_nested_block_layer_match = st.checkbox(
-        "Strict nested block layer match only",
-        value=False,
-        help="If ON, nested entities must be directly on the selected grid layer. Layer 0 inheritance is not allowed.",
-        key="strict_nested_block_layer_match",
-    )
-
-f1, f2, f3 = st.columns(3)
-
-with f1:
-    ignore_interior_detail_bubbles = st.checkbox(
-        "Ignore interior/detail bubbles for clean sync",
-        value=True,
-        help="Recommended. Clean sync keeps only perimeter markers so slab/detail bubbles are not touched.",
-        key="ignore_interior_detail_bubbles",
-    )
-
-with f2:
-    perimeter_band_ratio = st.slider(
-        "Perimeter Band Ratio",
-        0.05,
-        0.40,
-        0.18,
-        0.01,
-        help="Higher keeps more markers near the plan edge. Lower is stricter.",
-        key="perimeter_band_ratio",
-    )
-
-with f3:
-    perimeter_min_band = st.number_input(
-        "Minimum Perimeter Band",
-        min_value=100.0,
-        value=1500.0,
-        step=100.0,
-        help="Minimum drawing-unit distance from region edge to treat a bubble as perimeter.",
-        key="perimeter_min_band",
-    )
-
-st.markdown("#### Slab/Grid Endpoint Recovery Settings")
-
-r1, r2, r3 = st.columns(3)
-
-with r1:
-    recovery_endpoint_radius = st.slider(
-        "Recovery Endpoint Search Radius",
-        500.0,
-        10000.0,
-        2500.0,
-        100.0,
-        help="Search distance around actual grid-frame endpoints. Lower values reject slab/detail bubbles.",
-        key="recovery_endpoint_radius",
-    )
-
-with r2:
-    recovery_numeric_extra = st.slider(
-        "Recovery Numeric Label Extra Range",
-        0,
-        20,
-        5,
-        1,
-        help="Used only when strict source labels is OFF.",
-        key="recovery_numeric_extra",
-    )
-
-with r3:
-    recovery_axis_snap_tolerance = st.slider(
-        "Recovery Axis Snap Tolerance",
-        25.0,
-        1000.0,
-        250.0,
-        25.0,
-        help="Candidate bubble must be close to the actual grid axis.",
-        key="recovery_axis_snap_tolerance",
-    )
-
-r4, r5 = st.columns(2)
-
-with r4:
-    recovery_strict_source_labels = st.checkbox(
-        "Recovery: use detected old target labels only",
-        value=True,
-        help="Recommended ON. This uses labels already detected on target axes and rejects unrelated detail numbers.",
-        key="recovery_strict_source_labels",
-    )
-
-with r5:
-    recovery_allow_virtual_axis = st.checkbox(
-        "Recovery: allow virtual-axis markers",
-        value=False,
-        help="Recommended OFF for slab/detail regions.",
-        key="recovery_allow_virtual_axis",
-    )
-
+            
 
 # =========================================================
-# FILE UPLOAD
+# CLEAN SYNC VALIDATION / PREVIEW / APPLY
 # =========================================================
 
-st.markdown("### 2. Upload Files")
+def validate_axis_group_purity(groups, family_name):
+    blockers = []
 
-u1, u2 = st.columns(2)
+    for idx, g in enumerate(groups, start=1):
+        label_count = g.get("label_count", 1)
+        mixed_labels = g.get("mixed_labels", [])
+        label_counts = g.get("label_counts", {})
+        marker_count = g.get("marker_count", 0)
 
-with u1:
-    arch_file = st.file_uploader("Reference DXF", type=["dxf"], key="arch_file_upload")
-
-with u2:
-    struc_file = st.file_uploader("Target DXF", type=["dxf"], key="struc_file_upload")
-
-arch_sig = uploaded_file_signature(arch_file)
-struc_sig = uploaded_file_signature(struc_file)
-
-if arch_sig != st.session_state.arch_sig or struc_sig != st.session_state.struc_sig:
-    reset_state()
-    init_state()
-    st.session_state.arch_sig = arch_sig
-    st.session_state.struc_sig = struc_sig
-
-if arch_file and struc_file:
-    if not st.session_state.docs_loaded:
-        arch_tmp = None
-        struc_tmp = None
-
-        try:
-            arch_tmp = save_uploaded_to_temp(arch_file)
-            struc_tmp = save_uploaded_to_temp(struc_file)
-
-            st.session_state.arch_doc = ezdxf.readfile(arch_tmp)
-            st.session_state.struc_doc = ezdxf.readfile(struc_tmp)
-
-            st.session_state.arch_name = arch_file.name
-            st.session_state.struc_name = struc_file.name
-            st.session_state.docs_loaded = True
-
-            st.success("DXF files loaded successfully.")
-
-        except Exception as e:
-            st.error(f"Failed to load DXF files: {e}")
-            st.stop()
-
-        finally:
-            safe_remove_file(arch_tmp)
-            safe_remove_file(struc_tmp)
-else:
-    st.info("Upload both the Reference DXF and Target DXF to continue.")
-    st.stop()
-
-
-# =========================================================
-# LAYER SETUP
-# =========================================================
-
-arch_doc = st.session_state.arch_doc
-struc_doc = st.session_state.struc_doc
-
-arch_layers = get_layer_names(arch_doc)
-struc_layers = get_layer_names(struc_doc)
-
-st.markdown("### 3. Layer Setup")
-
-arch_line_default = pick_default_layer(arch_layers, ["S-GRID", "GRID", "GRIDLINELAYER"])
-arch_text_default = pick_default_layer(arch_layers, ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"])
-arch_circle_default = pick_default_layer(arch_layers, ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"])
-
-struc_line_default = pick_default_layer(struc_layers, ["GRIDLINELAYER", "S-GRID", "GRID"])
-struc_text_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-STRS-IDEN", "S-GRID-IDEN", "GRID-ID"])
-struc_circle_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-GRID-IDEN", "GRID-ID"])
-
-la, lb, lc = st.columns(3)
-
-with la:
-    arch_line_layer = st.selectbox(
-        "Reference Grid Line Layer",
-        arch_layers,
-        index=arch_layers.index(arch_line_default) if arch_line_default in arch_layers else 0,
-        key="arch_line_layer_select",
-    )
-
-with lb:
-    arch_text_layer = st.selectbox(
-        "Reference Grid Text Layer",
-        arch_layers,
-        index=arch_layers.index(arch_text_default) if arch_text_default in arch_layers else 0,
-        key="arch_text_layer_select",
-    )
-
-with lc:
-    arch_circle_layer = st.selectbox(
-        "Reference Grid Bubble Layer",
-        arch_layers,
-        index=arch_layers.index(arch_circle_default) if arch_circle_default in arch_layers else 0,
-        key="arch_circle_layer_select",
-    )
-
-sa, sb, sc = st.columns(3)
-
-with sa:
-    struc_line_layer = st.selectbox(
-        "Target Grid Line Layer",
-        struc_layers,
-        index=struc_layers.index(struc_line_default) if struc_line_default in struc_layers else 0,
-        key="struc_line_layer_select",
-    )
-
-with sb:
-    struc_text_layer = st.selectbox(
-        "Target Grid Text Layer",
-        struc_layers,
-        index=struc_layers.index(struc_text_default) if struc_text_default in struc_layers else 0,
-        key="struc_text_layer_select",
-    )
-
-with sc:
-    struc_circle_layer = st.selectbox(
-        "Target Grid Bubble Layer",
-        struc_layers,
-        index=struc_layers.index(struc_circle_default) if struc_circle_default in struc_layers else 0,
-        key="struc_circle_layer_select",
-    )
-
-b1, b2 = st.columns(2)
-
-with b1:
-    analyze = st.button("🔎 Analyze / Prepare Sync", type="primary", key="analyze_button")
-
-with b2:
-    if st.button("🧹 Reset", key="reset_button"):
-        reset_state()
-        st.rerun()
-
-
-# =========================================================
-# ANALYZE
-# =========================================================
-
-if analyze:
-    try:
-        arch_det = build_trusted_markers(
-            arch_doc,
-            arch_line_layer,
-            arch_text_layer,
-            arch_circle_layer,
-            min_grid_length,
-            text_gap,
-            attach_gap,
-            allow_block_text_write=allow_block_text_write,
-            write_mode=write_mode,
-            allow_nested_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
-            strict_nested_block_layer_match=strict_nested_block_layer_match,
-        )
-
-        struc_det = build_trusted_markers(
-            struc_doc,
-            struc_line_layer,
-            struc_text_layer,
-            struc_circle_layer,
-            min_grid_length,
-            text_gap,
-            attach_gap,
-            allow_block_text_write=allow_block_text_write,
-            write_mode=write_mode,
-            allow_nested_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
-            strict_nested_block_layer_match=strict_nested_block_layer_match,
-        )
-
-        arch_trusted = [
-            m for m in arch_det["trusted_markers"]
-            if m.get("confidence", 0) >= min_confidence_required
-        ]
-
-        struc_trusted = [
-            m for m in struc_det["trusted_markers"]
-            if m.get("confidence", 0) >= min_confidence_required
-        ]
-
-        arch_det["trusted_markers"] = arch_trusted
-        struc_det["trusted_markers"] = struc_trusted
-
-        arch_groups = group_markers_by_axis(arch_trusted, tol=axis_tol)
-        family = infer_families(arch_groups)
-
-        source_numeric, source_alpha = get_family_groups(
-            arch_groups,
-            family["numeric_orientation"],
-            family["alpha_orientation"],
-            numeric_order,
-            alpha_order,
-        )
-
-        expected_markers = len(arch_trusted)
-
-        regions, seg = build_regions(
-            struc_trusted,
-            axis_tol=axis_tol,
-            expected_markers_per_region=expected_markers,
-            forced_region_count=forced_region_count,
-            min_region_markers=min_region_markers,
-        )
-
-        if ignore_interior_detail_bubbles:
-            regions = [
-                filter_region_perimeter_markers(
-                    r,
-                    axis_tol=axis_tol,
-                    band_ratio=perimeter_band_ratio,
-                    min_band=perimeter_min_band,
-                )
-                for r in regions
-            ]
-
-            seg["interior_detail_filter"] = "enabled"
-            seg["perimeter_band_ratio"] = perimeter_band_ratio
-            seg["perimeter_min_band"] = perimeter_min_band
-            seg["interior_markers_removed_by_region"] = {
-                r["name"]: r.get("interior_marker_count", 0)
-                for r in regions
-            }
-            seg["sync_marker_counts_after_filter"] = {
-                r["name"]: len(r["markers"])
-                for r in regions
-            }
-        else:
-            seg["interior_detail_filter"] = "disabled"
-
-        report = build_region_report(
-            regions,
-            source_numeric,
-            source_alpha,
-            family["numeric_orientation"],
-            family["alpha_orientation"],
-            numeric_order,
-            alpha_order,
-            allow_block_text_write,
-            expected_reference_marker_count=len(arch_trusted),
-            max_region_marker_ratio=max_region_marker_ratio,
-            write_mode=write_mode,
-        )
-
-        preview = []
-
-        for r in regions:
-            ready, blockers, num, alp = get_region_sync_plan(
-                r,
-                source_numeric,
-                source_alpha,
-                family["numeric_orientation"],
-                family["alpha_orientation"],
-                numeric_order,
-                alpha_order,
-                allow_block_text_write,
-                expected_reference_marker_count=len(arch_trusted),
-                max_region_marker_ratio=max_region_marker_ratio,
-                write_mode=write_mode,
+        if label_count > 1:
+            blockers.append(
+                f"{family_name} axis position {idx} at coord {g.get('coord')} has mixed labels "
+                f"{mixed_labels}. Counts={label_counts}. Marker count={marker_count}."
             )
 
-            if ready:
-                preview.extend(build_preview_for_region(r, source_numeric, source_alpha, num, alp))
-
-        st.session_state.arch_detection = arch_det
-        st.session_state.struc_detection = struc_det
-        st.session_state.arch_axis_groups = arch_groups
-        st.session_state.family = family
-        st.session_state.source_numeric = source_numeric
-        st.session_state.source_alpha = source_alpha
-        st.session_state.regions = regions
-        st.session_state.segmentation = seg
-        st.session_state.region_report = report
-        st.session_state.preview = preview
-        st.session_state.audit = []
-        st.session_state.changed = 0
-        st.session_state.skipped = 0
-        st.session_state.prepared = True
-
-        ready_count = len([r for r in report if r.get("ready_to_sync")])
-
-        st.success(
-            f"Analysis complete. Regions found: {len(regions)}. Ready clean-sync regions: {ready_count}."
-        )
-
-        if arch_det["rejected_markers"]:
-            st.warning(f"Reference rejected markers: {len(arch_det['rejected_markers'])}")
-
-        if struc_det["rejected_markers"]:
-            st.warning(f"Target rejected markers: {len(struc_det['rejected_markers'])}")
-
-    except Exception as e:
-        st.error(f"Prepare failed: {e}")
+    return blockers
 
 
-# =========================================================
-# RESULTS / CLEAN SYNC / RECOVERY
-# =========================================================
-
-if st.session_state.prepared:
-    st.markdown("---")
-    st.markdown("### 4. Detection Summary")
-
-    arch_det = st.session_state.arch_detection
-    struc_det = st.session_state.struc_detection
-    family = st.session_state.family
-
-    s1, s2 = st.columns(2)
-
-    with s1:
-        st.write("#### Reference Detection")
-        st.write({
-            "texts_on_selected_layer": len(arch_det.get("texts", [])),
-            "circles_on_selected_layer": len(arch_det.get("circles", [])),
-            "axis_lines_on_selected_layer": len(arch_det.get("lines", [])),
-            "trusted_markers_used": len(arch_det.get("trusted_markers", [])),
-            "rejected_markers": len(arch_det.get("rejected_markers", [])),
-            "numeric_orientation": family.get("numeric_orientation"),
-            "alpha_orientation": family.get("alpha_orientation"),
-            "numeric_source_labels": [g["label"] for g in st.session_state.source_numeric],
-            "alpha_source_labels": [g["label"] for g in st.session_state.source_alpha],
-            "family_counts": {
-                "vertical": family.get("vertical_counts"),
-                "horizontal": family.get("horizontal_counts"),
-            },
-        })
-
-    with s2:
-        modes = {}
-
-        for m in struc_det.get("trusted_markers", []):
-            mode = m.get("detection_mode", "unknown")
-            modes[mode] = modes.get(mode, 0) + 1
-
-        st.write("#### Target Detection")
-        st.write({
-            "texts_on_selected_layer": len(struc_det.get("texts", [])),
-            "circles_on_selected_layer": len(struc_det.get("circles", [])),
-            "axis_lines_on_selected_layer": len(struc_det.get("lines", [])),
-            "trusted_markers_used_before_filter": len(struc_det.get("trusted_markers", [])),
-            "rejected_markers": len(struc_det.get("rejected_markers", [])),
-            "regions_found": len(st.session_state.regions),
-            "detection_modes": modes,
-        })
-
-    st.markdown("### 5. Segmentation / Interior Filter")
-
-    st.caption(
-        "Clean sync uses perimeter-filtered markers. Endpoint recovery uses all detected markers "
-        "so valid slab/grid endpoint axes are not accidentally removed by the interior filter."
-    )
-
-    seg_diag_rows = build_segmentation_diagnostics_rows(
-        st.session_state.regions,
-        st.session_state.source_numeric,
-        st.session_state.source_alpha,
-        family["numeric_orientation"],
-        family["alpha_orientation"],
+def get_region_sync_plan(
+    region,
+    source_numeric,
+    source_alpha,
+    numeric_orientation,
+    alpha_orientation,
+    numeric_order,
+    alpha_order,
+    allow_block_text_write,
+    expected_reference_marker_count=None,
+    max_region_marker_ratio=1.5,
+    write_mode=None,
+):
+    numeric_groups, alpha_groups = get_family_groups(
+        region,
+        numeric_orientation,
+        alpha_orientation,
         numeric_order,
         alpha_order,
-        axis_tol,
     )
 
-    st.dataframe(seg_diag_rows, use_container_width=True)
+    blockers = []
 
-    with st.expander("Raw segmentation settings/details", expanded=False):
-        st.write(st.session_state.segmentation)
-    st.markdown("### 6. Region Completeness Dashboard")
-    st.dataframe(st.session_state.region_report, use_container_width=True)
+    expected_numeric = len(source_numeric)
+    expected_alpha = len(source_alpha)
+    expected_total = expected_numeric + expected_alpha
 
-    ready_regions = [
-        r["region"]
-        for r in st.session_state.region_report
-        if r.get("ready_to_sync")
+    if expected_total == 0:
+        blockers.append("No source axes were detected from the reference drawing")
+
+    if len(numeric_groups) != expected_numeric:
+        blockers.append(
+            f"Numeric axis count mismatch: found {len(numeric_groups)}, expected {expected_numeric}"
+        )
+
+    if len(alpha_groups) != expected_alpha:
+        blockers.append(
+            f"Alphabetic axis count mismatch: found {len(alpha_groups)}, expected {expected_alpha}"
+        )
+
+    if expected_reference_marker_count and expected_reference_marker_count > 0:
+        max_allowed = int(math.ceil(expected_reference_marker_count * max_region_marker_ratio))
+
+        if len(region["markers"]) > max_allowed:
+            blockers.append(
+                f"Region has too many sync markers: found {len(region['markers'])}, "
+                f"maximum allowed {max_allowed}. This may mean detail/slab bubbles were included."
+            )
+
+    blockers.extend(validate_axis_group_purity(numeric_groups, "Numeric"))
+    blockers.extend(validate_axis_group_purity(alpha_groups, "Alphabetic"))
+
+    non_writable_markers = [
+        m for m in region["markers"]
+        if not is_marker_writable(m, allow_block_text_write, write_mode=write_mode)
     ]
 
-    all_regions = [
-        r["region"]
-        for r in st.session_state.region_report
-    ]
+    if non_writable_markers:
+        blockers.append(
+            f"{len(non_writable_markers)} marker text entities are not writable in the selected write mode"
+        )
 
-    selected_regions = st.multiselect(
-        "Select clean regions to sync",
-        options=all_regions,
-        default=ready_regions,
-        help="Only clean ready regions are selected by default. Slab/detail regions can be handled in Recovery Mode below.",
-        key="selected_clean_regions",
-    )
+    ready = len(blockers) == 0
 
-    st.markdown("### 7. Clean Sync Preview")
+    return ready, blockers, numeric_groups, alpha_groups
 
-    filtered_preview = [
-        row for row in st.session_state.preview
-        if row["region"] in selected_regions
-    ]
 
-    if filtered_preview:
-        st.dataframe(filtered_preview, use_container_width=True)
-    else:
-        st.info("No clean-sync preview rows. This usually means no clean ready regions are selected.")
+def build_segmentation_diagnostics_rows(
+    regions,
+    source_numeric,
+    source_alpha,
+    numeric_orientation,
+    alpha_orientation,
+    numeric_order,
+    alpha_order,
+    axis_tol,
+):
+    """
+    Build diagnostic rows for Section 5.
 
-    st.markdown("### 8. Apply Clean Sync")
+    This compares:
+    - all detected markers before the interior/perimeter filter
+    - clean-sync markers after the perimeter filter
 
-    region_by_name = {
-        r["name"]: r
-        for r in st.session_state.regions
-    }
+    It helps show when a numeric or alphabetic axis disappears because
+    Section 5 removed one or more bubbles.
+    """
+    rows = []
 
-    blocked_selected = []
+    expected_numeric = len(source_numeric)
+    expected_alpha = len(source_alpha)
 
-    for region_name in selected_regions:
-        r = region_by_name.get(region_name)
+    for r in regions:
+        all_markers = r.get("all_markers", r.get("markers", []))
+        sync_markers = r.get("markers", [])
 
-        if not r:
-            blocked_selected.append({
-                "region": region_name,
-                "reason": "Region not found in session state",
-            })
-            continue
+        raw_axis_groups = group_markers_by_axis(all_markers, tol=axis_tol)
 
+        sync_axis_groups = r.get(
+            "axis_groups",
+            group_markers_by_axis(sync_markers, tol=axis_tol),
+        )
+
+        raw_numeric, raw_alpha = get_family_groups(
+            raw_axis_groups,
+            numeric_orientation,
+            alpha_orientation,
+            numeric_order,
+            alpha_order,
+        )
+
+        sync_numeric, sync_alpha = get_family_groups(
+            {"axis_groups": sync_axis_groups},
+            numeric_orientation,
+            alpha_orientation,
+            numeric_order,
+            alpha_order,
+        )
+
+        raw_numeric_labels = [g["label"] for g in raw_numeric]
+        sync_numeric_labels = [g["label"] for g in sync_numeric]
+
+        raw_alpha_labels = [g["label"] for g in raw_alpha]
+        sync_alpha_labels = [g["label"] for g in sync_alpha]
+
+        removed_numeric_labels = [
+            x for x in raw_numeric_labels
+            if x not in sync_numeric_labels
+        ]
+
+        removed_alpha_labels = [
+            x for x in raw_alpha_labels
+            if x not in sync_alpha_labels
+        ]
+
+        rows.append({
+            "region": r.get("name", ""),
+
+            "all_detected_markers": len(all_markers),
+            "clean_sync_markers_after_filter": len(sync_markers),
+            "interior_markers_removed": r.get("interior_marker_count", 0),
+
+            "raw_numeric_axes_before_filter": len(raw_numeric),
+            "sync_numeric_axes_after_filter": len(sync_numeric),
+            "expected_numeric_axes": expected_numeric,
+            "raw_numeric_labels_before_filter": ", ".join(raw_numeric_labels),
+            "sync_numeric_labels_after_filter": ", ".join(sync_numeric_labels),
+            "numeric_labels_removed_by_filter": ", ".join(removed_numeric_labels),
+
+            "raw_alpha_axes_before_filter": len(raw_alpha),
+            "sync_alpha_axes_after_filter": len(sync_alpha),
+            "expected_alpha_axes": expected_alpha,
+            "raw_alpha_labels_before_filter": ", ".join(raw_alpha_labels),
+            "sync_alpha_labels_after_filter": ", ".join(sync_alpha_labels),
+            "alpha_labels_removed_by_filter": ", ".join(removed_alpha_labels),
+
+            "clean_sync_uses": "perimeter_filtered_markers",
+            "endpoint_recovery_uses": "all_detected_markers",
+        })
+
+    return rows
+
+
+def build_region_report(
+    regions,
+    source_numeric,
+    source_alpha,
+    numeric_orientation,
+    alpha_orientation,
+    numeric_order,
+    alpha_order,
+    allow_block_text_write,
+    expected_reference_marker_count=None,
+    max_region_marker_ratio=1.5,
+    write_mode=None,
+):
+    rows = []
+
+    expected_numeric = len(source_numeric)
+    expected_alpha = len(source_alpha)
+    expected_total = expected_numeric + expected_alpha
+
+    for r in regions:
         ready, blockers, num, alp = get_region_sync_plan(
             r,
-            st.session_state.source_numeric,
-            st.session_state.source_alpha,
-            family["numeric_orientation"],
-            family["alpha_orientation"],
+            source_numeric,
+            source_alpha,
+            numeric_orientation,
+            alpha_orientation,
             numeric_order,
             alpha_order,
             allow_block_text_write,
-            expected_reference_marker_count=len(st.session_state.arch_detection.get("trusted_markers", [])),
+            expected_reference_marker_count=expected_reference_marker_count,
             max_region_marker_ratio=max_region_marker_ratio,
             write_mode=write_mode,
         )
 
-        if not ready:
-            blocked_selected.append({
-                "region": region_name,
-                "reason": "; ".join(blockers),
-            })
+        writable = len([
+            m for m in r["markers"]
+            if is_marker_writable(m, allow_block_text_write, write_mode=write_mode)
+        ])
+        non_writable = len(r["markers"]) - writable
 
-    clean_confirm = False
+        risk_counts = {}
 
-    if blocked_selected:
-        st.error(
-            "One or more selected clean-sync regions are not safe. "
-            "Unselect them or use Recovery Mode where appropriate."
-        )
-        st.dataframe(blocked_selected, use_container_width=True)
+        for m in r["markers"]:
+            prof = marker_write_profile(
+                m,
+                write_mode=write_mode,
+                allow_block_text_write=allow_block_text_write,
+            )
+            risk = prof.get("write_risk", "unknown")
+            risk_counts[risk] = risk_counts.get(risk, 0) + 1
 
-    else:
-        approved_clean_count = len(filtered_preview)
+        min_conf = min([m.get("confidence", 0) for m in r["markers"]]) if r["markers"] else 0
+        avg_conf = round(
+            sum([m.get("confidence", 0) for m in r["markers"]]) / len(r["markers"]),
+            1,
+        ) if r["markers"] else 0
 
-        st.write({
-            "selected_clean_regions": len(selected_regions),
-            "clean_preview_axis_rows": approved_clean_count,
-            "write_mode": write_mode,
+        complete = len(num) == expected_numeric and len(alp) == expected_alpha and expected_total > 0
+
+        if ready:
+            status = "Ready"
+        elif len(num) != expected_numeric or len(alp) != expected_alpha or expected_total == 0:
+            status = "Incomplete"
+        elif non_writable > 0:
+            status = "Blocked"
+        else:
+            status = "Review"
+
+        rows.append({
+            "region": r["name"],
+            "status": status,
+            "ready_to_sync": ready,
+            "complete": complete,
+            "trusted_markers": len(r["markers"]),
+            "all_detected_markers": len(r.get("all_markers", r["markers"])),
+            "interior_markers_ignored": r.get("interior_marker_count", 0),
+            "writable_markers": writable,
+            "non_writable_markers": non_writable,
+            "low_risk_writes": risk_counts.get("low", 0),
+            "medium_risk_writes": risk_counts.get("medium", 0),
+            "high_risk_writes": risk_counts.get("high", 0),
+            "blocked_writes": risk_counts.get("blocked", 0),
+            "numeric_axes_found": len(num),
+            "numeric_axes_expected": expected_numeric,
+            "alpha_axes_found": len(alp),
+            "alpha_axes_expected": expected_alpha,
+            "numeric_labels_found": ", ".join([g["label"] for g in num]),
+            "alpha_labels_found": ", ".join([g["label"] for g in alp]),
+            "min_confidence": min_conf,
+            "avg_confidence": avg_conf,
+            "sync_blockers": "; ".join(blockers),
         })
 
-        clean_confirm = st.checkbox(
-            "I reviewed the clean sync preview and understand these changes will modify the DXF.",
-            value=False,
-            key="confirm_clean_sync_apply",
-        )
+    return rows
 
-        if st.button(
-            "✍️ Apply Clean Sync to Selected Regions",
-            key="apply_clean_sync_button",
-            disabled=not clean_confirm or not selected_regions,
-        ):
-            total_changed = 0
-            total_skipped = 0
-            audit = []
 
-            for region_name in selected_regions:
-                r = region_by_name.get(region_name)
+def build_preview_for_region(region, source_numeric, source_alpha, numeric_groups, alpha_groups):
+    rows = []
 
-                if not r:
-                    continue
+    for i, (s, t) in enumerate(zip(source_numeric, numeric_groups), start=1):
+        rows.append({
+            "region": region["name"],
+            "family": "numeric",
+            "position": i,
+            "source_label": s["label"],
+            "target_old_label": t["label"],
+            "target_axis_coord": t["coord"],
+            "target_markers": t["marker_count"],
+            "target_writable_markers": t["writable_marker_count"],
+            "target_avg_confidence": t["avg_confidence"],
+            "target_mixed_labels": ", ".join(t.get("mixed_labels", [])),
+            "write_risks": ", ".join(sorted(set(m.get("write_risk", "") for m in t.get("markers", [])))),
+        })
 
-                ready, blockers, num, alp = get_region_sync_plan(
-                    r,
-                    st.session_state.source_numeric,
-                    st.session_state.source_alpha,
-                    family["numeric_orientation"],
-                    family["alpha_orientation"],
-                    numeric_order,
-                    alpha_order,
-                    allow_block_text_write,
-                    expected_reference_marker_count=len(st.session_state.arch_detection.get("trusted_markers", [])),
-                    max_region_marker_ratio=max_region_marker_ratio,
-                    write_mode=write_mode,
-                )
+    for i, (s, t) in enumerate(zip(source_alpha, alpha_groups), start=1):
+        rows.append({
+            "region": region["name"],
+            "family": "alphabetic",
+            "position": i,
+            "source_label": s["label"],
+            "target_old_label": t["label"],
+            "target_axis_coord": t["coord"],
+            "target_markers": t["marker_count"],
+            "target_writable_markers": t["writable_marker_count"],
+            "target_avg_confidence": t["avg_confidence"],
+            "target_mixed_labels": ", ".join(t.get("mixed_labels", [])),
+            "write_risks": ", ".join(sorted(set(m.get("write_risk", "") for m in t.get("markers", [])))),
+        })
 
-                if not ready:
-                    audit.append({
-                        "region": region_name,
-                        "family": "region",
-                        "sync_mode": "clean_sync",
-                        "approved_by_user": True,
-                        "changed": False,
-                        "skipped": True,
-                        "reason": "Region preflight failed: " + "; ".join(blockers),
-                    })
-                    continue
+    return rows
 
-                ch1, sk1, au1 = apply_group_labels(
-                    st.session_state.source_numeric,
-                    num,
-                    allow_block_text_write=allow_block_text_write,
-                    write_mode=write_mode,
-                )
 
-                ch2, sk2, au2 = apply_group_labels(
-                    st.session_state.source_alpha,
-                    alp,
-                    allow_block_text_write=allow_block_text_write,
-                    write_mode=write_mode,
-                )
+def apply_group_labels(source_groups, target_groups, allow_block_text_write=False, write_mode=None):
+    changed = 0
+    skipped = 0
+    audit = []
 
-                for row in au1:
-                    row["region"] = region_name
-                    row["family"] = "numeric"
-                    row["sync_mode"] = "clean_sync"
+    if len(source_groups) != len(target_groups):
+        return 0, len(target_groups), [{
+            "region_axis_position": "",
+            "axis_position": "",
+            "old_label": "",
+            "new_label": "",
+            "changed": False,
+            "skipped": True,
+            "approved_by_user": True,
+            "reason": f"Group count mismatch. Source={len(source_groups)}, Target={len(target_groups)}. No partial sync applied.",
+            "text_source": "",
+            "write_source": "",
+            "write_risk": "",
+            "detection_mode": "",
+            "confidence": "",
+            "entity_handle": "",
+            "layer": "",
+        }]
 
-                for row in au2:
-                    row["region"] = region_name
-                    row["family"] = "alphabetic"
-                    row["sync_mode"] = "clean_sync"
+    for i, (s, t) in enumerate(zip(source_groups, target_groups), start=1):
+        new_label = clean_text(s["label"])
 
-                total_changed += ch1 + ch2
-                total_skipped += sk1 + sk2
-                audit.extend(au1 + au2)
+        for marker in t["markers"]:
+            entity = marker["text_entity"]
+            old = get_text_value(entity)
 
-            st.session_state.changed += total_changed
-            st.session_state.skipped += total_skipped
-            st.session_state.audit.extend(audit)
+            profile = marker_write_profile(
+                marker,
+                write_mode=write_mode,
+                allow_block_text_write=allow_block_text_write,
+            )
+            writable = profile["writable"]
 
-            if total_changed:
-                st.success(f"Clean sync complete. Changed {total_changed} text entities.")
-            else:
-                st.info("Clean sync completed. No labels needed changing.")
+            base = {
+                "region_axis_position": i,
+                "axis_position": i,
+                "axis_position_coord": t.get("coord", ""),
+                "old_label": old,
+                "new_label": new_label,
+                "approved_by_user": True,
+                "text_source": marker.get("text_source"),
+                "write_source": profile.get("write_source", ""),
+                "write_risk": profile.get("write_risk", ""),
+                "write_reason": profile.get("write_reason", ""),
+                "detection_mode": marker.get("detection_mode"),
+                "confidence": marker.get("confidence"),
+                "entity_handle": marker_entity_handle(marker),
+                "layer": marker_layer(marker),
+            }
 
-            if total_skipped:
-                st.warning(f"Clean sync skipped {total_skipped} text entities.")
-
-    st.markdown("### 8B. Slab/Grid Endpoint Recovery Mode")
-
-    st.caption(
-        "Use this for slab/detail regions. It ignores most interior slab/detail bubbles and searches only near outer grid-frame endpoints."
-    )
-
-    recovery_candidates = [
-        row["region"]
-        for row in st.session_state.region_report
-        if not row.get("ready_to_sync")
-    ]
-
-    if recovery_candidates:
-        selected_recovery_regions = st.multiselect(
-            "Select blocked/review slab-detail regions for endpoint recovery",
-            options=recovery_candidates,
-            default=[],
-            help="Select slab/detail regions that still need grid-label sync.",
-            key="selected_recovery_regions",
-        )
-
-        recovery_preview = []
-        recovery_blocked = []
-        recovery_warnings = []
-        recovery_plan_rows_all = []
-        recovery_axis_diagnostics = []
-
-        for region_name in selected_recovery_regions:
-            r = region_by_name.get(region_name)
-
-            if not r:
-                recovery_blocked.append({
-                    "region": region_name,
-                    "reason": "Region not found",
+            if not writable:
+                skipped += 1
+                row = dict(base)
+                row.update({
+                    "changed": False,
+                    "skipped": True,
+                    "reason": f"Not writable source={marker.get('text_source')}",
                 })
+                audit.append(row)
                 continue
 
-            # Important:
-            # Clean sync uses perimeter-filtered markers.
-            # Endpoint recovery should use all detected markers so valid axes are not missing.
-            r_recovery = region_for_endpoint_recovery(r, axis_tol)
+            if old != new_label:
+                ok = set_text_value(entity, new_label)
 
-            recovery_axis_diagnostics.extend(
-                build_recovery_axis_diagnostics(
-                    r_recovery,
-                    st.session_state.source_numeric,
-                    st.session_state.source_alpha,
-                    family["numeric_orientation"],
-                    family["alpha_orientation"],
-                    numeric_order,
-                    alpha_order,
-                )
-            )
+                if ok:
+                    changed += 1
 
-            rec_ready, rec_blockers, rec_warnings, rec_plan_rows = build_endpoint_recovery_plan(
-                r_recovery,
-                st.session_state.source_numeric,
-                st.session_state.source_alpha,
-                family["numeric_orientation"],
-                family["alpha_orientation"],
-                numeric_order,
-                alpha_order,
-                st.session_state.struc_detection.get("lines", []),
-                recovery_endpoint_radius,
-                allow_block_text_write,
-                numeric_extra=recovery_numeric_extra,
-                axis_snap_tolerance=recovery_axis_snap_tolerance,
-                strict_source_labels=recovery_strict_source_labels,
-                allow_virtual_axis_recovery=recovery_allow_virtual_axis,
-                write_mode=write_mode,
-            )
-                family["numeric_orientation"],
-                family["alpha_orientation"],
-                numeric_order,
-                alpha_order,
-                st.session_state.struc_detection.get("lines", []),
-                recovery_endpoint_radius,
-                allow_block_text_write,
-                numeric_extra=recovery_numeric_extra,
-                axis_snap_tolerance=recovery_axis_snap_tolerance,
-                strict_source_labels=recovery_strict_source_labels,
-                allow_virtual_axis_recovery=recovery_allow_virtual_axis,
-                write_mode=write_mode,
-            )
-
-            for w in rec_warnings:
-                recovery_warnings.append({
-                    "region": region_name,
-                    "warning": w,
+                row = dict(base)
+                row.update({
+                    "changed": ok,
+                    "skipped": False,
+                    "reason": "updated" if ok else "write_failed",
                 })
+                audit.append(row)
 
-            if not rec_ready:
-                recovery_blocked.append({
-                    "region": region_name,
-                    "reason": "; ".join(rec_blockers),
+            else:
+                row = dict(base)
+                row.update({
+                    "changed": False,
+                    "skipped": False,
+                    "reason": "already_matches",
                 })
+                audit.append(row)
 
-            if rec_plan_rows:
-                recovery_plan_rows_all.extend(rec_plan_rows)
-                recovery_preview.extend(recovery_preview_rows(rec_plan_rows))
-        if recovery_axis_diagnostics:
-            with st.expander("Recovery Axis Group Diagnostics", expanded=False):
-                st.dataframe(recovery_axis_diagnostics, use_container_width=True)
-        if recovery_blocked:
-            st.warning(
-                "Some selected recovery regions are not fully safe for endpoint recovery yet. "
-                "Try increasing Endpoint Search Radius slightly, increasing Axis Snap Tolerance slightly, "
-                "or verify selected layers."
-            )
-            st.dataframe(recovery_blocked, use_container_width=True)
+    return changed, skipped, audit
 
-        if recovery_warnings:
-            st.info(
-                "Recovery warnings found. This is normal for slab/detail regions. "
-                "Review the preview carefully before applying."
-            )
-            st.dataframe(recovery_warnings, use_container_width=True)
 
-        approved_plan_rows = []
-        unapproved_plan_rows = []
+# =========================================================
+# ENDPOINT RECOVERY LOGIC
+# =========================================================
 
-        if recovery_preview:
-            st.write("#### Endpoint Recovery Manual Approval Preview")
+def source_label_set(source_groups):
+    return {
+        clean_text(g.get("label", ""))
+        for g in source_groups
+        if clean_text(g.get("label", ""))
+    }
 
-            try:
-                edited_recovery_preview = st.data_editor(
-                    recovery_preview,
-                    use_container_width=True,
-                    hide_index=True,
-                    key="endpoint_recovery_approval_editor",
-                                       column_config={
-                        "apply": st.column_config.CheckboxColumn(
-                            "Apply?",
-                            help="Uncheck rows that should not be modified.",
-                            default=True,
-                        ),
-                        "new_label": st.column_config.TextColumn(
-                            "New Label",
-                            help="Editable. Change this if the proposed label is wrong.",
-                            required=True,
-                        ),
-                    },
-                    disabled=[
-                        "approval_id",
-                        "region",
-                        "family",
-                        "axis_position",
-                        "old_label",
-                        "proposed_new_label",
-                        "endpoint",
-                        "distance_to_endpoint",
-                        "axis_distance",
-                        "axis_coord",
-                        "grid_frame_source",
-                        "recovery_score",
-                        "detection_mode",
-                        "text_handle",
-                        "text_source",
-                        "write_source",
-                        "write_risk",
-                        "write_reason",
-                        "layer",
-                        "confidence",
-                        "writable",
-                    ],
-                )
-            except Exception:
-                st.warning("Editable preview table failed. Falling back to read-only preview.")
-                st.dataframe(recovery_preview, use_container_width=True)
-                edited_recovery_preview = recovery_preview
 
-            approved_plan_rows, unapproved_plan_rows, invalid_plan_rows = recovery_plan_from_editor(
-                recovery_plan_rows_all,
-                edited_recovery_preview,
-            )
+def label_matches_family(label, family_name):
+    label = clean_text(label)
 
-            if invalid_plan_rows:
-                st.error(
-                    "Some approved rows have invalid edited New Label values. "
-                    "Fix them or uncheck Apply? before syncing."
-                )
-                invalid_preview = []
+    if family_name == "numeric":
+        return is_numeric_label(label)
 
-                for bad in invalid_plan_rows:
-                    invalid_preview.append({
-                        "region": bad.get("region", ""),
-                        "family": bad.get("family", ""),
-                        "axis_position": bad.get("axis_position", ""),
-                        "old_label": bad.get("old_label", ""),
-                        "proposed_new_label": bad.get("original_proposed_new_label", bad.get("new_label", "")),
-                        "edited_new_label": bad.get("user_edited_new_label", bad.get("new_label", "")),
-                        "reason": bad.get("invalid_reason", ""),
-                        "endpoint": bad.get("endpoint", ""),
-                        "text_handle": bad.get("text_handle", ""),
-                    })
+    if family_name == "alphabetic":
+        return is_alpha_label(label)
 
-                st.dataframe(invalid_preview, use_container_width=True)
+    return False
 
-            counts = recovery_plan_apply_counts(approved_plan_rows)
-            
-            st.write("#### Endpoint Recovery Apply Summary")
-            st.write({
-                "approved_rows": counts["approved_rows"],
-                "will_change": counts["will_change"],
-                "already_match": counts["already_match"],
-                "high_risk_writes": counts["high_risk"],
-                "unwritable": counts["unwritable"],
-                "unchecked_rows": len(unapproved_plan_rows),
-                "write_mode": write_mode,
-            })
 
-            recovery_confirm = st.checkbox(
-                "I reviewed the endpoint recovery preview and understand these changes will modify the DXF.",
-                value=False,
-                key="confirm_endpoint_recovery_apply",
-            )
+def axis_distance_for_marker(marker, orientation, coord):
+    x, y = marker["circle_center"]
 
-            dangerous_confirm = True
+    if orientation == "vertical":
+        return abs(float(x) - float(coord))
 
-            if write_mode == WRITE_MODE_DANGEROUS:
-                dangerous_confirm = st.checkbox(
-                    "I understand block definition edits may affect repeated symbols.",
-                    value=False,
-                    key="confirm_dangerous_block_write_endpoint",
-                )
+    if orientation == "horizontal":
+        return abs(float(y) - float(coord))
 
-            can_apply_recovery = (
-                selected_recovery_regions
-                and approved_plan_rows
-                and not recovery_blocked
-                and not invalid_plan_rows
-                and recovery_confirm
-                and dangerous_confirm
-            )
-            if selected_recovery_regions and recovery_plan_rows_all and not recovery_blocked:
-                if st.button(
-                    "🩹 Apply Approved Endpoint Recovery Sync",
-                    key="apply_endpoint_recovery_button",
-                    disabled=not can_apply_recovery,
-                ):
-                    ch, sk, au = apply_endpoint_recovery_plan(
-                        approved_plan_rows,
-                        approved_by_user=True,
-                    )
+    return 999999999.0
 
-                    skipped_audit = build_unapproved_recovery_audit_rows(unapproved_plan_rows)
 
-                    st.session_state.changed += ch
-                    st.session_state.skipped += sk + len(unapproved_plan_rows)
-                    st.session_state.audit.extend(au + skipped_audit)
+def median_value(values):
+    values = sorted([float(v) for v in values if v is not None])
 
-                    if ch:
-                        st.success(f"Endpoint recovery complete. Changed {ch} grid-label text entities.")
-                    else:
-                        st.info("Endpoint recovery completed. No labels needed changing.")
+    if not values:
+        return None
 
-                    if sk:
-                        st.warning(f"Endpoint recovery skipped {sk} text entities.")
+    n = len(values)
 
-                    if unapproved_plan_rows:
-                        st.info(f"{len(unapproved_plan_rows)} rows were intentionally unchecked and skipped.")
+    if n % 2 == 1:
+        return values[n // 2]
 
-        elif selected_recovery_regions and not recovery_plan_rows_all:
-            st.info(
-                "No endpoint recovery candidates found. Try increasing Endpoint Search Radius "
-                "or Axis Snap Tolerance slightly."
-            )
+    return (values[n // 2 - 1] + values[n // 2]) / 2.0
 
-    else:
-        st.info("No blocked/review regions are available for recovery.")
 
-    if st.session_state.audit:
-        st.markdown("### 9. Audit Report")
-        st.dataframe(st.session_state.audit, use_container_width=True)
+def source_grid_bubble_radius_range(source_numeric, source_alpha, min_ratio=0.55, max_ratio=1.80):
+    radii = []
 
-        audit_csv = audit_to_csv_bytes(st.session_state.audit)
+    for group in source_numeric + source_alpha:
+        for marker in group.get("markers", []):
+            r = marker.get("circle_radius")
 
-        st.download_button(
-            "📄 Download Audit CSV",
-            data=audit_csv,
-            file_name=f"AUDIT_{st.session_state.struc_name}.csv",
-            mime="text/csv",
-            key="download_audit_csv",
+            if r and r > 0:
+                radii.append(float(r))
+
+    med = median_value(radii)
+
+    if med is None:
+        return None, None, None
+
+    return med * min_ratio, med * max_ratio, med
+
+
+def marker_radius_ok(marker, min_radius, max_radius):
+    if min_radius is None or max_radius is None:
+        return True
+
+    r = marker.get("circle_radius")
+
+    if r is None:
+        return True
+
+    return min_radius <= float(r) <= max_radius
+
+
+def build_grid_frame_from_target_groups(target_numeric_groups, target_alpha_groups, fallback_bbox):
+    vertical_coords = []
+    horizontal_coords = []
+
+    for g in target_numeric_groups + target_alpha_groups:
+        if g.get("orientation") == "vertical":
+            vertical_coords.append(float(g["coord"]))
+
+        elif g.get("orientation") == "horizontal":
+            horizontal_coords.append(float(g["coord"]))
+
+    if len(vertical_coords) >= 2 and len(horizontal_coords) >= 2:
+        return {
+            "min_x": min(vertical_coords),
+            "max_x": max(vertical_coords),
+            "min_y": min(horizontal_coords),
+            "max_y": max(horizontal_coords),
+            "width": max(vertical_coords) - min(vertical_coords),
+            "height": max(horizontal_coords) - min(horizontal_coords),
+            "source": "target_axis_groups",
+        }
+
+    frame = dict(fallback_bbox)
+    frame["source"] = "region_bbox_fallback"
+    return frame
+
+
+def endpoint_points_for_axis_group_using_frame(axis_group, frame):
+    coord = float(axis_group["coord"])
+
+    if axis_group["orientation"] == "vertical":
+        return [
+            (coord, frame["min_y"]),
+            (coord, frame["max_y"]),
+        ]
+
+    return [
+        (frame["min_x"], coord),
+        (frame["max_x"], coord),
+    ]
+
+
+def source_numeric_range(source_numeric, extra=5):
+    vals = []
+
+    for g in source_numeric:
+        v = numeric_label_value(g.get("label", ""))
+
+        if v is not None:
+            vals.append(v)
+
+    if not vals:
+        return 1, 999
+
+    return max(1, min(vals) - extra), max(vals) + extra
+
+
+def is_zero_padded_detail_number(label):
+    label = clean_text(label)
+    return bool(re.fullmatch(r"0\d{1,3}", label))
+
+
+def plausible_recovery_label(label, family, source_numeric, source_alpha, numeric_extra=5):
+    label = clean_text(label)
+
+    if is_zero_padded_detail_number(label):
+        return False
+
+    if family == "numeric":
+        v = numeric_label_value(label)
+
+        if v is None:
+            return False
+
+        lo, hi = source_numeric_range(source_numeric, extra=numeric_extra)
+
+        return lo <= v <= hi
+
+    if family == "alphabetic":
+        if not is_alpha_label(label):
+            return False
+
+        return bool(re.fullmatch(r"[A-Z]{1,2}'?", label))
+
+    return False
+
+
+def strict_slab_recovery_label_ok(
+    label,
+    family_name,
+    source_numeric,
+    source_alpha,
+    numeric_extra=5,
+    strict_source_labels=True,
+    allowed_old_labels=None,
+):
+    label = clean_text(label)
+
+    if is_zero_padded_detail_number(label):
+        return False
+
+    allowed_old_labels = {
+        clean_text(x)
+        for x in (allowed_old_labels or [])
+        if clean_text(x)
+    }
+
+    if strict_source_labels:
+        if allowed_old_labels:
+            return label in allowed_old_labels
+
+        if not label_matches_family(label, family_name):
+            return False
+
+        if family_name == "numeric":
+            return label in source_label_set(source_numeric)
+
+        if family_name == "alphabetic":
+            return label in source_label_set(source_alpha)
+
+        return False
+
+    if not label_matches_family(label, family_name):
+        return False
+
+    return plausible_recovery_label(
+        label,
+        family_name,
+        source_numeric,
+        source_alpha,
+        numeric_extra=numeric_extra,
+    )
+
+
+def axis_group_recovery_quality(group):
+    markers = group.get("markers", []) or []
+
+    marker_count = len(markers)
+    avg_conf = float(group.get("avg_confidence", 0) or 0)
+
+    attached_count = len([
+        m for m in markers
+        if m.get("detection_mode") == "attached_gridline"
+    ])
+
+    closest_count = len([
+        m for m in markers
+        if m.get("detection_mode") == "closest_gridline"
+    ])
+
+    virtual_count = len([
+        m for m in markers
+        if m.get("detection_mode") == "same_label_virtual_axis"
+    ])
+
+    writable_count = len([
+        m for m in markers
+        if m.get("writable")
+    ])
+
+    label_count = int(group.get("label_count", 1) or 1)
+
+    return (
+        marker_count * 1000.0
+        + attached_count * 350.0
+        + closest_count * 175.0
+        + writable_count * 75.0
+        + avg_conf * 5.0
+        - virtual_count * 500.0
+        - max(0, label_count - 1) * 50.0
+    )
+
+
+def axis_group_label_summary(group):
+    labels = []
+
+    main = clean_text(group.get("label", ""))
+
+    if main:
+        labels.append(main)
+
+    for lab in group.get("mixed_labels", []):
+        lab = clean_text(lab)
+
+        if lab and lab not in labels:
+            labels.append(lab)
+
+    for lab in (group.get("label_counts", {}) or {}).keys():
+        lab = clean_text(lab)
+
+        if lab and lab not in labels:
+            labels.append(lab)
+
+    return ", ".join(labels)
+
+
+def select_axis_groups_for_recovery(
+    source_groups,
+    target_groups,
+    family_name,
+    max_extra_groups=2,
+):
+    expected = len(source_groups)
+    found = len(target_groups)
+
+    blockers = []
+    warnings = []
+
+    if expected == 0:
+        blockers.append(f"No source {family_name} axes were detected.")
+        return [], blockers, warnings
+
+    if found == expected:
+        return target_groups, blockers, warnings
+
+    if found < expected:
+        blockers.append(
+            f"Recovery {family_name} axis-group count mismatch: found {found}, expected {expected}. "
+            f"Missing target axis groups cannot be safely inferred automatically."
+        )
+        return [], blockers, warnings
+
+    extra = found - expected
+
+    if extra > max_extra_groups:
+        blockers.append(
+            f"Recovery {family_name} axis-group count mismatch: found {found}, expected {expected}. "
+            f"There are {extra} extra detected groups, which is more than the safe auto-trim limit "
+            f"of {max_extra_groups}."
+        )
+        return [], blockers, warnings
+
+    scored = []
+
+    for idx, group in enumerate(target_groups):
+        scored.append({
+            "idx": idx,
+            "group": group,
+            "score": axis_group_recovery_quality(group),
+        })
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+
+    chosen_items = scored[:expected]
+    dropped_items = scored[expected:]
+
+    chosen_items.sort(key=lambda x: x["idx"])
+    dropped_items.sort(key=lambda x: x["idx"])
+
+    chosen_groups = [x["group"] for x in chosen_items]
+
+    dropped_desc = []
+
+    for item in dropped_items:
+        g = item["group"]
+        dropped_desc.append(
+            f"coord={g.get('coord')}, labels=[{axis_group_label_summary(g)}], "
+            f"markers={g.get('marker_count')}, score={round(item['score'], 1)}"
         )
 
-    st.markdown("### 10. Download")
-
-    data = write_doc_to_temp_bytes(st.session_state.struc_doc)
-
-    st.download_button(
-        "📥 Download Target DXF",
-        data=data,
-        file_name=f"RELABELED_{st.session_state.struc_name}",
-        mime="application/dxf",
-        key="download_relabelled_dxf",
+    warnings.append(
+        f"Recovery {family_name}: found {found} target groups but expected {expected}. "
+        f"Auto-trimmed {extra} lower-confidence extra group(s): "
+        + " | ".join(dropped_desc)
     )
+
+    return chosen_groups, blockers, warnings
+
+
+def build_recovery_axis_diagnostics(
+    region,
+    source_numeric,
+    source_alpha,
+    numeric_orientation,
+    alpha_orientation,
+    numeric_order,
+    alpha_order,
+):
+    rows = []
+
+    raw_numeric, raw_alpha = get_family_groups(
+        region,
+        numeric_orientation,
+        alpha_orientation,
+        numeric_order,
+        alpha_order,
+    )
+
+    families = [
+        ("numeric", source_numeric, raw_numeric),
+        ("alphabetic", source_alpha, raw_alpha),
+    ]
+
+    for family_name, source_groups, target_groups in families:
+        expected = len(source_groups)
+        found = len(target_groups)
+
+        if found == expected:
+            status = "exact_count"
+        elif found > expected:
+            status = "extra_target_groups"
+        else:
+            status = "missing_target_groups"
+
+        selected_groups, blockers, warnings = select_axis_groups_for_recovery(
+            source_groups,
+            target_groups,
+            family_name,
+            max_extra_groups=2,
+        )
+
+        selected_ids = {id(g) for g in selected_groups}
+
+        if target_groups:
+            for idx, g in enumerate(target_groups, start=1):
+                mode_counts = {}
+
+                for m in g.get("markers", []):
+                    mode = m.get("detection_mode", "unknown")
+                    mode_counts[mode] = mode_counts.get(mode, 0) + 1
+
+                rows.append({
+                    "region": region.get("name", ""),
+                    "family": family_name,
+                    "status": status,
+                    "source_expected_count": expected,
+                    "target_found_count": found,
+                    "group_index": idx,
+                    "selected_for_recovery": id(g) in selected_ids,
+                    "coord": g.get("coord", ""),
+                    "label": g.get("label", ""),
+                    "mixed_labels": ", ".join(g.get("mixed_labels", [])),
+                    "marker_count": g.get("marker_count", ""),
+                    "writable_marker_count": g.get("writable_marker_count", ""),
+                    "avg_confidence": g.get("avg_confidence", ""),
+                    "min_confidence": g.get("min_confidence", ""),
+                    "detection_modes": mode_counts,
+                    "blockers": "; ".join(blockers),
+                    "warnings": "; ".join(warnings),
+                })
+        else:
+            rows.append({
+                "region": region.get("name", ""),
+                "family": family_name,
+                "status": status,
+                "source_expected_count": expected,
+                "target_found_count": found,
+                "group_index": "",
+                "selected_for_recovery": False,
+                "coord": "",
+                "label": "",
+                "mixed_labels": "",
+                "marker_count": "",
+                "writable_marker_count": "",
+                "avg_confidence": "",
+                "min_confidence": "",
+                "detection_modes": "",
+                "blockers": "; ".join(blockers),
+                "warnings": "; ".join(warnings),
+            })
+
+    return rows
+
+
+def marker_endpoint_distance(marker, endpoints):
+    p = marker["circle_center"]
+
+    distances = [
+        euclidean(p, ep)
+        for ep in endpoints
+    ]
+
+    best = min(distances)
+
+    return best, distances.index(best)
+
+
+def build_endpoint_recovery_plan(
+    region,
+    source_numeric,
+    source_alpha,
+    numeric_orientation,
+    alpha_orientation,
+    numeric_order,
+    alpha_order,
+    all_lines,
+    endpoint_radius,
+    allow_block_text_write,
+    numeric_extra=5,
+    axis_snap_tolerance=250.0,
+    strict_source_labels=True,
+    allow_virtual_axis_recovery=False,
+    write_mode=None,
+):
+    blockers = []
+    warnings = []
+    plan_rows = []
+
+    candidate_markers = region.get("all_markers", region.get("markers", []))
+
+    raw_target_numeric_groups, raw_target_alpha_groups = get_family_groups(
+        region,
+        numeric_orientation,
+        alpha_orientation,
+        numeric_order,
+        alpha_order,
+    )
+
+    target_numeric_groups, num_blockers, num_warnings = select_axis_groups_for_recovery(
+        source_numeric,
+        raw_target_numeric_groups,
+        "numeric",
+        max_extra_groups=2,
+    )
+
+    target_alpha_groups, alpha_blockers, alpha_warnings = select_axis_groups_for_recovery(
+        source_alpha,
+        raw_target_alpha_groups,
+        "alphabetic",
+        max_extra_groups=2,
+    )
+
+    blockers.extend(num_blockers)
+    blockers.extend(alpha_blockers)
+    warnings.extend(num_warnings)
+    warnings.extend(alpha_warnings)
+
+    if blockers:
+        return False, blockers, warnings, plan_rows
+
+    frame = build_grid_frame_from_target_groups(
+        target_numeric_groups,
+        target_alpha_groups,
+        region["bbox"],
+    )
+
+    min_radius, max_radius, source_median_radius = source_grid_bubble_radius_range(
+        source_numeric,
+        source_alpha,
+    )
+
+    families = [
+        ("numeric", source_numeric, target_numeric_groups),
+        ("alphabetic", source_alpha, target_alpha_groups),
+    ]
+
+    seen_handles = set()
+
+    for family_name, source_groups, target_groups in families:
+        for pos, (source_group, target_group) in enumerate(zip(source_groups, target_groups), start=1):
+            new_label = clean_text(source_group.get("label", ""))
+
+            orientation = target_group["orientation"]
+            coord = float(target_group["coord"])
+
+            allowed_old_labels = set()
+            group_labels = []
+
+            main_old_label = clean_text(target_group.get("label", ""))
+
+            if main_old_label:
+                group_labels.append(main_old_label)
+
+            for lab in target_group.get("mixed_labels", []):
+                lab = clean_text(lab)
+
+                if lab:
+                    group_labels.append(lab)
+
+            for lab in (target_group.get("label_counts", {}) or {}).keys():
+                lab = clean_text(lab)
+
+                if lab:
+                    group_labels.append(lab)
+
+            for lab in group_labels:
+                lab = clean_text(lab)
+
+                if not lab:
+                    continue
+
+                if is_zero_padded_detail_number(lab):
+                    continue
+
+                if not probable_grid_label(lab):
+                    continue
+
+                allowed_old_labels.add(lab)
+
+            endpoints = endpoint_points_for_axis_group_using_frame(target_group, frame)
+
+            endpoint_candidates = {
+                0: [],
+                1: [],
+            }
+
+            for marker in candidate_markers:
+                old_label = clean_text(marker.get("label", ""))
+
+                if not strict_slab_recovery_label_ok(
+                    old_label,
+                    family_name,
+                    source_numeric,
+                    source_alpha,
+                    numeric_extra=numeric_extra,
+                    strict_source_labels=strict_source_labels,
+                    allowed_old_labels=allowed_old_labels,
+                ):
+                    continue
+
+                if marker.get("orientation") != orientation:
+                    continue
+
+                detection_mode = marker.get("detection_mode", "")
+
+                if not allow_virtual_axis_recovery and detection_mode == "same_label_virtual_axis":
+                    continue
+
+                profile = marker_write_profile(
+                    marker,
+                    write_mode=write_mode,
+                    allow_block_text_write=allow_block_text_write,
+                )
+
+                if not profile.get("writable"):
+                    continue
+
+                if not marker_radius_ok(marker, min_radius, max_radius):
+                    continue
+
+                axis_distance = axis_distance_for_marker(marker, orientation, coord)
+
+                if axis_distance > axis_snap_tolerance:
+                    continue
+
+                endpoint_distance, endpoint_index = marker_endpoint_distance(marker, endpoints)
+
+                if endpoint_distance > endpoint_radius:
+                    continue
+
+                confidence = float(marker.get("confidence", 0) or 0)
+
+                if detection_mode == "attached_gridline":
+                    mode_penalty = 0.0
+                elif detection_mode == "closest_gridline":
+                    mode_penalty = 250.0
+                elif detection_mode == "same_label_virtual_axis":
+                    mode_penalty = 1000.0
+                else:
+                    mode_penalty = 500.0
+
+                score = (
+                    endpoint_distance
+                    + axis_distance * 5.0
+                    + mode_penalty
+                    - confidence * 2.0
+                )
+
+                endpoint_candidates[endpoint_index].append({
+                    "score": score,
+                    "endpoint_distance": endpoint_distance,
+                    "axis_distance": axis_distance,
+                    "marker": marker,
+                    "detection_mode": detection_mode,
+                    "confidence": confidence,
+                    "write_profile": profile,
+                })
+
+            selected = []
+
+            for endpoint_index in [0, 1]:
+                cands = endpoint_candidates[endpoint_index]
+
+                if not cands:
+                    warnings.append(
+                        f"No safe endpoint candidate found for {family_name} axis position {pos}, "
+                        f"source label {new_label}, endpoint {'A' if endpoint_index == 0 else 'B'}."
+                    )
+                    continue
+
+                cands.sort(key=lambda x: x["score"])
+                best = cands[0]
+
+                if len(cands) > 1:
+                    second = cands[1]
+
+                    if second["score"] <= best["score"] + 300.0:
+                        warnings.append(
+                            f"Ambiguous candidates for {family_name} axis position {pos}, "
+                            f"source label {new_label}, endpoint {'A' if endpoint_index == 0 else 'B'}. "
+                            f"Best score={round(best['score'], 1)}, second={round(second['score'], 1)}."
+                        )
+
+                selected.append((endpoint_index, best))
+
+            for endpoint_index, best in selected:
+                marker = best["marker"]
+                entity = marker["text_entity"]
+
+                handle = marker_entity_handle(marker)
+                handle_key = handle or f"entity_{id(entity)}"
+
+                if handle_key in seen_handles:
+                    continue
+
+                seen_handles.add(handle_key)
+
+                old_label = get_text_value(entity)
+                endpoint_name = "A" if endpoint_index == 0 else "B"
+                approval_id = f"{region['name']}|{family_name}|{pos}|{endpoint_name}|{handle_key}"
+
+                profile = best.get("write_profile") or marker_write_profile(
+                    marker,
+                    write_mode=write_mode,
+                    allow_block_text_write=allow_block_text_write,
+                )
+
+                plan_rows.append({
+                    "approval_id": approval_id,
+                    "region": region["name"],
+                    "sync_mode": "endpoint_recovery",
+                    "family": family_name,
+                    "axis_position": pos,
+                    "region_axis_position": pos,
+                    "source_label": new_label,
+                    "old_label": old_label,
+                    "new_label": new_label,
+                    "endpoint": endpoint_name,
+                    "distance_to_endpoint": round(best["endpoint_distance"], 3),
+                    "axis_distance": round(best["axis_distance"], 3),
+                    "axis_coord": coord,
+                    "grid_frame_source": frame.get("source", ""),
+                    "source_median_radius": source_median_radius,
+                    "text_handle": handle,
+                    "entity_handle": handle,
+                    "text_source": marker.get("text_source"),
+                    "write_source": profile.get("write_source", ""),
+                    "write_risk": profile.get("write_risk", ""),
+                    "write_reason": profile.get("write_reason", ""),
+                    "text_type": marker.get("text_type", ""),
+                    "layer": marker_layer(marker),
+                    "detection_mode": marker.get("detection_mode"),
+                    "confidence": marker.get("confidence"),
+                    "recovery_score": round(best["score"], 3),
+                    "writable": profile.get("writable", False),
+                    "entity": entity,
+                    "marker": marker,
+                })
+
+    if not plan_rows:
+        blockers.append(
+            "Recovery found no safe endpoint candidates. Try increasing Endpoint Search Radius "
+            "or Axis Snap Tolerance slightly."
+        )
+
+    ready = len(blockers) == 0
+
+    return ready, blockers, warnings, plan_rows
+
+
+def recovery_preview_rows(plan_rows):
+    rows = []
+
+    for r in plan_rows:
+        rows.append({
+            "apply": True,
+            "approval_id": r.get("approval_id", ""),
+            "region": r["region"],
+            "family": r["family"],
+            "axis_position": r["axis_position"],
+            "old_label": r["old_label"],
+            "proposed_new_label": r["new_label"],
+            "new_label": r["new_label"],
+            "endpoint": r["endpoint"],
+            "distance_to_endpoint": r["distance_to_endpoint"],
+            "axis_distance": r.get("axis_distance", ""),
+            "axis_coord": r["axis_coord"],
+            "grid_frame_source": r.get("grid_frame_source", ""),
+            "recovery_score": r.get("recovery_score", ""),
+            "detection_mode": r.get("detection_mode", ""),
+            "text_handle": r["text_handle"],
+            "text_source": r["text_source"],
+            "write_source": r.get("write_source", ""),
+            "write_risk": r.get("write_risk", ""),
+            "write_reason": r.get("write_reason", ""),
+            "layer": r.get("layer", ""),
+            "confidence": r["confidence"],
+            "writable": r["writable"],
+        })
+
+    return rows
+
+
+def editor_result_to_rows(editor_result):
+    if editor_result is None:
+        return []
+
+    if isinstance(editor_result, list):
+        return editor_result
+
+    try:
+        return editor_result.to_dict("records")
+    except Exception:
+        pass
+
+    try:
+        return list(editor_result)
+    except Exception:
+        return []
+
+
+def checkbox_truthy(value):
+    if value is True:
+        return True
+
+    if value is False or value is None:
+        return False
+
+    return str(value).strip().lower() in ("true", "1", "yes", "y", "checked")
+
+
+def approved_ids_from_editor(editor_result):
+    rows = editor_result_to_rows(editor_result)
+
+    approved = set()
+
+    for row in rows:
+        if checkbox_truthy(row.get("apply", False)):
+            approval_id = row.get("approval_id", "")
+            if approval_id:
+                approved.add(approval_id)
+
+    return approved
+
+
+def recovery_plan_from_editor(plan_rows, editor_result):
+    """
+    Builds approved/unapproved recovery plan rows from editable Streamlit table.
+
+    Allows user to manually override new_label in the 8B approval table.
+    """
+    editor_rows = editor_result_to_rows(editor_result)
+
+    editor_by_id = {}
+
+    for row in editor_rows:
+        approval_id = row.get("approval_id", "")
+
+        if approval_id:
+            editor_by_id[approval_id] = row
+
+    approved = []
+    unapproved = []
+    invalid = []
+
+    for original in plan_rows:
+        approval_id = original.get("approval_id", "")
+        edited = editor_by_id.get(approval_id, {})
+
+        apply_row = checkbox_truthy(edited.get("apply", False))
+
+        row_copy = dict(original)
+
+        edited_new_label = clean_text(edited.get("new_label", original.get("new_label", "")))
+
+        if not apply_row:
+            unapproved.append(row_copy)
+            continue
+
+        if not edited_new_label:
+            bad = dict(row_copy)
+            bad["invalid_reason"] = "Edited new_label is blank"
+            invalid.append(bad)
+            continue
+
+        if not probable_grid_label(edited_new_label):
+            bad = dict(row_copy)
+            bad["invalid_reason"] = f"Edited new_label '{edited_new_label}' is not a probable grid label"
+            invalid.append(bad)
+            continue
+
+        row_copy["user_edited_new_label"] = edited_new_label
+        row_copy["original_proposed_new_label"] = row_copy.get("new_label", "")
+        row_copy["new_label"] = edited_new_label
+
+        approved.append(row_copy)
+
+    return approved, unapproved, invalid
+
+
+def recovery_plan_apply_counts(plan_rows):
+    approved_count = len(plan_rows)
+    will_change_count = 0
+    already_match_count = 0
+    risky_count = 0
+    unwritable_count = 0
+
+    for r in plan_rows:
+        old = clean_text(r.get("old_label", ""))
+        new = clean_text(r.get("new_label", ""))
+
+        if old != new:
+            will_change_count += 1
+        else:
+            already_match_count += 1
+
+        if r.get("write_risk") == "high":
+            risky_count += 1
+
+        if not r.get("writable"):
+            unwritable_count += 1
+
+    return {
+        "approved_rows": approved_count,
+        "will_change": will_change_count,
+        "already_match": already_match_count,
+        "high_risk": risky_count,
+        "unwritable": unwritable_count,
+    }
+
+
+def build_unapproved_recovery_audit_rows(plan_rows):
+    audit = []
+
+    for r in plan_rows:
+        audit.append({
+            "region": r.get("region", ""),
+            "sync_mode": "endpoint_recovery",
+            "approved_by_user": False,
+            "family": r.get("family", ""),
+            "axis_position": r.get("axis_position", ""),
+            "region_axis_position": r.get("region_axis_position", r.get("axis_position", "")),
+            "old_label": r.get("old_label", ""),
+            "new_label": r.get("new_label", ""),
+            "changed": False,
+            "skipped": True,
+            "reason": "user_unchecked_in_manual_approval_table",
+            "endpoint": r.get("endpoint", ""),
+            "distance_to_endpoint": r.get("distance_to_endpoint", ""),
+            "axis_distance": r.get("axis_distance", ""),
+            "axis_coord": r.get("axis_coord", ""),
+            "detection_mode": r.get("detection_mode", ""),
+            "confidence": r.get("confidence", ""),
+            "recovery_score": r.get("recovery_score", ""),
+            "text_source": r.get("text_source", ""),
+            "write_source": r.get("write_source", ""),
+            "write_risk": r.get("write_risk", ""),
+            "write_reason": r.get("write_reason", ""),
+            "entity_handle": r.get("entity_handle", r.get("text_handle", "")),
+            "layer": r.get("layer", ""),
+            "writable": r.get("writable", ""),
+        })
+
+    return audit
+
+
+def apply_endpoint_recovery_plan(plan_rows, approved_by_user=True):
+    changed = 0
+    skipped = 0
+    audit = []
+
+    for r in plan_rows:
+        entity = r["entity"]
+        old = get_text_value(entity)
+        new = clean_text(r["new_label"])
+
+        base = {
+            "region": r.get("region", ""),
+            "sync_mode": "endpoint_recovery",
+            "approved_by_user": approved_by_user,
+            "family": r.get("family", ""),
+            "axis_position": r.get("axis_position", ""),
+            "region_axis_position": r.get("region_axis_position", r.get("axis_position", "")),
+            "old_label": old,
+            "new_label": new,
+            "endpoint": r.get("endpoint", ""),
+            "distance_to_endpoint": r.get("distance_to_endpoint", ""),
+            "axis_distance": r.get("axis_distance", ""),
+            "axis_coord": r.get("axis_coord", ""),
+            "detection_mode": r.get("detection_mode", ""),
+            "confidence": r.get("confidence", ""),
+            "recovery_score": r.get("recovery_score", ""),
+            "text_source": r.get("text_source", ""),
+            "write_source": r.get("write_source", ""),
+            "write_risk": r.get("write_risk", ""),
+            "write_reason": r.get("write_reason", ""),
+            "entity_handle": r.get("entity_handle", r.get("text_handle", "")),
+            "layer": r.get("layer", ""),
+            "writable": r.get("writable", ""),
+        }
+
+        if not r.get("writable"):
+            skipped += 1
+
+            row = dict(base)
+            row.update({
+                "changed": False,
+                "skipped": True,
+                "reason": "recovery_not_writable",
+            })
+            audit.append(row)
+            continue
+
+        if old != new:
+            ok = set_text_value(entity, new)
+
+            if ok:
+                changed += 1
+
+            row = dict(base)
+            row.update({
+                "changed": ok,
+                "skipped": False,
+                "reason": "endpoint_recovery_updated" if ok else "endpoint_recovery_write_failed",
+            })
+            audit.append(row)
+
+        else:
+            row = dict(base)
+            row.update({
+                "changed": False,
+                "skipped": False,
+                "reason": "already_matches",
+            })
+            audit.append(row)
+
+    return changed, skipped, audit
+
+
+# =========================================================
+# SESSION STATE
+# =========================================================
+
+def init_state():
+    defaults = {
+        "docs_loaded": False,
+        "arch_doc": None,
+        "struc_doc": None,
+        "arch_name": "",
+        "struc_name": "",
+        "arch_sig": None,
+        "struc_sig": None,
+        "arch_detection": {},
+        "struc_detection": {},
+        "arch_axis_groups": {},
+        "family": {},
+        "source_numeric": [],
+        "source_alpha": [],
+        "regions": [],
+        "segmentation": {},
+        "region_report": [],
+        "preview": [],
+        "audit": [],
+        "changed": 0,
+        "skipped": 0,
+        "prepared": False,
+    }
+
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+def reset_state():
+    for k in [
+        "docs_loaded",
+        "arch_doc",
+        "struc_doc",
+        "arch_name",
+        "struc_name",
+        "arch_detection",
+        "struc_detection",
+        "arch_axis_groups",
+        "family",
+        "source_numeric",
+        "source_alpha",
+        "regions",
+        "segmentation",
+        "region_report",
+        "preview",
+        "audit",
+        "changed",
+        "skipped",
+        "prepared",
+    ]:
+        if k in st.session_state:
+            del st.session_state[k]
