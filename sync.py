@@ -2229,7 +2229,152 @@ def strict_slab_recovery_label_ok(
         numeric_extra=numeric_extra,
     )
 
+def axis_group_recovery_quality(group):
+    """
+    Scores a target axis group for endpoint recovery when the target has
+    one or more extra detected groups.
 
+    Higher is better.
+
+    This does NOT change labels by itself. It only helps choose the most
+    grid-like axis groups when target count is slightly larger than source count.
+    """
+    markers = group.get("markers", []) or []
+
+    marker_count = len(markers)
+    avg_conf = float(group.get("avg_confidence", 0) or 0)
+
+    attached_count = len([
+        m for m in markers
+        if m.get("detection_mode") == "attached_gridline"
+    ])
+
+    closest_count = len([
+        m for m in markers
+        if m.get("detection_mode") == "closest_gridline"
+    ])
+
+    virtual_count = len([
+        m for m in markers
+        if m.get("detection_mode") == "same_label_virtual_axis"
+    ])
+
+    writable_count = len([
+        m for m in markers
+        if m.get("writable")
+    ])
+
+    label_count = int(group.get("label_count", 1) or 1)
+
+    # Real grid axes usually have 2 endpoint bubbles, good confidence,
+    # and attached/closest gridline detection. Virtual axes are less trusted.
+    return (
+        marker_count * 1000.0
+        + attached_count * 350.0
+        + closest_count * 175.0
+        + writable_count * 75.0
+        + avg_conf * 5.0
+        - virtual_count * 500.0
+        - max(0, label_count - 1) * 50.0
+    )
+
+
+def axis_group_label_summary(group):
+    labels = []
+
+    main = clean_text(group.get("label", ""))
+    if main:
+        labels.append(main)
+
+    for lab in group.get("mixed_labels", []):
+        lab = clean_text(lab)
+        if lab and lab not in labels:
+            labels.append(lab)
+
+    return ", ".join(labels)
+
+
+def select_axis_groups_for_recovery(
+    source_groups,
+    target_groups,
+    family_name,
+    max_extra_groups=2,
+):
+    """
+    Endpoint recovery originally required exact source/target axis counts.
+    That is safest, but slab/detail drawings can create one extra detected axis
+    from a legitimate-looking endpoint/detail bubble.
+
+    This helper allows a small number of extra target groups by selecting the
+    most grid-like target groups.
+
+    Missing target groups are still blocked.
+    """
+    expected = len(source_groups)
+    found = len(target_groups)
+
+    blockers = []
+    warnings = []
+
+    if expected == 0:
+        blockers.append(f"No source {family_name} axes were detected.")
+        return [], blockers, warnings
+
+    if found == expected:
+        return target_groups, blockers, warnings
+
+    if found < expected:
+        blockers.append(
+            f"Recovery {family_name} axis-group count mismatch: found {found}, expected {expected}. "
+            f"Missing target axis groups cannot be safely inferred automatically."
+        )
+        return [], blockers, warnings
+
+    extra = found - expected
+
+    if extra > max_extra_groups:
+        blockers.append(
+            f"Recovery {family_name} axis-group count mismatch: found {found}, expected {expected}. "
+            f"There are {extra} extra detected groups, which is more than the safe auto-trim limit "
+            f"of {max_extra_groups}."
+        )
+        return [], blockers, warnings
+
+    scored = []
+
+    for idx, group in enumerate(target_groups):
+        scored.append({
+            "idx": idx,
+            "group": group,
+            "score": axis_group_recovery_quality(group),
+        })
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+
+    chosen_items = scored[:expected]
+    dropped_items = scored[expected:]
+
+    chosen_items.sort(key=lambda x: x["idx"])
+    dropped_items.sort(key=lambda x: x["idx"])
+
+    chosen_groups = [x["group"] for x in chosen_items]
+
+    dropped_desc = []
+
+    for item in dropped_items:
+        g = item["group"]
+        dropped_desc.append(
+            f"coord={g.get('coord')}, labels=[{axis_group_label_summary(g)}], "
+            f"markers={g.get('marker_count')}, score={round(item['score'], 1)}"
+        )
+
+    warnings.append(
+        f"Recovery {family_name}: found {found} target groups but expected {expected}. "
+        f"Auto-trimmed {extra} lower-confidence extra group(s): "
+        + " | ".join(dropped_desc)
+    )
+
+    return chosen_groups, blockers, warnings
 def marker_endpoint_distance(marker, endpoints):
     p = marker["circle_center"]
 
