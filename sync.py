@@ -1941,7 +1941,8 @@ def build_endpoint_recovery_plan(
             f"Recovery alphabetic axis-group count mismatch: found {len(target_alpha_groups)}, "
             f"expected {len(source_alpha)}."
         )
-            if blockers:
+
+    if blockers:
         return False, blockers, warnings, plan_rows
 
     frame = build_grid_frame_from_target_groups(
