@@ -2614,13 +2614,20 @@ with sa:
         struc_layers,
         index=struc_layers.index(struc_line_default) if struc_line_default in struc_layers else 0,
     )
-    with sb:
+
+with sb:
     struc_text_layer = st.selectbox(
         "Target Grid Text Layer",
         struc_layers,
         index=struc_layers.index(struc_text_default) if struc_text_default in struc_layers else 0,
     )
 
+with sc:
+    struc_circle_layer = st.selectbox(
+        "Target Grid Bubble Layer",
+        struc_layers,
+        index=struc_layers.index(struc_circle_default) if struc_circle_default in struc_layers else 0,
+    )
 with sc:
     struc_circle_layer = st.selectbox(
         "Target Grid Bubble Layer",
