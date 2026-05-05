@@ -1479,7 +1479,23 @@ def filter_region_perimeter_markers(region, axis_tol, band_ratio=0.18, min_band=
     filtered["axis_groups"] = group_markers_by_axis(perimeter_markers, tol=axis_tol)
 
     return filtered
+def region_for_endpoint_recovery(region, axis_tol):
+    """
+    Endpoint recovery should use all detected markers to reconstruct axis groups,
+    even if clean sync uses only perimeter-filtered markers.
 
+    This prevents recovery from failing when Section 5 filtered out one valid
+    endpoint bubble/axis group.
+    """
+    recovery_region = dict(region)
+
+    all_markers = region.get("all_markers", region.get("markers", []))
+
+    recovery_region["markers"] = all_markers
+    recovery_region["axis_groups"] = group_markers_by_axis(all_markers, tol=axis_tol)
+    recovery_region["recovery_uses_all_markers"] = True
+
+    return recovery_region
 
 def marker_xy(marker):
     x, y = marker["circle_center"]
