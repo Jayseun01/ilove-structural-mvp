@@ -2590,6 +2590,7 @@ with la:
         "Reference Grid Line Layer",
         arch_layers,
         index=arch_layers.index(arch_line_default) if arch_line_default in arch_layers else 0,
+        key="arch_line_layer_select",
     )
 
 with lb:
@@ -2597,6 +2598,7 @@ with lb:
         "Reference Grid Text Layer",
         arch_layers,
         index=arch_layers.index(arch_text_default) if arch_text_default in arch_layers else 0,
+        key="arch_text_layer_select",
     )
 
 with lc:
@@ -2604,6 +2606,7 @@ with lc:
         "Reference Grid Bubble Layer",
         arch_layers,
         index=arch_layers.index(arch_circle_default) if arch_circle_default in arch_layers else 0,
+        key="arch_circle_layer_select",
     )
 
 sa, sb, sc = st.columns(3)
@@ -2613,6 +2616,7 @@ with sa:
         "Target Grid Line Layer",
         struc_layers,
         index=struc_layers.index(struc_line_default) if struc_line_default in struc_layers else 0,
+        key="struc_line_layer_select",
     )
 
 with sb:
@@ -2620,6 +2624,7 @@ with sb:
         "Target Grid Text Layer",
         struc_layers,
         index=struc_layers.index(struc_text_default) if struc_text_default in struc_layers else 0,
+        key="struc_text_layer_select",
     )
 
 with sc:
@@ -2627,12 +2632,7 @@ with sc:
         "Target Grid Bubble Layer",
         struc_layers,
         index=struc_layers.index(struc_circle_default) if struc_circle_default in struc_layers else 0,
-    )
-with sc:
-    struc_circle_layer = st.selectbox(
-        "Target Grid Bubble Layer",
-        struc_layers,
-        index=struc_layers.index(struc_circle_default) if struc_circle_default in struc_layers else 0,
+        key="struc_circle_layer_select",
     )
 
 b1, b2 = st.columns(2)
