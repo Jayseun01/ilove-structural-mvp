@@ -5066,7 +5066,55 @@ if analyze:
             alpha_order,
         )
 
-            expected_markers = len(arch_trusted)
+        expected_markers = len(arch_trusted)
+
+        regions, seg = build_regions(
+            struc_trusted,
+            axis_tol=axis_tol,
+            expected_markers_per_region=expected_markers,
+            forced_region_count=forced_region_count,
+            min_region_markers=min_region_markers,
+        )
+
+        if ignore_interior_detail_bubbles:
+            regions = [
+                filter_region_perimeter_markers(
+                    r,
+                    axis_tol=axis_tol,
+                    band_ratio=perimeter_band_ratio,
+                    min_band=perimeter_min_band,
+                )
+                for r in regions
+            ]
+
+            seg["interior_detail_filter"] = "enabled"
+            seg["perimeter_band_ratio"] = perimeter_band_ratio
+            seg["perimeter_min_band"] = perimeter_min_band
+            seg["interior_markers_removed_by_region"] = {
+                r["name"]: r.get("interior_marker_count", 0)
+                for r in regions
+            }
+            seg["sync_marker_counts_after_filter"] = {
+                r["name"]: len(r["markers"])
+                for r in regions
+            }
+
+        else:
+            seg["interior_detail_filter"] = "disabled"
+
+        report = build_region_report(
+            regions,
+            source_numeric,
+            source_alpha,
+            family["numeric_orientation"],
+            family["alpha_orientation"],
+            numeric_order,
+            alpha_order,
+            allow_block_text_write,
+            expected_reference_marker_count=len(arch_trusted),
+            max_region_marker_ratio=max_region_marker_ratio,
+            write_mode=write_mode,
+        )
 
             regions, seg = build_regions(
             struc_trusted,
