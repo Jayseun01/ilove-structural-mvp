@@ -2355,10 +2355,90 @@ def build_recovery_axis_diagnostics(
     numeric_order,
     alpha_order,
 ):
-    ...
+    rows = []
+
+    raw_numeric, raw_alpha = get_family_groups(
+        region,
+        numeric_orientation,
+        alpha_orientation,
+        numeric_order,
+        alpha_order,
+    )
+
+    families = [
+        ("numeric", source_numeric, raw_numeric),
+        ("alphabetic", source_alpha, raw_alpha),
+    ]
+
+    for family_name, source_groups, target_groups in families:
+        expected = len(source_groups)
+        found = len(target_groups)
+
+        if found == expected:
+            status = "exact_count"
+        elif found > expected:
+            status = "extra_target_groups"
+        else:
+            status = "missing_target_groups"
+
+        selected_groups, blockers, warnings = select_axis_groups_for_recovery(
+            source_groups,
+            target_groups,
+            family_name,
+            max_extra_groups=2,
+        )
+
+        selected_ids = {id(g) for g in selected_groups}
+
+        if target_groups:
+            for idx, g in enumerate(target_groups, start=1):
+                mode_counts = {}
+
+                for m in g.get("markers", []):
+                    mode = m.get("detection_mode", "unknown")
+                    mode_counts[mode] = mode_counts.get(mode, 0) + 1
+
+                rows.append({
+                    "region": region.get("name", ""),
+                    "family": family_name,
+                    "status": status,
+                    "source_expected_count": expected,
+                    "target_found_count": found,
+                    "group_index": idx,
+                    "selected_for_recovery": id(g) in selected_ids,
+                    "coord": g.get("coord", ""),
+                    "label": g.get("label", ""),
+                    "mixed_labels": ", ".join(g.get("mixed_labels", [])),
+                    "marker_count": g.get("marker_count", ""),
+                    "writable_marker_count": g.get("writable_marker_count", ""),
+                    "avg_confidence": g.get("avg_confidence", ""),
+                    "min_confidence": g.get("min_confidence", ""),
+                    "detection_modes": mode_counts,
+                    "blockers": "; ".join(blockers),
+                    "warnings": "; ".join(warnings),
+                })
+        else:
+            rows.append({
+                "region": region.get("name", ""),
+                "family": family_name,
+                "status": status,
+                "source_expected_count": expected,
+                "target_found_count": found,
+                "group_index": "",
+                "selected_for_recovery": False,
+                "coord": "",
+                "label": "",
+                "mixed_labels": "",
+                "marker_count": "",
+                "writable_marker_count": "",
+                "avg_confidence": "",
+                "min_confidence": "",
+                "detection_modes": "",
+                "blockers": "; ".join(blockers),
+                "warnings": "; ".join(warnings),
+            })
+
     return rows
-
-
 def marker_endpoint_distance(marker, endpoints):
     p = marker["circle_center"]
 
