@@ -1075,18 +1075,6 @@ def make_virtual_axis(center, orientation, coord, line_layer):
     }
 
 
-def is_marker_writable(marker, allow_block_text_write=False):
-    src = marker.get("text_source", "")
-
-    if src in ("modelspace", "insert_attrib"):
-        return True
-
-    if allow_block_text_write and src == "block_text":
-        return True
-
-    return False
-
-
 def marker_confidence(mode, text_matches, writable):
     score = 35
 
@@ -1119,10 +1107,31 @@ def build_trusted_markers(
     text_gap,
     attach_gap,
     allow_block_text_write=False,
+    write_mode=None,
+    allow_nested_layer0_from_selected_insert=True,
+    strict_nested_block_layer_match=False,
 ):
-    texts = extract_texts(doc, text_layer)
-    circles = extract_circles(doc, circle_layer)
-    lines = extract_axis_lines(doc, line_layer, min_length=min_grid_length)
+    texts = extract_texts(
+        doc,
+        text_layer,
+        allow_nested_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+        strict_nested_block_layer_match=strict_nested_block_layer_match,
+    )
+
+    circles = extract_circles(
+        doc,
+        circle_layer,
+        allow_nested_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+        strict_nested_block_layer_match=strict_nested_block_layer_match,
+    )
+
+    lines = extract_axis_lines(
+        doc,
+        line_layer,
+        min_length=min_grid_length,
+        allow_nested_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+        strict_nested_block_layer_match=strict_nested_block_layer_match,
+    )
 
     bubbles = []
     rejected = []
@@ -1147,6 +1156,8 @@ def build_trusted_markers(
                 "candidate_texts": [],
                 "text_matches": 0,
                 "reason": "No valid grid text inside marker",
+                "circle_layer": c.get("layer", ""),
+                "circle_source": c.get("source", ""),
             })
             continue
 
@@ -1158,12 +1169,16 @@ def build_trusted_markers(
             "text_entity": t["entity"],
             "text_point": t["point"],
             "text_source": t["source"],
+            "text_type": t.get("type", ""),
+            "text_layer": t.get("layer", ""),
+            "text_parent_layer": t.get("parent_layer", ""),
             "text_handle": t.get("handle", ""),
             "parent_insert": t.get("parent_insert"),
             "circle_entity": c["entity"],
             "circle_center": center,
             "circle_radius": radius,
             "circle_source": c["source"],
+            "circle_layer": c.get("layer", ""),
             "circle_handle": c.get("handle", ""),
             "candidate_texts": [x["text"] for x in candidates[:10]],
             "text_matches": len(candidates),
@@ -1209,6 +1224,10 @@ def build_trusted_markers(
                 "candidate_texts": b.get("candidate_texts", []),
                 "text_matches": b.get("text_matches", 1),
                 "reason": "Text found, but no gridline/axis could be inferred",
+                "text_layer": b.get("text_layer", ""),
+                "text_source": b.get("text_source", ""),
+                "circle_layer": b.get("circle_layer", ""),
+                "circle_source": b.get("circle_source", ""),
             })
             continue
 
@@ -1217,12 +1236,16 @@ def build_trusted_markers(
             "text_entity": b["text_entity"],
             "text_point": b["text_point"],
             "text_source": b["text_source"],
+            "text_type": b.get("text_type", ""),
+            "text_layer": b.get("text_layer", ""),
+            "text_parent_layer": b.get("text_parent_layer", ""),
             "text_handle": b.get("text_handle", ""),
             "parent_insert": b.get("parent_insert"),
             "circle_entity": b["circle_entity"],
             "circle_center": b["circle_center"],
             "circle_radius": b["circle_radius"],
             "circle_source": b["circle_source"],
+            "circle_layer": b.get("circle_layer", ""),
             "circle_handle": b.get("circle_handle", ""),
             "line_entity": selected.get("entity"),
             "orientation": selected["orientation"],
@@ -1230,12 +1253,25 @@ def build_trusted_markers(
             "line_start": selected["start"],
             "line_end": selected["end"],
             "line_length": selected["length"],
+            "line_layer": selected.get("layer", ""),
+            "line_source": selected.get("source", ""),
             "detection_mode": mode,
             "candidate_texts": b.get("candidate_texts", []),
             "text_matches": b.get("text_matches", 1),
         }
 
-        marker["writable"] = is_marker_writable(marker, allow_block_text_write)
+        profile = marker_write_profile(
+            marker,
+            write_mode=write_mode,
+            allow_block_text_write=allow_block_text_write,
+        )
+
+        marker["writable"] = profile["writable"]
+        marker["write_source"] = profile["write_source"]
+        marker["write_risk"] = profile["write_risk"]
+        marker["write_mode"] = profile["write_mode"]
+        marker["write_reason"] = profile["write_reason"]
+
         marker["confidence"] = marker_confidence(
             mode,
             marker["text_matches"],
@@ -1251,7 +1287,6 @@ def build_trusted_markers(
         "trusted_markers": trusted,
         "rejected_markers": rejected,
     }
-
 
 # =========================================================
 # AXIS GROUPING / FAMILY INFERENCE
@@ -1698,6 +1733,7 @@ def get_region_sync_plan(
     allow_block_text_write,
     expected_reference_marker_count=None,
     max_region_marker_ratio=1.5,
+    write_mode=None,
 ):
     numeric_groups, alpha_groups = get_family_groups(
         region,
@@ -1740,7 +1776,7 @@ def get_region_sync_plan(
 
     non_writable_markers = [
         m for m in region["markers"]
-        if not is_marker_writable(m, allow_block_text_write)
+        if not is_marker_writable(m, allow_block_text_write, write_mode=write_mode)
     ]
 
     if non_writable_markers:
@@ -1764,6 +1800,7 @@ def build_region_report(
     allow_block_text_write,
     expected_reference_marker_count=None,
     max_region_marker_ratio=1.5,
+    write_mode=None,
 ):
     rows = []
 
@@ -1783,10 +1820,24 @@ def build_region_report(
             allow_block_text_write,
             expected_reference_marker_count=expected_reference_marker_count,
             max_region_marker_ratio=max_region_marker_ratio,
+            write_mode=write_mode,
         )
 
-        writable = len([m for m in r["markers"] if is_marker_writable(m, allow_block_text_write)])
+        writable = len([
+            m for m in r["markers"]
+            if is_marker_writable(m, allow_block_text_write, write_mode=write_mode)
+        ])
         non_writable = len(r["markers"]) - writable
+
+        risk_counts = {}
+        for m in r["markers"]:
+            prof = marker_write_profile(
+                m,
+                write_mode=write_mode,
+                allow_block_text_write=allow_block_text_write,
+            )
+            risk = prof.get("write_risk", "unknown")
+            risk_counts[risk] = risk_counts.get(risk, 0) + 1
 
         min_conf = min([m.get("confidence", 0) for m in r["markers"]]) if r["markers"] else 0
         avg_conf = round(
@@ -1815,6 +1866,10 @@ def build_region_report(
             "interior_markers_ignored": r.get("interior_marker_count", 0),
             "writable_markers": writable,
             "non_writable_markers": non_writable,
+            "low_risk_writes": risk_counts.get("low", 0),
+            "medium_risk_writes": risk_counts.get("medium", 0),
+            "high_risk_writes": risk_counts.get("high", 0),
+            "blocked_writes": risk_counts.get("blocked", 0),
             "numeric_axes_found": len(num),
             "numeric_axes_expected": expected_numeric,
             "alpha_axes_found": len(alp),
@@ -1844,6 +1899,7 @@ def build_preview_for_region(region, source_numeric, source_alpha, numeric_group
             "target_writable_markers": t["writable_marker_count"],
             "target_avg_confidence": t["avg_confidence"],
             "target_mixed_labels": ", ".join(t.get("mixed_labels", [])),
+            "write_risks": ", ".join(sorted(set(m.get("write_risk", "") for m in t.get("markers", [])))),
         })
 
     for i, (s, t) in enumerate(zip(source_alpha, alpha_groups), start=1):
@@ -1858,12 +1914,13 @@ def build_preview_for_region(region, source_numeric, source_alpha, numeric_group
             "target_writable_markers": t["writable_marker_count"],
             "target_avg_confidence": t["avg_confidence"],
             "target_mixed_labels": ", ".join(t.get("mixed_labels", [])),
+            "write_risks": ", ".join(sorted(set(m.get("write_risk", "") for m in t.get("markers", [])))),
         })
 
     return rows
 
 
-def apply_group_labels(source_groups, target_groups, allow_block_text_write=False):
+def apply_group_labels(source_groups, target_groups, allow_block_text_write=False, write_mode=None):
     changed = 0
     skipped = 0
     audit = []
@@ -1871,15 +1928,20 @@ def apply_group_labels(source_groups, target_groups, allow_block_text_write=Fals
     if len(source_groups) != len(target_groups):
         return 0, len(target_groups), [{
             "region_axis_position": "",
+            "axis_position": "",
             "old_label": "",
             "new_label": "",
             "changed": False,
             "skipped": True,
+            "approved_by_user": True,
             "reason": f"Group count mismatch. Source={len(source_groups)}, Target={len(target_groups)}. No partial sync applied.",
             "text_source": "",
+            "write_source": "",
+            "write_risk": "",
             "detection_mode": "",
             "confidence": "",
             "entity_handle": "",
+            "layer": "",
         }]
 
     for i, (s, t) in enumerate(zip(source_groups, target_groups), start=1):
@@ -1888,22 +1950,40 @@ def apply_group_labels(source_groups, target_groups, allow_block_text_write=Fals
         for marker in t["markers"]:
             entity = marker["text_entity"]
             old = get_text_value(entity)
-            writable = is_marker_writable(marker, allow_block_text_write)
+
+            profile = marker_write_profile(
+                marker,
+                write_mode=write_mode,
+                allow_block_text_write=allow_block_text_write,
+            )
+            writable = profile["writable"]
+
+            base = {
+                "region_axis_position": i,
+                "axis_position": i,
+                "axis_position_coord": t.get("coord", ""),
+                "old_label": old,
+                "new_label": new_label,
+                "approved_by_user": True,
+                "text_source": marker.get("text_source"),
+                "write_source": profile.get("write_source", ""),
+                "write_risk": profile.get("write_risk", ""),
+                "write_reason": profile.get("write_reason", ""),
+                "detection_mode": marker.get("detection_mode"),
+                "confidence": marker.get("confidence"),
+                "entity_handle": marker_entity_handle(marker),
+                "layer": marker_layer(marker),
+            }
 
             if not writable:
                 skipped += 1
-                audit.append({
-                    "region_axis_position": i,
-                    "old_label": old,
-                    "new_label": new_label,
+                row = dict(base)
+                row.update({
                     "changed": False,
                     "skipped": True,
                     "reason": f"Not writable source={marker.get('text_source')}",
-                    "text_source": marker.get("text_source"),
-                    "detection_mode": marker.get("detection_mode"),
-                    "confidence": marker.get("confidence"),
-                    "entity_handle": marker.get("text_handle", get_entity_handle(entity)),
                 })
+                audit.append(row)
                 continue
 
             if old != new_label:
@@ -1912,32 +1992,22 @@ def apply_group_labels(source_groups, target_groups, allow_block_text_write=Fals
                 if ok:
                     changed += 1
 
-                audit.append({
-                    "region_axis_position": i,
-                    "old_label": old,
-                    "new_label": new_label,
+                row = dict(base)
+                row.update({
                     "changed": ok,
                     "skipped": False,
                     "reason": "updated" if ok else "write_failed",
-                    "text_source": marker.get("text_source"),
-                    "detection_mode": marker.get("detection_mode"),
-                    "confidence": marker.get("confidence"),
-                    "entity_handle": marker.get("text_handle", get_entity_handle(entity)),
                 })
+                audit.append(row)
 
             else:
-                audit.append({
-                    "region_axis_position": i,
-                    "old_label": old,
-                    "new_label": new_label,
+                row = dict(base)
+                row.update({
                     "changed": False,
                     "skipped": False,
                     "reason": "already_matches",
-                    "text_source": marker.get("text_source"),
-                    "detection_mode": marker.get("detection_mode"),
-                    "confidence": marker.get("confidence"),
-                    "entity_handle": marker.get("text_handle", get_entity_handle(entity)),
                 })
+                audit.append(row)
 
     return changed, skipped, audit
 
@@ -2188,6 +2258,7 @@ def build_endpoint_recovery_plan(
     axis_snap_tolerance=250.0,
     strict_source_labels=True,
     allow_virtual_axis_recovery=False,
+    write_mode=None,
 ):
     blockers = []
     warnings = []
@@ -2300,7 +2371,13 @@ def build_endpoint_recovery_plan(
                 if not allow_virtual_axis_recovery and detection_mode == "same_label_virtual_axis":
                     continue
 
-                if not is_marker_writable(marker, allow_block_text_write):
+                profile = marker_write_profile(
+                    marker,
+                    write_mode=write_mode,
+                    allow_block_text_write=allow_block_text_write,
+                )
+
+                if not profile.get("writable"):
                     continue
 
                 if not marker_radius_ok(marker, min_radius, max_radius):
@@ -2341,6 +2418,7 @@ def build_endpoint_recovery_plan(
                     "marker": marker,
                     "detection_mode": detection_mode,
                     "confidence": confidence,
+                    "write_profile": profile,
                 })
 
             selected = []
@@ -2374,7 +2452,7 @@ def build_endpoint_recovery_plan(
                 marker = best["marker"]
                 entity = marker["text_entity"]
 
-                handle = marker.get("text_handle", get_entity_handle(entity))
+                handle = marker_entity_handle(marker)
                 handle_key = handle or f"entity_{id(entity)}"
 
                 if handle_key in seen_handles:
@@ -2383,26 +2461,43 @@ def build_endpoint_recovery_plan(
                 seen_handles.add(handle_key)
 
                 old_label = get_text_value(entity)
+                endpoint_name = "A" if endpoint_index == 0 else "B"
+                approval_id = f"{region['name']}|{family_name}|{pos}|{endpoint_name}|{handle_key}"
+
+                profile = best.get("write_profile") or marker_write_profile(
+                    marker,
+                    write_mode=write_mode,
+                    allow_block_text_write=allow_block_text_write,
+                )
 
                 plan_rows.append({
+                    "approval_id": approval_id,
                     "region": region["name"],
+                    "sync_mode": "endpoint_recovery",
                     "family": family_name,
                     "axis_position": pos,
+                    "region_axis_position": pos,
                     "source_label": new_label,
                     "old_label": old_label,
                     "new_label": new_label,
-                    "endpoint": "A" if endpoint_index == 0 else "B",
+                    "endpoint": endpoint_name,
                     "distance_to_endpoint": round(best["endpoint_distance"], 3),
                     "axis_distance": round(best["axis_distance"], 3),
                     "axis_coord": coord,
                     "grid_frame_source": frame.get("source", ""),
                     "source_median_radius": source_median_radius,
                     "text_handle": handle,
+                    "entity_handle": handle,
                     "text_source": marker.get("text_source"),
+                    "write_source": profile.get("write_source", ""),
+                    "write_risk": profile.get("write_risk", ""),
+                    "write_reason": profile.get("write_reason", ""),
+                    "text_type": marker.get("text_type", ""),
+                    "layer": marker_layer(marker),
                     "detection_mode": marker.get("detection_mode"),
                     "confidence": marker.get("confidence"),
                     "recovery_score": round(best["score"], 3),
-                    "writable": True,
+                    "writable": profile.get("writable", False),
                     "entity": entity,
                     "marker": marker,
                 })
@@ -2423,6 +2518,8 @@ def recovery_preview_rows(plan_rows):
 
     for r in plan_rows:
         rows.append({
+            "apply": True,
+            "approval_id": r.get("approval_id", ""),
             "region": r["region"],
             "family": r["family"],
             "axis_position": r["axis_position"],
@@ -2437,6 +2534,10 @@ def recovery_preview_rows(plan_rows):
             "detection_mode": r.get("detection_mode", ""),
             "text_handle": r["text_handle"],
             "text_source": r["text_source"],
+            "write_source": r.get("write_source", ""),
+            "write_risk": r.get("write_risk", ""),
+            "write_reason": r.get("write_reason", ""),
+            "layer": r.get("layer", ""),
             "confidence": r["confidence"],
             "writable": r["writable"],
         })
@@ -2444,7 +2545,115 @@ def recovery_preview_rows(plan_rows):
     return rows
 
 
-def apply_endpoint_recovery_plan(plan_rows):
+def editor_result_to_rows(editor_result):
+    if editor_result is None:
+        return []
+
+    if isinstance(editor_result, list):
+        return editor_result
+
+    try:
+        return editor_result.to_dict("records")
+    except Exception:
+        pass
+
+    try:
+        return list(editor_result)
+    except Exception:
+        return []
+
+
+def checkbox_truthy(value):
+    if value is True:
+        return True
+
+    if value is False or value is None:
+        return False
+
+    return str(value).strip().lower() in ("true", "1", "yes", "y", "checked")
+
+
+def approved_ids_from_editor(editor_result):
+    rows = editor_result_to_rows(editor_result)
+
+    approved = set()
+
+    for row in rows:
+        if checkbox_truthy(row.get("apply", False)):
+            approval_id = row.get("approval_id", "")
+            if approval_id:
+                approved.add(approval_id)
+
+    return approved
+
+
+def recovery_plan_apply_counts(plan_rows):
+    approved_count = len(plan_rows)
+    will_change_count = 0
+    already_match_count = 0
+    risky_count = 0
+    unwritable_count = 0
+
+    for r in plan_rows:
+        old = clean_text(r.get("old_label", ""))
+        new = clean_text(r.get("new_label", ""))
+
+        if old != new:
+            will_change_count += 1
+        else:
+            already_match_count += 1
+
+        if r.get("write_risk") == "high":
+            risky_count += 1
+
+        if not r.get("writable"):
+            unwritable_count += 1
+
+    return {
+        "approved_rows": approved_count,
+        "will_change": will_change_count,
+        "already_match": already_match_count,
+        "high_risk": risky_count,
+        "unwritable": unwritable_count,
+    }
+
+
+def build_unapproved_recovery_audit_rows(plan_rows):
+    audit = []
+
+    for r in plan_rows:
+        audit.append({
+            "region": r.get("region", ""),
+            "sync_mode": "endpoint_recovery",
+            "approved_by_user": False,
+            "family": r.get("family", ""),
+            "axis_position": r.get("axis_position", ""),
+            "region_axis_position": r.get("region_axis_position", r.get("axis_position", "")),
+            "old_label": r.get("old_label", ""),
+            "new_label": r.get("new_label", ""),
+            "changed": False,
+            "skipped": True,
+            "reason": "user_unchecked_in_manual_approval_table",
+            "endpoint": r.get("endpoint", ""),
+            "distance_to_endpoint": r.get("distance_to_endpoint", ""),
+            "axis_distance": r.get("axis_distance", ""),
+            "axis_coord": r.get("axis_coord", ""),
+            "detection_mode": r.get("detection_mode", ""),
+            "confidence": r.get("confidence", ""),
+            "recovery_score": r.get("recovery_score", ""),
+            "text_source": r.get("text_source", ""),
+            "write_source": r.get("write_source", ""),
+            "write_risk": r.get("write_risk", ""),
+            "write_reason": r.get("write_reason", ""),
+            "entity_handle": r.get("entity_handle", r.get("text_handle", "")),
+            "layer": r.get("layer", ""),
+            "writable": r.get("writable", ""),
+        })
+
+    return audit
+
+
+def apply_endpoint_recovery_plan(plan_rows, approved_by_user=True):
     changed = 0
     skipped = 0
     audit = []
@@ -2454,29 +2663,41 @@ def apply_endpoint_recovery_plan(plan_rows):
         old = get_text_value(entity)
         new = clean_text(r["new_label"])
 
+        base = {
+            "region": r.get("region", ""),
+            "sync_mode": "endpoint_recovery",
+            "approved_by_user": approved_by_user,
+            "family": r.get("family", ""),
+            "axis_position": r.get("axis_position", ""),
+            "region_axis_position": r.get("region_axis_position", r.get("axis_position", "")),
+            "old_label": old,
+            "new_label": new,
+            "endpoint": r.get("endpoint", ""),
+            "distance_to_endpoint": r.get("distance_to_endpoint", ""),
+            "axis_distance": r.get("axis_distance", ""),
+            "axis_coord": r.get("axis_coord", ""),
+            "detection_mode": r.get("detection_mode", ""),
+            "confidence": r.get("confidence", ""),
+            "recovery_score": r.get("recovery_score", ""),
+            "text_source": r.get("text_source", ""),
+            "write_source": r.get("write_source", ""),
+            "write_risk": r.get("write_risk", ""),
+            "write_reason": r.get("write_reason", ""),
+            "entity_handle": r.get("entity_handle", r.get("text_handle", "")),
+            "layer": r.get("layer", ""),
+            "writable": r.get("writable", ""),
+        }
+
         if not r.get("writable"):
             skipped += 1
 
-            audit.append({
-                "region": r["region"],
-                "family": r["family"],
-                "region_axis_position": r["axis_position"],
-                "old_label": old,
-                "new_label": new,
+            row = dict(base)
+            row.update({
                 "changed": False,
                 "skipped": True,
                 "reason": "recovery_not_writable",
-                "sync_mode": "endpoint_recovery",
-                "endpoint": r["endpoint"],
-                "distance_to_endpoint": r["distance_to_endpoint"],
-                "axis_distance": r.get("axis_distance", ""),
-                "entity_handle": r["text_handle"],
-                "text_source": r["text_source"],
-                "detection_mode": r.get("detection_mode", ""),
-                "confidence": r["confidence"],
-                "recovery_score": r.get("recovery_score", ""),
             })
-
+            audit.append(row)
             continue
 
         if old != new:
@@ -2485,46 +2706,22 @@ def apply_endpoint_recovery_plan(plan_rows):
             if ok:
                 changed += 1
 
-            audit.append({
-                "region": r["region"],
-                "family": r["family"],
-                "region_axis_position": r["axis_position"],
-                "old_label": old,
-                "new_label": new,
+            row = dict(base)
+            row.update({
                 "changed": ok,
                 "skipped": False,
                 "reason": "endpoint_recovery_updated" if ok else "endpoint_recovery_write_failed",
-                "sync_mode": "endpoint_recovery",
-                "endpoint": r["endpoint"],
-                "distance_to_endpoint": r["distance_to_endpoint"],
-                "axis_distance": r.get("axis_distance", ""),
-                "entity_handle": r["text_handle"],
-                "text_source": r["text_source"],
-                "detection_mode": r.get("detection_mode", ""),
-                "confidence": r["confidence"],
-                "recovery_score": r.get("recovery_score", ""),
             })
+            audit.append(row)
 
         else:
-            audit.append({
-                "region": r["region"],
-                "family": r["family"],
-                "region_axis_position": r["axis_position"],
-                "old_label": old,
-                "new_label": new,
+            row = dict(base)
+            row.update({
                 "changed": False,
                 "skipped": False,
                 "reason": "already_matches",
-                "sync_mode": "endpoint_recovery",
-                "endpoint": r["endpoint"],
-                "distance_to_endpoint": r["distance_to_endpoint"],
-                "axis_distance": r.get("axis_distance", ""),
-                "entity_handle": r["text_handle"],
-                "text_source": r["text_source"],
-                "detection_mode": r.get("detection_mode", ""),
-                "confidence": r["confidence"],
-                "recovery_score": r.get("recovery_score", ""),
             })
+            audit.append(row)
 
     return changed, skipped, audit
 
@@ -2657,12 +2854,23 @@ with d4:
 e1, e2, e3 = st.columns(3)
 
 with e1:
-    allow_block_text_write = st.checkbox(
-        "Advanced: allow block TEXT/MTEXT write",
-        value=False,
-        help="Use only on copied DXF files. Editing block definitions can affect repeated inserts.",
-        key="allow_block_text_write",
+    write_mode = st.selectbox(
+        "Write Mode",
+        [
+            WRITE_MODE_SAFE,
+            WRITE_MODE_ATTRIB,
+            WRITE_MODE_DANGEROUS,
+        ],
+        index=1,
+        help=(
+            "Safe mode writes only modelspace TEXT/MTEXT. "
+            "Attribute mode also writes INSERT attributes. "
+            "Dangerous mode allows block definition TEXT/MTEXT edits and may affect repeated symbols."
+        ),
+        key="write_mode_select",
     )
+
+    allow_block_text_write = write_mode == WRITE_MODE_DANGEROUS
 
 with e2:
     min_confidence_required = st.slider(
@@ -2683,6 +2891,26 @@ with e3:
         0.1,
         help="Blocks clean sync if a region still has far more markers than the reference.",
         key="max_region_marker_ratio",
+    )
+
+if write_mode == WRITE_MODE_DANGEROUS:
+    st.warning(
+        "Dangerous write mode is enabled. Block definition TEXT/MTEXT edits can affect every repeated instance of that block."
+    )
+
+with st.expander("Advanced nested block layer handling", expanded=False):
+    allow_nested_layer0_from_selected_insert = st.checkbox(
+        "Allow nested block entities on layer 0 when parent INSERT is on selected grid layer",
+        value=True,
+        help="Recommended ON. Common CAD convention: block geometry/text is drawn on layer 0 and inherits the INSERT layer.",
+        key="allow_nested_layer0_from_selected_insert",
+    )
+
+    strict_nested_block_layer_match = st.checkbox(
+        "Strict nested block layer match only",
+        value=False,
+        help="If ON, nested entities must be directly on the selected grid layer. Layer 0 inheritance is not allowed.",
+        key="strict_nested_block_layer_match",
     )
 
 f1, f2, f3 = st.columns(3)
@@ -2922,7 +3150,10 @@ if analyze:
             min_grid_length,
             text_gap,
             attach_gap,
-            allow_block_text_write,
+            allow_block_text_write=allow_block_text_write,
+            write_mode=write_mode,
+            allow_nested_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+            strict_nested_block_layer_match=strict_nested_block_layer_match,
         )
 
         struc_det = build_trusted_markers(
@@ -2933,9 +3164,11 @@ if analyze:
             min_grid_length,
             text_gap,
             attach_gap,
-            allow_block_text_write,
+            allow_block_text_write=allow_block_text_write,
+            write_mode=write_mode,
+            allow_nested_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+            strict_nested_block_layer_match=strict_nested_block_layer_match,
         )
-
         arch_trusted = [
             m for m in arch_det["trusted_markers"]
             if m.get("confidence", 0) >= min_confidence_required
@@ -3006,6 +3239,7 @@ if analyze:
             allow_block_text_write,
             expected_reference_marker_count=len(arch_trusted),
             max_region_marker_ratio=max_region_marker_ratio,
+            write_mode=write_mode,
         )
 
         preview = []
@@ -3022,6 +3256,7 @@ if analyze:
                 allow_block_text_write,
                 expected_reference_marker_count=len(arch_trusted),
                 max_region_marker_ratio=max_region_marker_ratio,
+                 write_mode=write_mode,
             )
 
             if ready:
