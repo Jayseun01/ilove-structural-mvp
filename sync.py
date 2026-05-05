@@ -1740,41 +1740,44 @@ def strict_slab_recovery_label_ok(
     source_alpha,
     numeric_extra=5,
     strict_source_labels=True,
+    allowed_old_labels=None,
 ):
     label = clean_text(label)
 
     if not label_matches_family(label, family_name):
         return False
 
-    if family_name == "numeric":
-        source_labels = source_label_set(source_numeric)
+    if is_zero_padded_detail_number(label):
+        return False
 
-        if strict_source_labels:
-            return label in source_labels
+    allowed_old_labels = {
+        clean_text(x)
+        for x in (allowed_old_labels or [])
+        if clean_text(x)
+    }
 
-        return plausible_recovery_label(
-            label,
-            family_name,
-            source_numeric,
-            source_alpha,
-            numeric_extra=numeric_extra,
-        )
+    # Important:
+    # In slab/detail recovery, strict mode should accept expected OLD TARGET labels,
+    # not only NEW SOURCE labels.
+    if strict_source_labels:
+        if allowed_old_labels:
+            return label in allowed_old_labels
 
-    if family_name == "alphabetic":
-        source_labels = source_label_set(source_alpha)
+        if family_name == "numeric":
+            return label in source_label_set(source_numeric)
 
-        if strict_source_labels:
-            return label in source_labels
+        if family_name == "alphabetic":
+            return label in source_label_set(source_alpha)
 
-        return plausible_recovery_label(
-            label,
-            family_name,
-            source_numeric,
-            source_alpha,
-            numeric_extra=numeric_extra,
-        )
+        return False
 
-    return False
+    return plausible_recovery_label(
+        label,
+        family_name,
+        source_numeric,
+        source_alpha,
+        numeric_extra=numeric_extra,
+    )
 
 
 def source_numeric_range(source_numeric, extra=5):
@@ -1795,6 +1798,11 @@ def source_numeric_range(source_numeric, extra=5):
 def plausible_recovery_label(label, family, source_numeric, source_alpha, numeric_extra=5):
     label = clean_text(label)
 
+    # Reject slab/detail labels like 01, 02, 04, 08, 09.
+    # Real grid labels are usually 1, 2, 3, 10, 1', etc., not zero-padded.
+    if is_zero_padded_detail_number(label):
+        return False
+
     if family == "numeric":
         v = numeric_label_value(label)
 
@@ -1808,6 +1816,12 @@ def plausible_recovery_label(label, family, source_numeric, source_alpha, numeri
     if family == "alphabetic":
         if not is_alpha_label(label):
             return False
+
+        # In recovery, old target alpha labels may differ from source.
+        # Example: target old A' becomes source M.
+        return bool(re.fullmatch(r"[A-Z]{1,2}'?", label))
+
+    return False
 
         source_labels = {
             clean_text(g.get("label", ""))
@@ -1963,13 +1977,40 @@ def build_endpoint_recovery_plan(
 
     seen_handles = set()
 
-    for family_name, source_groups, target_groups in families:
-        for pos, (source_group, target_group) in enumerate(zip(source_groups, target_groups), start=1):
-            new_label = clean_text(source_group.get("label", ""))
+ for family_name, source_groups, target_groups in families:
+    for pos, (source_group, target_group) in enumerate(zip(source_groups, target_groups), start=1):
+        new_label = clean_text(source_group.get("label", ""))
 
-            orientation = target_group["orientation"]
-            coord = float(target_group["coord"])
+        orientation = target_group["orientation"]
+        coord = float(target_group["coord"])
 
+        allowed_old_labels = set()
+
+        main_old_label = clean_text(target_group.get("label", ""))
+
+        if main_old_label:
+            allowed_old_labels.add(main_old_label)
+
+        for lab in target_group.get("mixed_labels", []):
+            lab = clean_text(lab)
+
+            if not lab:
+                continue
+
+            if is_zero_padded_detail_number(lab):
+                continue
+
+            if not label_matches_family(lab, family_name):
+                continue
+
+            if plausible_recovery_label(
+                lab,
+                family_name,
+                source_numeric,
+                source_alpha,
+                numeric_extra=numeric_extra,
+            ):
+                allowed_old_labels.add(lab)
             endpoints = endpoint_points_for_axis_group_using_frame(target_group, frame)
 
             endpoint_candidates = {
@@ -1981,15 +2022,16 @@ def build_endpoint_recovery_plan(
                 old_label = clean_text(marker.get("label", ""))
 
                 # 1. Label must belong to correct family and, by default, already exist in reference.
-                if not strict_slab_recovery_label_ok(
-                    old_label,
-                    family_name,
-                    source_numeric,
-                    source_alpha,
-                    numeric_extra=numeric_extra,
-                    strict_source_labels=strict_source_labels,
-                ):
-                    continue
+          if not strict_slab_recovery_label_ok(
+    old_label,
+    family_name,
+    source_numeric,
+    source_alpha,
+    numeric_extra=numeric_extra,
+    strict_source_labels=strict_source_labels,
+    allowed_old_labels=allowed_old_labels,
+):
+    continue
 
                 # 2. Marker orientation must match the axis orientation.
                 if marker.get("orientation") != orientation:
