@@ -5116,36 +5116,593 @@ if analyze:
             write_mode=write_mode,
         )
 
-            regions, seg = build_regions(
-            struc_trusted,
-            axis_tol=axis_tol,
-            expected_markers_per_region=expected_markers,
-            forced_region_count=forced_region_count,
-            min_region_markers=min_region_markers,
+        preview = []
+
+        for r in regions:
+            ready, blockers, num, alp = get_region_sync_plan(
+                r,
+                source_numeric,
+                source_alpha,
+                family["numeric_orientation"],
+                family["alpha_orientation"],
+                numeric_order,
+                alpha_order,
+                allow_block_text_write,
+                expected_reference_marker_count=len(arch_trusted),
+                max_region_marker_ratio=max_region_marker_ratio,
+                write_mode=write_mode,
+            )
+
+            if ready:
+                preview.extend(build_preview_for_region(r, source_numeric, source_alpha, num, alp))
+
+        st.session_state.arch_detection = arch_det
+        st.session_state.struc_detection = struc_det
+        st.session_state.arch_axis_groups = arch_groups
+        st.session_state.family = family
+        st.session_state.source_numeric = source_numeric
+        st.session_state.source_alpha = source_alpha
+        st.session_state.regions = regions
+        st.session_state.segmentation = seg
+        st.session_state.region_report = report
+        st.session_state.preview = preview
+        st.session_state.audit = []
+        st.session_state.changed = 0
+        st.session_state.skipped = 0
+        st.session_state.prepared = True
+
+        ready_count = len([r for r in report if r.get("ready_to_sync")])
+
+        st.success(
+            f"Analysis complete. Regions found: {len(regions)}. Ready clean-sync regions: {ready_count}."
         )
 
-        if ignore_interior_detail_bubbles:
-            regions = [
-                filter_region_perimeter_markers(
+        if arch_det["rejected_markers"]:
+            st.warning(f"Reference rejected markers: {len(arch_det['rejected_markers'])}")
+
+        if struc_det["rejected_markers"]:
+            st.warning(f"Target rejected markers: {len(struc_det['rejected_markers'])}")
+
+    except Exception as e:
+        st.error(f"Prepare failed: {e}")
+
+
+# =========================================================
+# RESULTS / CLEAN SYNC / RECOVERY
+# =========================================================
+
+if st.session_state.prepared:
+    st.markdown("---")
+    st.markdown("### 4. Detection Summary")
+
+    arch_det = st.session_state.arch_detection
+    struc_det = st.session_state.struc_detection
+    family = st.session_state.family
+
+    s1, s2 = st.columns(2)
+
+    with s1:
+        st.write("#### Reference Detection")
+        st.write({
+            "texts_on_selected_layer": len(arch_det.get("texts", [])),
+            "circles_on_selected_layer": len(arch_det.get("circles", [])),
+            "axis_lines_on_selected_layer": len(arch_det.get("lines", [])),
+            "trusted_markers_used": len(arch_det.get("trusted_markers", [])),
+            "rejected_markers": len(arch_det.get("rejected_markers", [])),
+            "numeric_orientation": family.get("numeric_orientation"),
+            "alpha_orientation": family.get("alpha_orientation"),
+            "numeric_source_labels": [g["label"] for g in st.session_state.source_numeric],
+            "alpha_source_labels": [g["label"] for g in st.session_state.source_alpha],
+            "family_counts": {
+                "vertical": family.get("vertical_counts"),
+                "horizontal": family.get("horizontal_counts"),
+            },
+        })
+
+    with s2:
+        modes = {}
+
+        for m in struc_det.get("trusted_markers", []):
+            mode = m.get("detection_mode", "unknown")
+            modes[mode] = modes.get(mode, 0) + 1
+
+        st.write("#### Target Detection")
+        st.write({
+            "texts_on_selected_layer": len(struc_det.get("texts", [])),
+            "circles_on_selected_layer": len(struc_det.get("circles", [])),
+            "axis_lines_on_selected_layer": len(struc_det.get("lines", [])),
+            "trusted_markers_used_before_filter": len(struc_det.get("trusted_markers", [])),
+            "rejected_markers": len(struc_det.get("rejected_markers", [])),
+            "regions_found": len(st.session_state.regions),
+            "detection_modes": modes,
+        })
+
+    st.markdown("### 5. Segmentation / Interior Filter")
+
+    st.caption(
+        "Clean sync uses perimeter-filtered markers. Endpoint recovery uses all detected markers "
+        "so valid slab/grid endpoint axes are not accidentally removed by the interior filter."
+    )
+
+    seg_diag_rows = build_segmentation_diagnostics_rows(
+        st.session_state.regions,
+        st.session_state.source_numeric,
+        st.session_state.source_alpha,
+        family["numeric_orientation"],
+        family["alpha_orientation"],
+        numeric_order,
+        alpha_order,
+        axis_tol,
+    )
+
+    st.dataframe(seg_diag_rows, use_container_width=True)
+
+    with st.expander("Raw segmentation settings/details", expanded=False):
+        st.write(st.session_state.segmentation)
+
+    st.markdown("### 6. Region Completeness Dashboard")
+    st.dataframe(st.session_state.region_report, use_container_width=True)
+
+    ready_regions = [
+        r["region"]
+        for r in st.session_state.region_report
+        if r.get("ready_to_sync")
+    ]
+
+    all_regions = [
+        r["region"]
+        for r in st.session_state.region_report
+    ]
+
+    selected_regions = st.multiselect(
+        "Select clean regions to sync",
+        options=all_regions,
+        default=ready_regions,
+        help="Only clean ready regions are selected by default. Slab/detail regions can be handled in Recovery Mode below.",
+        key="selected_clean_regions",
+    )
+
+    st.markdown("### 7. Clean Sync Preview")
+
+    filtered_preview = [
+        row for row in st.session_state.preview
+        if row["region"] in selected_regions
+    ]
+
+    if filtered_preview:
+        st.dataframe(filtered_preview, use_container_width=True)
+    else:
+        st.info("No clean-sync preview rows. This usually means no clean ready regions are selected.")
+
+    st.markdown("### 8. Apply Clean Sync")
+
+    region_by_name = {
+        r["name"]: r
+        for r in st.session_state.regions
+    }
+
+    blocked_selected = []
+
+    for region_name in selected_regions:
+        r = region_by_name.get(region_name)
+
+        if not r:
+            blocked_selected.append({
+                "region": region_name,
+                "reason": "Region not found in session state",
+            })
+            continue
+
+        ready, blockers, num, alp = get_region_sync_plan(
+            r,
+            st.session_state.source_numeric,
+            st.session_state.source_alpha,
+            family["numeric_orientation"],
+            family["alpha_orientation"],
+            numeric_order,
+            alpha_order,
+            allow_block_text_write,
+            expected_reference_marker_count=len(st.session_state.arch_detection.get("trusted_markers", [])),
+            max_region_marker_ratio=max_region_marker_ratio,
+            write_mode=write_mode,
+        )
+
+        if not ready:
+            blocked_selected.append({
+                "region": region_name,
+                "reason": "; ".join(blockers),
+            })
+
+    clean_confirm = False
+
+    if blocked_selected:
+        st.error(
+            "One or more selected clean-sync regions are not safe. "
+            "Unselect them or use Recovery Mode where appropriate."
+        )
+        st.dataframe(blocked_selected, use_container_width=True)
+
+    else:
+        approved_clean_count = len(filtered_preview)
+
+        st.write({
+            "selected_clean_regions": len(selected_regions),
+            "clean_preview_axis_rows": approved_clean_count,
+            "write_mode": write_mode,
+        })
+
+        clean_confirm = st.checkbox(
+            "I reviewed the clean sync preview and understand these changes will modify the DXF.",
+            value=False,
+            key="confirm_clean_sync_apply",
+        )
+
+        if st.button(
+            "✍️ Apply Clean Sync to Selected Regions",
+            key="apply_clean_sync_button",
+            disabled=not clean_confirm or not selected_regions,
+        ):
+            total_changed = 0
+            total_skipped = 0
+            audit = []
+
+            for region_name in selected_regions:
+                r = region_by_name.get(region_name)
+
+                if not r:
+                    continue
+
+                ready, blockers, num, alp = get_region_sync_plan(
                     r,
-                    axis_tol=axis_tol,
-                    band_ratio=perimeter_band_ratio,
-                    min_band=perimeter_min_band,
+                    st.session_state.source_numeric,
+                    st.session_state.source_alpha,
+                    family["numeric_orientation"],
+                    family["alpha_orientation"],
+                    numeric_order,
+                    alpha_order,
+                    allow_block_text_write,
+                    expected_reference_marker_count=len(st.session_state.arch_detection.get("trusted_markers", [])),
+                    max_region_marker_ratio=max_region_marker_ratio,
+                    write_mode=write_mode,
                 )
-                for r in regions
-            ]
 
-            seg["interior_detail_filter"] = "enabled"
-            seg["perimeter_band_ratio"] = perimeter_band_ratio
-            seg["perimeter_min_band"] = perimeter_min_band
-            seg["interior_markers_removed_by_region"] = {
-                r["name"]: r.get("interior_marker_count", 0)
-                for r in regions
-            }
-            seg["sync_marker_counts_after_filter"] = {
-                r["name"]: len(r["markers"])
-                for r in regions
-            }
+                if not ready:
+                    audit.append({
+                        "region": region_name,
+                        "family": "region",
+                        "sync_mode": "clean_sync",
+                        "approved_by_user": True,
+                        "changed": False,
+                        "skipped": True,
+                        "reason": "Region preflight failed: " + "; ".join(blockers),
+                    })
+                    continue
 
-        else:
-            seg["interior_detail_filter"] = "disabled"
+                ch1, sk1, au1 = apply_group_labels(
+                    st.session_state.source_numeric,
+                    num,
+                    allow_block_text_write=allow_block_text_write,
+                    write_mode=write_mode,
+                )
+
+                ch2, sk2, au2 = apply_group_labels(
+                    st.session_state.source_alpha,
+                    alp,
+                    allow_block_text_write=allow_block_text_write,
+                    write_mode=write_mode,
+                )
+
+                for row in au1:
+                    row["region"] = region_name
+                    row["family"] = "numeric"
+                    row["sync_mode"] = "clean_sync"
+
+                for row in au2:
+                    row["region"] = region_name
+                    row["family"] = "alphabetic"
+                    row["sync_mode"] = "clean_sync"
+
+                total_changed += ch1 + ch2
+                total_skipped += sk1 + sk2
+                audit.extend(au1 + au2)
+
+            st.session_state.changed += total_changed
+            st.session_state.skipped += total_skipped
+            st.session_state.audit.extend(audit)
+
+            if total_changed:
+                st.success(f"Clean sync complete. Changed {total_changed} text entities.")
+            else:
+                st.info("Clean sync completed. No labels needed changing.")
+
+            if total_skipped:
+                st.warning(f"Clean sync skipped {total_skipped} text entities.")
+
+    st.markdown("### 8B. Slab/Grid Endpoint Recovery Mode")
+
+    st.caption(
+        "Use this for slab/detail regions. It ignores most interior slab/detail bubbles and searches only near outer grid-frame endpoints."
+    )
+
+    recovery_candidates = [
+        row["region"]
+        for row in st.session_state.region_report
+        if not row.get("ready_to_sync")
+    ]
+
+    if recovery_candidates:
+        selected_recovery_regions = st.multiselect(
+            "Select blocked/review slab-detail regions for endpoint recovery",
+            options=recovery_candidates,
+            default=[],
+            help="Select slab/detail regions that still need grid-label sync.",
+            key="selected_recovery_regions",
+        )
+
+        recovery_preview = []
+        recovery_blocked = []
+        recovery_warnings = []
+        recovery_plan_rows_all = []
+        recovery_axis_diagnostics = []
+
+        for region_name in selected_recovery_regions:
+            r = region_by_name.get(region_name)
+
+            if not r:
+                recovery_blocked.append({
+                    "region": region_name,
+                    "reason": "Region not found",
+                })
+                continue
+
+            r_recovery = region_for_endpoint_recovery(r, axis_tol)
+
+            recovery_axis_diagnostics.extend(
+                build_recovery_axis_diagnostics(
+                    r_recovery,
+                    st.session_state.source_numeric,
+                    st.session_state.source_alpha,
+                    family["numeric_orientation"],
+                    family["alpha_orientation"],
+                    numeric_order,
+                    alpha_order,
+                )
+            )
+
+            rec_ready, rec_blockers, rec_warnings, rec_plan_rows = build_endpoint_recovery_plan(
+                r_recovery,
+                st.session_state.source_numeric,
+                st.session_state.source_alpha,
+                family["numeric_orientation"],
+                family["alpha_orientation"],
+                numeric_order,
+                alpha_order,
+                st.session_state.struc_detection.get("lines", []),
+                recovery_endpoint_radius,
+                allow_block_text_write,
+                numeric_extra=recovery_numeric_extra,
+                axis_snap_tolerance=recovery_axis_snap_tolerance,
+                strict_source_labels=recovery_strict_source_labels,
+                allow_virtual_axis_recovery=recovery_allow_virtual_axis,
+                write_mode=write_mode,
+            )
+
+            for w in rec_warnings:
+                recovery_warnings.append({
+                    "region": region_name,
+                    "warning": w,
+                })
+
+            if not rec_ready:
+                recovery_blocked.append({
+                    "region": region_name,
+                    "reason": "; ".join(rec_blockers),
+                })
+
+            if rec_plan_rows:
+                recovery_plan_rows_all.extend(rec_plan_rows)
+                recovery_preview.extend(recovery_preview_rows(rec_plan_rows))
+
+        if recovery_axis_diagnostics:
+            with st.expander("Recovery Axis Group Diagnostics", expanded=False):
+                st.dataframe(recovery_axis_diagnostics, use_container_width=True)
+
+        if recovery_blocked:
+            st.warning(
+                "Some selected recovery regions are not fully safe for endpoint recovery yet. "
+                "If the blocker says an axis-group count is missing, check Section 5 diagnostics. "
+                "If raw axes are also missing, try lowering Minimum Marker Confidence, increasing Text-in-Bubble Gap, "
+                "increasing Gridline Attach Gap, or verifying the selected layers."
+            )
+            st.dataframe(recovery_blocked, use_container_width=True)
+
+        if recovery_warnings:
+            st.info(
+                "Recovery warnings found. This is normal for slab/detail regions. "
+                "Review the preview carefully before applying."
+            )
+            st.dataframe(recovery_warnings, use_container_width=True)
+
+        approved_plan_rows = []
+        unapproved_plan_rows = []
+        invalid_plan_rows = []
+
+        if recovery_preview:
+            st.write("#### Endpoint Recovery Manual Approval Preview")
+
+            try:
+                edited_recovery_preview = st.data_editor(
+                    recovery_preview,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="endpoint_recovery_approval_editor",
+                    column_config={
+                        "apply": st.column_config.CheckboxColumn(
+                            "Apply?",
+                            help="Uncheck rows that should not be modified.",
+                            default=True,
+                        ),
+                        "new_label": st.column_config.TextColumn(
+                            "New Label",
+                            help="Editable. Change this if the proposed label is wrong.",
+                            required=True,
+                        ),
+                    },
+                    disabled=[
+                        "approval_id",
+                        "region",
+                        "family",
+                        "axis_position",
+                        "old_label",
+                        "proposed_new_label",
+                        "endpoint",
+                        "distance_to_endpoint",
+                        "axis_distance",
+                        "axis_coord",
+                        "grid_frame_source",
+                        "recovery_score",
+                        "detection_mode",
+                        "text_handle",
+                        "text_source",
+                        "write_source",
+                        "write_risk",
+                        "write_reason",
+                        "layer",
+                        "confidence",
+                        "writable",
+                    ],
+                )
+            except Exception:
+                st.warning("Editable preview table failed. Falling back to read-only preview.")
+                st.dataframe(recovery_preview, use_container_width=True)
+                edited_recovery_preview = recovery_preview
+
+            approved_plan_rows, unapproved_plan_rows, invalid_plan_rows = recovery_plan_from_editor(
+                recovery_plan_rows_all,
+                edited_recovery_preview,
+            )
+
+            if invalid_plan_rows:
+                st.error(
+                    "Some approved rows have invalid edited New Label values. "
+                    "Fix them or uncheck Apply? before syncing."
+                )
+
+                invalid_preview = []
+
+                for bad in invalid_plan_rows:
+                    invalid_preview.append({
+                        "region": bad.get("region", ""),
+                        "family": bad.get("family", ""),
+                        "axis_position": bad.get("axis_position", ""),
+                        "old_label": bad.get("old_label", ""),
+                        "proposed_new_label": bad.get("original_proposed_new_label", bad.get("new_label", "")),
+                        "edited_new_label": bad.get("user_edited_new_label", bad.get("new_label", "")),
+                        "reason": bad.get("invalid_reason", ""),
+                        "endpoint": bad.get("endpoint", ""),
+                        "text_handle": bad.get("text_handle", ""),
+                    })
+
+                st.dataframe(invalid_preview, use_container_width=True)
+
+            counts = recovery_plan_apply_counts(approved_plan_rows)
+
+            st.write("#### Endpoint Recovery Apply Summary")
+            st.write({
+                "approved_rows": counts["approved_rows"],
+                "will_change": counts["will_change"],
+                "already_match": counts["already_match"],
+                "high_risk_writes": counts["high_risk"],
+                "unwritable": counts["unwritable"],
+                "unchecked_rows": len(unapproved_plan_rows),
+                "write_mode": write_mode,
+            })
+
+            recovery_confirm = st.checkbox(
+                "I reviewed the endpoint recovery preview and understand these changes will modify the DXF.",
+                value=False,
+                key="confirm_endpoint_recovery_apply",
+            )
+
+            dangerous_confirm = True
+
+            if write_mode == WRITE_MODE_DANGEROUS:
+                dangerous_confirm = st.checkbox(
+                    "I understand block definition edits may affect repeated symbols.",
+                    value=False,
+                    key="confirm_dangerous_block_write_endpoint",
+                )
+
+            can_apply_recovery = (
+                selected_recovery_regions
+                and approved_plan_rows
+                and not recovery_blocked
+                and not invalid_plan_rows
+                and recovery_confirm
+                and dangerous_confirm
+            )
+
+            if selected_recovery_regions and recovery_plan_rows_all and not recovery_blocked:
+                if st.button(
+                    "🩹 Apply Approved Endpoint Recovery Sync",
+                    key="apply_endpoint_recovery_button",
+                    disabled=not can_apply_recovery,
+                ):
+                    ch, sk, au = apply_endpoint_recovery_plan(
+                        approved_plan_rows,
+                        approved_by_user=True,
+                    )
+
+                    skipped_audit = build_unapproved_recovery_audit_rows(unapproved_plan_rows)
+
+                    st.session_state.changed += ch
+                    st.session_state.skipped += sk + len(unapproved_plan_rows)
+                    st.session_state.audit.extend(au + skipped_audit)
+
+                    if ch:
+                        st.success(f"Endpoint recovery complete. Changed {ch} grid-label text entities.")
+                    else:
+                        st.info("Endpoint recovery completed. No labels needed changing.")
+
+                    if sk:
+                        st.warning(f"Endpoint recovery skipped {sk} text entities.")
+
+                    if unapproved_plan_rows:
+                        st.info(f"{len(unapproved_plan_rows)} rows were intentionally unchecked and skipped.")
+
+        elif selected_recovery_regions and not recovery_plan_rows_all:
+            st.info(
+                "No endpoint recovery candidates found. If the blocker says an axis-group count is missing, "
+                "check Section 5 diagnostics first. If raw axes are complete, endpoint recovery should use all detected markers. "
+                "If raw axes are also missing, try lowering Minimum Marker Confidence, increasing Text-in-Bubble Gap, "
+                "increasing Gridline Attach Gap, or checking selected layers."
+            )
+
+    else:
+        st.info("No blocked/review regions are available for recovery.")
+
+    if st.session_state.audit:
+        st.markdown("### 9. Audit Report")
+        st.dataframe(st.session_state.audit, use_container_width=True)
+
+        audit_csv = audit_to_csv_bytes(st.session_state.audit)
+
+        st.download_button(
+            "📄 Download Audit CSV",
+            data=audit_csv,
+            file_name=f"AUDIT_{st.session_state.struc_name}.csv",
+            mime="text/csv",
+            key="download_audit_csv",
+        )
+
+    st.markdown("### 10. Download")
+
+    data = write_doc_to_temp_bytes(st.session_state.struc_doc)
+
+    st.download_button(
+        "📥 Download Target DXF",
+        data=data,
+        file_name=f"RELABELED_{st.session_state.struc_name}",
+        mime="application/dxf",
+        key="download_relabelled_dxf",
+    )
