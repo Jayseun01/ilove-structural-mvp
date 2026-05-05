@@ -3637,7 +3637,27 @@ if st.session_state.prepared:
         })
 
     st.markdown("### 5. Segmentation / Interior Filter")
-    st.write(st.session_state.segmentation)
+
+    st.caption(
+        "Clean sync uses perimeter-filtered markers. Endpoint recovery uses all detected markers "
+        "so valid slab/grid endpoint axes are not accidentally removed by the interior filter."
+    )
+
+    seg_diag_rows = build_segmentation_diagnostics_rows(
+        st.session_state.regions,
+        st.session_state.source_numeric,
+        st.session_state.source_alpha,
+        family["numeric_orientation"],
+        family["alpha_orientation"],
+        numeric_order,
+        alpha_order,
+        axis_tol,
+    )
+
+    st.dataframe(seg_diag_rows, use_container_width=True)
+
+    with st.expander("Raw segmentation settings/details", expanded=False):
+        st.write(st.session_state.segmentation)
 
     st.markdown("### 6. Region Completeness Dashboard")
     st.dataframe(st.session_state.region_report, use_container_width=True)
@@ -3853,9 +3873,15 @@ if st.session_state.prepared:
                     "reason": "Region not found",
                 })
                 continue
+
+            # Important:
+            # Clean sync uses perimeter-filtered markers.
+            # Endpoint recovery should use all detected markers so valid axes are not missing.
+            r_recovery = region_for_endpoint_recovery(r, axis_tol)
+
             recovery_axis_diagnostics.extend(
                 build_recovery_axis_diagnostics(
-                    r,
+                    r_recovery,
                     st.session_state.source_numeric,
                     st.session_state.source_alpha,
                     family["numeric_orientation"],
@@ -3864,10 +3890,24 @@ if st.session_state.prepared:
                     alpha_order,
                 )
             )
+
             rec_ready, rec_blockers, rec_warnings, rec_plan_rows = build_endpoint_recovery_plan(
-                r,
+                r_recovery,
                 st.session_state.source_numeric,
                 st.session_state.source_alpha,
+                family["numeric_orientation"],
+                family["alpha_orientation"],
+                numeric_order,
+                alpha_order,
+                st.session_state.struc_detection.get("lines", []),
+                recovery_endpoint_radius,
+                allow_block_text_write,
+                numeric_extra=recovery_numeric_extra,
+                axis_snap_tolerance=recovery_axis_snap_tolerance,
+                strict_source_labels=recovery_strict_source_labels,
+                allow_virtual_axis_recovery=recovery_allow_virtual_axis,
+                write_mode=write_mode,
+            )
                 family["numeric_orientation"],
                 family["alpha_orientation"],
                 numeric_order,
