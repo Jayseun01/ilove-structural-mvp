@@ -214,7 +214,185 @@ def get_entity_handle(entity):
     except Exception:
         return ""
 
+# =========================================================
+# LAYER WHITELIST / WRITE MODE HELPERS
+# =========================================================
 
+WRITE_MODE_SAFE = "Safe mode: modelspace TEXT/MTEXT only"
+WRITE_MODE_ATTRIB = "Attribute mode: modelspace TEXT/MTEXT + INSERT attributes"
+WRITE_MODE_DANGEROUS = "Advanced/Dangerous: also edit block definition TEXT/MTEXT"
+
+
+def norm_layer_name(value):
+    return clean_text(value)
+
+
+def layer_matches(entity_layer, selected_layer):
+    return norm_layer_name(entity_layer) == norm_layer_name(selected_layer)
+
+
+def nested_entity_layer_allowed(
+    nested_layer,
+    selected_layer,
+    parent_layer=None,
+    allow_layer0_from_selected_insert=True,
+    strict_nested_block_layer_match=False,
+):
+    """
+    Selected grid layers are the whitelist.
+
+    Default behavior:
+    - Nested entity on selected layer is allowed.
+    - Nested entity on layer 0 is allowed only when parent INSERT is on selected layer.
+    - Unrelated nested layers are ignored.
+    - Strict mode requires nested entity layer to match selected layer exactly.
+    """
+    nested = norm_layer_name(nested_layer)
+    selected = norm_layer_name(selected_layer)
+    parent = norm_layer_name(parent_layer)
+
+    if strict_nested_block_layer_match:
+        return nested == selected
+
+    if nested == selected:
+        return True
+
+    if allow_layer0_from_selected_insert and nested == "0" and parent == selected:
+        return True
+
+    return False
+
+
+def attrib_layer_allowed_for_text(
+    attrib_layer,
+    selected_text_layer,
+    parent_insert_layer=None,
+    allow_layer0_from_selected_insert=True,
+    strict_nested_block_layer_match=False,
+):
+    """
+    ATTRIB rule:
+    - ATTRIB layer matches selected text layer, OR
+    - parent INSERT is on selected text layer.
+    - Optional layer 0 allowance only applies when parent INSERT is selected.
+    """
+    attrib = norm_layer_name(attrib_layer)
+    selected = norm_layer_name(selected_text_layer)
+    parent = norm_layer_name(parent_insert_layer)
+
+    if strict_nested_block_layer_match:
+        return attrib == selected
+
+    if attrib == selected:
+        return True
+
+    if parent == selected:
+        return True
+
+    if allow_layer0_from_selected_insert and attrib == "0" and parent == selected:
+        return True
+
+    return False
+
+
+def marker_write_profile(marker, write_mode=None, allow_block_text_write=False):
+    """
+    Returns write safety metadata for a detected marker.
+    Backward compatible with older allow_block_text_write bool.
+    """
+    if write_mode is None:
+        write_mode = WRITE_MODE_DANGEROUS if allow_block_text_write else WRITE_MODE_ATTRIB
+
+    src = marker.get("text_source", "")
+    typ = marker.get("text_type", "")
+
+    if src == "modelspace" and typ in ("TEXT", "MTEXT"):
+        return {
+            "writable": True,
+            "write_source": src,
+            "write_risk": "low",
+            "write_mode": write_mode,
+            "write_reason": "modelspace_text",
+        }
+
+    if src == "modelspace" and typ == "ATTRIB":
+        if write_mode in (WRITE_MODE_ATTRIB, WRITE_MODE_DANGEROUS):
+            return {
+                "writable": True,
+                "write_source": src,
+                "write_risk": "medium",
+                "write_mode": write_mode,
+                "write_reason": "modelspace_attrib",
+            }
+
+        return {
+            "writable": False,
+            "write_source": src,
+            "write_risk": "blocked",
+            "write_mode": write_mode,
+            "write_reason": "attrib_blocked_in_safe_mode",
+        }
+
+    if src == "insert_attrib":
+        if write_mode in (WRITE_MODE_ATTRIB, WRITE_MODE_DANGEROUS):
+            return {
+                "writable": True,
+                "write_source": src,
+                "write_risk": "medium",
+                "write_mode": write_mode,
+                "write_reason": "insert_attribute_instance",
+            }
+
+        return {
+            "writable": False,
+            "write_source": src,
+            "write_risk": "blocked",
+            "write_mode": write_mode,
+            "write_reason": "insert_attrib_blocked_in_safe_mode",
+        }
+
+    if src == "block_text":
+        if write_mode == WRITE_MODE_DANGEROUS or allow_block_text_write:
+            return {
+                "writable": True,
+                "write_source": src,
+                "write_risk": "high",
+                "write_mode": write_mode,
+                "write_reason": "block_definition_text",
+            }
+
+        return {
+            "writable": False,
+            "write_source": src,
+            "write_risk": "blocked",
+            "write_mode": write_mode,
+            "write_reason": "block_definition_text_blocked",
+        }
+
+    return {
+        "writable": False,
+        "write_source": src,
+        "write_risk": "blocked",
+        "write_mode": write_mode,
+        "write_reason": "unknown_text_source",
+    }
+
+
+def is_marker_writable(marker, allow_block_text_write=False, write_mode=None):
+    return marker_write_profile(
+        marker,
+        write_mode=write_mode,
+        allow_block_text_write=allow_block_text_write,
+    )["writable"]
+
+
+def marker_layer(marker):
+    return marker.get("text_layer") or marker.get("layer") or ""
+
+
+def marker_entity_handle(marker):
+    entity = marker.get("text_entity")
+    return marker.get("text_handle") or get_entity_handle(entity)
 def get_insert_transform(insert_entity):
     try:
         ins = insert_entity.dxf.insert
