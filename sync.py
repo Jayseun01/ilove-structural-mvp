@@ -2653,6 +2653,7 @@ def recovery_preview_rows(plan_rows):
             "family": r["family"],
             "axis_position": r["axis_position"],
             "old_label": r["old_label"],
+            "proposed_new_label": r["new_label"],
             "new_label": r["new_label"],
             "endpoint": r["endpoint"],
             "distance_to_endpoint": r["distance_to_endpoint"],
