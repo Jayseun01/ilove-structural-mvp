@@ -5086,6 +5086,18 @@ if analyze:
                 )
                 for r in regions
             ]
-
+              seg["interior_detail_filter"] = "enabled"
+            seg["perimeter_band_ratio"] = perimeter_band_ratio
+            seg["perimeter_min_band"] = perimeter_min_band
+            seg["interior_markers_removed_by_region"] = {
+                r["name"]: r.get("interior_marker_count", 0)
+                for r in regions
+            }
+            seg["sync_marker_counts_after_filter"] = {
+                r["name"]: len(r["markers"])
+                for r in regions
+            }
+        else:
+            seg["interior_detail_filter"] = "disabled"
             seg["interior_detail_filter"] = "enabled"
             seg["perimeter<span class="ml-2" /><span class="inline-block w-3 h-3 rounded-full bg-neutral-a12 align-middle mb-[0.1rem]" />
