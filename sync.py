@@ -3846,20 +3846,35 @@ if st.session_state.prepared:
                 st.dataframe(recovery_preview, use_container_width=True)
                 edited_recovery_preview = recovery_preview
 
-            approved_ids = approved_ids_from_editor(edited_recovery_preview)
+            approved_plan_rows, unapproved_plan_rows, invalid_plan_rows = recovery_plan_from_editor(
+                recovery_plan_rows_all,
+                edited_recovery_preview,
+            )
 
-            approved_plan_rows = [
-                row for row in recovery_plan_rows_all
-                if row.get("approval_id") in approved_ids
-            ]
+            if invalid_plan_rows:
+                st.error(
+                    "Some approved rows have invalid edited New Label values. "
+                    "Fix them or uncheck Apply? before syncing."
+                )
+                invalid_preview = []
 
-            unapproved_plan_rows = [
-                row for row in recovery_plan_rows_all
-                if row.get("approval_id") not in approved_ids
-            ]
+                for bad in invalid_plan_rows:
+                    invalid_preview.append({
+                        "region": bad.get("region", ""),
+                        "family": bad.get("family", ""),
+                        "axis_position": bad.get("axis_position", ""),
+                        "old_label": bad.get("old_label", ""),
+                        "proposed_new_label": bad.get("original_proposed_new_label", bad.get("new_label", "")),
+                        "edited_new_label": bad.get("user_edited_new_label", bad.get("new_label", "")),
+                        "reason": bad.get("invalid_reason", ""),
+                        "endpoint": bad.get("endpoint", ""),
+                        "text_handle": bad.get("text_handle", ""),
+                    })
+
+                st.dataframe(invalid_preview, use_container_width=True)
 
             counts = recovery_plan_apply_counts(approved_plan_rows)
-
+            
             st.write("#### Endpoint Recovery Apply Summary")
             st.write({
                 "approved_rows": counts["approved_rows"],
