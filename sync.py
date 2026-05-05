@@ -2411,7 +2411,7 @@ def build_endpoint_recovery_plan(
 
     candidate_markers = region.get("all_markers", region.get("markers", []))
 
-    target_numeric_groups, target_alpha_groups = get_family_groups(
+       raw_target_numeric_groups, raw_target_alpha_groups = get_family_groups(
         region,
         numeric_orientation,
         alpha_orientation,
@@ -2419,17 +2419,24 @@ def build_endpoint_recovery_plan(
         alpha_order,
     )
 
-    if len(target_numeric_groups) != len(source_numeric):
-        blockers.append(
-            f"Recovery numeric axis-group count mismatch: found {len(target_numeric_groups)}, "
-            f"expected {len(source_numeric)}."
-        )
+    target_numeric_groups, num_blockers, num_warnings = select_axis_groups_for_recovery(
+        source_numeric,
+        raw_target_numeric_groups,
+        "numeric",
+        max_extra_groups=2,
+    )
 
-    if len(target_alpha_groups) != len(source_alpha):
-        blockers.append(
-            f"Recovery alphabetic axis-group count mismatch: found {len(target_alpha_groups)}, "
-            f"expected {len(source_alpha)}."
-        )
+    target_alpha_groups, alpha_blockers, alpha_warnings = select_axis_groups_for_recovery(
+        source_alpha,
+        raw_target_alpha_groups,
+        "alphabetic",
+        max_extra_groups=2,
+    )
+
+    blockers.extend(num_blockers)
+    blockers.extend(alpha_blockers)
+    warnings.extend(num_warnings)
+    warnings.extend(alpha_warnings)
 
     if blockers:
         return False, blockers, warnings, plan_rows
@@ -2459,14 +2466,36 @@ def build_endpoint_recovery_plan(
             orientation = target_group["orientation"]
             coord = float(target_group["coord"])
 
-            allowed_old_labels = set()
+                      allowed_old_labels = set()
+
+            # Important:
+            # In slab/detail endpoint recovery, the OLD target labels may be from
+            # a different family than the NEW source labels.
+            #
+            # Example:
+            # - Old target endpoint label "10" or "72" may need to become source label "G".
+            # - Same physical axis may have different old labels at opposite ends.
+            #
+            # Therefore, if the label was already detected as part of this target
+            # axis group, allow it, regardless of numeric/alphabetic family.
+            # Still reject zero-padded detail numbers like 01, 02, 08, 09.
+            group_labels = []
 
             main_old_label = clean_text(target_group.get("label", ""))
-
             if main_old_label:
-                allowed_old_labels.add(main_old_label)
+                group_labels.append(main_old_label)
 
             for lab in target_group.get("mixed_labels", []):
+                lab = clean_text(lab)
+                if lab:
+                    group_labels.append(lab)
+
+            for lab in (target_group.get("label_counts", {}) or {}).keys():
+                lab = clean_text(lab)
+                if lab:
+                    group_labels.append(lab)
+
+            for lab in group_labels:
                 lab = clean_text(lab)
 
                 if not lab:
@@ -2475,18 +2504,10 @@ def build_endpoint_recovery_plan(
                 if is_zero_padded_detail_number(lab):
                     continue
 
-                if not label_matches_family(lab, family_name):
+                if not probable_grid_label(lab):
                     continue
 
-                if plausible_recovery_label(
-                    lab,
-                    family_name,
-                    source_numeric,
-                    source_alpha,
-                    numeric_extra=numeric_extra,
-                ):
-                    allowed_old_labels.add(lab)
-
+                allowed_old_labels.add(lab)
             endpoints = endpoint_points_for_axis_group_using_frame(target_group, frame)
 
             endpoint_candidates = {
