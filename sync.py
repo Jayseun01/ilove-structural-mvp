@@ -2346,6 +2346,19 @@ def select_axis_groups_for_recovery(
     return chosen_groups, blockers, warnings
 
 
+def build_recovery_axis_diagnostics(
+    region,
+    source_numeric,
+    source_alpha,
+    numeric_orientation,
+    alpha_orientation,
+    numeric_order,
+    alpha_order,
+):
+    ...
+    return rows
+
+
 def marker_endpoint_distance(marker, endpoints):
     p = marker["circle_center"]
 
