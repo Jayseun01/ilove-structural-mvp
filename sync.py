@@ -3753,7 +3753,6 @@ if st.session_state.prepared:
 
     with st.expander("Raw segmentation settings/details", expanded=False):
         st.write(st.session_state.segmentation)
-
     st.markdown("### 6. Region Completeness Dashboard")
     st.dataframe(st.session_state.region_report, use_container_width=True)
 
