@@ -3805,11 +3805,16 @@ if st.session_state.prepared:
                     use_container_width=True,
                     hide_index=True,
                     key="endpoint_recovery_approval_editor",
-                    column_config={
+                                       column_config={
                         "apply": st.column_config.CheckboxColumn(
                             "Apply?",
                             help="Uncheck rows that should not be modified.",
                             default=True,
+                        ),
+                        "new_label": st.column_config.TextColumn(
+                            "New Label",
+                            help="Editable. Change this if the proposed label is wrong.",
+                            required=True,
                         ),
                     },
                     disabled=[
