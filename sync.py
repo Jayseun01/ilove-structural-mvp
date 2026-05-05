@@ -4666,3 +4666,426 @@ def reset_state():
 init_state()
 
 st.markdown("### 1. Detection Settings")
+c1, c2, c3, c4 = st.columns(4)
+
+with c1:
+    axis_tol = st.slider("Axis Group Tolerance", 0.0, 500.0, 10.0, 0.5, key="axis_tol")
+
+with c2:
+    text_gap = st.slider("Text-in-Bubble Gap", 20.0, 2000.0, 180.0, 10.0, key="text_gap")
+
+with c3:
+    attach_gap = st.slider("Gridline Attach Gap", 20.0, 3000.0, 180.0, 10.0, key="attach_gap")
+
+with c4:
+    min_grid_length = st.number_input(
+        "Min Grid Line Length",
+        min_value=1.0,
+        value=1000.0,
+        step=100.0,
+        key="min_grid_length",
+    )
+
+d1, d2, d3, d4 = st.columns(4)
+
+with d1:
+    numeric_order = st.selectbox(
+        "Numeric Axis Order",
+        ["Auto", "Ascending", "Descending"],
+        index=0,
+        key="numeric_order",
+    )
+
+with d2:
+    alpha_order = st.selectbox(
+        "Alphabetic Axis Order",
+        ["Auto", "Ascending", "Descending"],
+        index=0,
+        key="alpha_order",
+    )
+
+with d3:
+    forced_region_count = st.number_input(
+        "Target Region Count Override",
+        min_value=0,
+        value=0,
+        step=1,
+        help="Use 0 for auto. If the target has 8 plans, enter 8.",
+        key="forced_region_count",
+    )
+
+with d4:
+    min_region_markers = st.number_input(
+        "Min Markers Per Region",
+        min_value=1,
+        value=4,
+        step=1,
+        key="min_region_markers",
+    )
+
+e1, e2, e3 = st.columns(3)
+
+with e1:
+    write_mode = st.selectbox(
+        "Write Mode",
+        [
+            WRITE_MODE_SAFE,
+            WRITE_MODE_ATTRIB,
+            WRITE_MODE_DANGEROUS,
+        ],
+        index=1,
+        help=(
+            "Safe mode writes only modelspace TEXT/MTEXT. "
+            "Attribute mode also writes INSERT attributes. "
+            "Dangerous mode allows block definition TEXT/MTEXT edits and may affect repeated symbols."
+        ),
+        key="write_mode_select",
+    )
+
+    allow_block_text_write = write_mode == WRITE_MODE_DANGEROUS
+
+with e2:
+    min_confidence_required = st.slider(
+        "Minimum Marker Confidence",
+        0,
+        100,
+        50,
+        5,
+        key="min_confidence_required",
+    )
+
+with e3:
+    max_region_marker_ratio = st.slider(
+        "Max Sync Marker Ratio",
+        1.0,
+        5.0,
+        1.5,
+        0.1,
+        help="Blocks clean sync if a region still has far more markers than the reference.",
+        key="max_region_marker_ratio",
+    )
+
+if write_mode == WRITE_MODE_DANGEROUS:
+    st.warning(
+        "Dangerous write mode is enabled. Block definition TEXT/MTEXT edits can affect every repeated instance of that block."
+    )
+
+with st.expander("Advanced nested block layer handling", expanded=False):
+    allow_nested_layer0_from_selected_insert = st.checkbox(
+        "Allow nested block entities on layer 0 when parent INSERT is on selected grid layer",
+        value=True,
+        help="Recommended ON. Common CAD convention: block geometry/text is drawn on layer 0 and inherits the INSERT layer.",
+        key="allow_nested_layer0_from_selected_insert",
+    )
+
+    strict_nested_block_layer_match = st.checkbox(
+        "Strict nested block layer match only",
+        value=False,
+        help="If ON, nested entities must be directly on the selected grid layer. Layer 0 inheritance is not allowed.",
+        key="strict_nested_block_layer_match",
+    )
+
+f1, f2, f3 = st.columns(3)
+
+with f1:
+    ignore_interior_detail_bubbles = st.checkbox(
+        "Ignore interior/detail bubbles for clean sync",
+        value=True,
+        help="Recommended. Clean sync keeps only perimeter markers so slab/detail bubbles are not touched.",
+        key="ignore_interior_detail_bubbles",
+    )
+
+with f2:
+    perimeter_band_ratio = st.slider(
+        "Perimeter Band Ratio",
+        0.05,
+        0.40,
+        0.18,
+        0.01,
+        help="Higher keeps more markers near the plan edge. Lower is stricter.",
+        key="perimeter_band_ratio",
+    )
+
+with f3:
+    perimeter_min_band = st.number_input(
+        "Minimum Perimeter Band",
+        min_value=100.0,
+        value=1500.0,
+        step=100.0,
+        help="Minimum drawing-unit distance from region edge to treat a bubble as perimeter.",
+        key="perimeter_min_band",
+    )
+
+st.markdown("#### Slab/Grid Endpoint Recovery Settings")
+
+r1, r2, r3 = st.columns(3)
+
+with r1:
+    recovery_endpoint_radius = st.slider(
+        "Recovery Endpoint Search Radius",
+        500.0,
+        10000.0,
+        2500.0,
+        100.0,
+        help="Search distance around actual grid-frame endpoints. Lower values reject slab/detail bubbles.",
+        key="recovery_endpoint_radius",
+    )
+
+with r2:
+    recovery_numeric_extra = st.slider(
+        "Recovery Numeric Label Extra Range",
+        0,
+        20,
+        5,
+        1,
+        help="Used only when strict source labels is OFF.",
+        key="recovery_numeric_extra",
+    )
+
+with r3:
+    recovery_axis_snap_tolerance = st.slider(
+        "Recovery Axis Snap Tolerance",
+        25.0,
+        1000.0,
+        250.0,
+        25.0,
+        help="Candidate bubble must be close to the actual grid axis.",
+        key="recovery_axis_snap_tolerance",
+    )
+
+r4, r5 = st.columns(2)
+
+with r4:
+    recovery_strict_source_labels = st.checkbox(
+        "Recovery: use detected old target labels only",
+        value=True,
+        help="Recommended ON. This uses labels already detected on target axes and rejects unrelated detail numbers.",
+        key="recovery_strict_source_labels",
+    )
+
+with r5:
+    recovery_allow_virtual_axis = st.checkbox(
+        "Recovery: allow virtual-axis markers",
+        value=False,
+        help="Recommended OFF for slab/detail regions.",
+        key="recovery_allow_virtual_axis",
+    )
+
+
+# =========================================================
+# FILE UPLOAD
+# =========================================================
+
+st.markdown("### 2. Upload Files")
+
+u1, u2 = st.columns(2)
+
+with u1:
+    arch_file = st.file_uploader("Reference DXF", type=["dxf"], key="arch_file_upload")
+
+with u2:
+    struc_file = st.file_uploader("Target DXF", type=["dxf"], key="struc_file_upload")
+
+arch_sig = uploaded_file_signature(arch_file)
+struc_sig = uploaded_file_signature(struc_file)
+
+if arch_sig != st.session_state.arch_sig or struc_sig != st.session_state.struc_sig:
+    reset_state()
+    init_state()
+    st.session_state.arch_sig = arch_sig
+    st.session_state.struc_sig = struc_sig
+
+if arch_file and struc_file:
+    if not st.session_state.docs_loaded:
+        arch_tmp = None
+        struc_tmp = None
+
+        try:
+            arch_tmp = save_uploaded_to_temp(arch_file)
+            struc_tmp = save_uploaded_to_temp(struc_file)
+
+            st.session_state.arch_doc = ezdxf.readfile(arch_tmp)
+            st.session_state.struc_doc = ezdxf.readfile(struc_tmp)
+
+            st.session_state.arch_name = arch_file.name
+            st.session_state.struc_name = struc_file.name
+            st.session_state.docs_loaded = True
+
+            st.success("DXF files loaded successfully.")
+
+        except Exception as e:
+            st.error(f"Failed to load DXF files: {e}")
+            st.stop()
+
+        finally:
+            safe_remove_file(arch_tmp)
+            safe_remove_file(struc_tmp)
+else:
+    st.info("Upload both the Reference DXF and Target DXF to continue.")
+    st.stop()
+
+
+# =========================================================
+# LAYER SETUP
+# =========================================================
+
+arch_doc = st.session_state.arch_doc
+struc_doc = st.session_state.struc_doc
+
+arch_layers = get_layer_names(arch_doc)
+struc_layers = get_layer_names(struc_doc)
+
+st.markdown("### 3. Layer Setup")
+
+arch_line_default = pick_default_layer(arch_layers, ["S-GRID", "GRID", "GRIDLINELAYER"])
+arch_text_default = pick_default_layer(arch_layers, ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"])
+arch_circle_default = pick_default_layer(arch_layers, ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"])
+
+struc_line_default = pick_default_layer(struc_layers, ["GRIDLINELAYER", "S-GRID", "GRID"])
+struc_text_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-STRS-IDEN", "S-GRID-IDEN", "GRID-ID"])
+struc_circle_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-GRID-IDEN", "GRID-ID"])
+
+la, lb, lc = st.columns(3)
+
+with la:
+    arch_line_layer = st.selectbox(
+        "Reference Grid Line Layer",
+        arch_layers,
+        index=arch_layers.index(arch_line_default) if arch_line_default in arch_layers else 0,
+        key="arch_line_layer_select",
+    )
+
+with lb:
+    arch_text_layer = st.selectbox(
+        "Reference Grid Text Layer",
+        arch_layers,
+        index=arch_layers.index(arch_text_default) if arch_text_default in arch_layers else 0,
+        key="arch_text_layer_select",
+    )
+
+with lc:
+    arch_circle_layer = st.selectbox(
+        "Reference Grid Bubble Layer",
+        arch_layers,
+        index=arch_layers.index(arch_circle_default) if arch_circle_default in arch_layers else 0,
+        key="arch_circle_layer_select",
+    )
+
+sa, sb, sc = st.columns(3)
+
+with sa:
+    struc_line_layer = st.selectbox(
+        "Target Grid Line Layer",
+        struc_layers,
+        index=struc_layers.index(struc_line_default) if struc_line_default in struc_layers else 0,
+        key="struc_line_layer_select",
+    )
+
+with sb:
+    struc_text_layer = st.selectbox(
+        "Target Grid Text Layer",
+        struc_layers,
+        index=struc_layers.index(struc_text_default) if struc_text_default in struc_layers else 0,
+        key="struc_text_layer_select",
+    )
+
+with sc:
+    struc_circle_layer = st.selectbox(
+        "Target Grid Bubble Layer",
+        struc_layers,
+        index=struc_layers.index(struc_circle_default) if struc_circle_default in struc_layers else 0,
+        key="struc_circle_layer_select",
+    )
+
+b1, b2 = st.columns(2)
+
+with b1:
+    analyze = st.button("🔎 Analyze / Prepare Sync", type="primary", key="analyze_button")
+
+with b2:
+    if st.button("🧹 Reset", key="reset_button"):
+        reset_state()
+        st.rerun()
+
+
+# =========================================================
+# ANALYZE
+# =========================================================
+
+if analyze:
+    try:
+        arch_det = build_trusted_markers(
+            arch_doc,
+            arch_line_layer,
+            arch_text_layer,
+            arch_circle_layer,
+            min_grid_length,
+            text_gap,
+            attach_gap,
+            allow_block_text_write=allow_block_text_write,
+            write_mode=write_mode,
+            allow_nested_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+            strict_nested_block_layer_match=strict_nested_block_layer_match,
+        )
+
+        struc_det = build_trusted_markers(
+            struc_doc,
+            struc_line_layer,
+            struc_text_layer,
+            struc_circle_layer,
+            min_grid_length,
+            text_gap,
+            attach_gap,
+            allow_block_text_write=allow_block_text_write,
+            write_mode=write_mode,
+            allow_nested_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+            strict_nested_block_layer_match=strict_nested_block_layer_match,
+        )
+
+        arch_trusted = [
+            m for m in arch_det["trusted_markers"]
+            if m.get("confidence", 0) >= min_confidence_required
+        ]
+
+        struc_trusted = [
+            m for m in struc_det["trusted_markers"]
+            if m.get("confidence", 0) >= min_confidence_required
+        ]
+
+        arch_det["trusted_markers"] = arch_trusted
+        struc_det["trusted_markers"] = struc_trusted
+
+        arch_groups = group_markers_by_axis(arch_trusted, tol=axis_tol)
+        family = infer_families(arch_groups)
+
+        source_numeric, source_alpha = get_family_groups(
+            arch_groups,
+            family["numeric_orientation"],
+            family["alpha_orientation"],
+            numeric_order,
+            alpha_order,
+        )
+
+        expected_markers = len(arch_trusted)
+
+        regions, seg = build_regions(
+            struc_trusted,
+            axis_tol=axis_tol,
+            expected_markers_per_region=expected_markers,
+            forced_region_count=forced_region_count,
+            min_region_markers=min_region_markers,
+        )
+
+        if ignore_interior_detail_bubbles:
+            regions = [
+                filter_region_perimeter_markers(
+                    r,
+                    axis_tol=axis_tol,
+                    band_ratio=perimeter_band_ratio,
+                    min_band=perimeter_min_band,
+                )
+                for r in regions
+            ]
+
+            seg["interior_detail_filter"] = "enabled"
+            seg["perimeter<span class="ml-2" /><span class="inline-block w-3 h-3 rounded-full bg-neutral-a12 align-middle mb-[0.1rem]" />
