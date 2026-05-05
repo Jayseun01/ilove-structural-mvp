@@ -101,11 +101,6 @@ def clean_text(value):
 
 
 def probable_grid_label(text):
-    """
-    Accepts common structural grid labels:
-    A, B, C, AA, A'
-    1, 2, 10, 1', 2A, 2A'
-    """
     text = clean_text(text)
 
     patterns = [
@@ -228,7 +223,6 @@ def get_insert_transform(insert_entity):
         rot = float(getattr(insert_entity.dxf, "rotation", 0.0) or 0.0)
 
         return float(ins.x), float(ins.y), sx, sy, rot
-
     except Exception:
         return 0.0, 0.0, 1.0, 1.0, 0.0
 
@@ -518,16 +512,7 @@ def extract_axis_lines(doc, layer_name, min_length=1000.0):
                 x1, y1, _ = e.dxf.start
                 x2, y2, _ = e.dxf.end
 
-                add_axis_segment(
-                    lines,
-                    e,
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                    e.dxf.layer,
-                    min_length,
-                )
+                add_axis_segment(lines, e, x1, y1, x2, y2, e.dxf.layer, min_length)
 
             elif e.dxftype() == "LWPOLYLINE":
                 pts = list(e.get_points())
@@ -536,16 +521,7 @@ def extract_axis_lines(doc, layer_name, min_length=1000.0):
                     x1, y1 = float(pts[i][0]), float(pts[i][1])
                     x2, y2 = float(pts[i + 1][0]), float(pts[i + 1][1])
 
-                    add_axis_segment(
-                        lines,
-                        e,
-                        x1,
-                        y1,
-                        x2,
-                        y2,
-                        e.dxf.layer,
-                        min_length,
-                    )
+                    add_axis_segment(lines, e, x1, y1, x2, y2, e.dxf.layer, min_length)
 
             elif e.dxftype() == "POLYLINE":
                 pts = [
@@ -557,16 +533,7 @@ def extract_axis_lines(doc, layer_name, min_length=1000.0):
                     x1, y1 = pts[i]
                     x2, y2 = pts[i + 1]
 
-                    add_axis_segment(
-                        lines,
-                        e,
-                        x1,
-                        y1,
-                        x2,
-                        y2,
-                        e.dxf.layer,
-                        min_length,
-                    )
+                    add_axis_segment(lines, e, x1, y1, x2, y2, e.dxf.layer, min_length)
 
         except Exception:
             continue
@@ -1086,7 +1053,10 @@ def get_family_groups(region_or_axis_groups, numeric_orientation, alpha_orientat
         "alpha",
     )
 
-    return numeric, alpha# =========================================================
+    return numeric, alpha
+
+
+# =========================================================
 # REGION SEGMENTATION / PERIMETER FILTER
 # =========================================================
 
@@ -1285,7 +1255,6 @@ def build_regions(markers, axis_tol, expected_markers_per_region=None, forced_re
                 "region_marker_counts": [r["marker_count"] for r in regions],
             }
 
-    # Empty-space fallback.
     xs = [m["circle_center"][0] for m in markers]
     ys = [m["circle_center"][1] for m in markers]
 
@@ -1332,9 +1301,7 @@ def build_regions(markers, axis_tol, expected_markers_per_region=None, forced_re
         "small_buckets_skipped": skipped,
         "region_marker_counts": [r["marker_count"] for r in regions],
     }
-
-
-# =========================================================
+    # =========================================================
 # CLEAN SYNC VALIDATION / PREVIEW / APPLY
 # =========================================================
 
@@ -1733,6 +1700,51 @@ def endpoint_points_for_axis_group_using_frame(axis_group, frame):
     ]
 
 
+def source_numeric_range(source_numeric, extra=5):
+    vals = []
+
+    for g in source_numeric:
+        v = numeric_label_value(g.get("label", ""))
+
+        if v is not None:
+            vals.append(v)
+
+    if not vals:
+        return 1, 999
+
+    return max(1, min(vals) - extra), max(vals) + extra
+
+
+def is_zero_padded_detail_number(label):
+    label = clean_text(label)
+    return bool(re.fullmatch(r"0\d{1,3}", label))
+
+
+def plausible_recovery_label(label, family, source_numeric, source_alpha, numeric_extra=5):
+    label = clean_text(label)
+
+    if is_zero_padded_detail_number(label):
+        return False
+
+    if family == "numeric":
+        v = numeric_label_value(label)
+
+        if v is None:
+            return False
+
+        lo, hi = source_numeric_range(source_numeric, extra=numeric_extra)
+
+        return lo <= v <= hi
+
+    if family == "alphabetic":
+        if not is_alpha_label(label):
+            return False
+
+        return bool(re.fullmatch(r"[A-Z]{1,2}'?", label))
+
+    return False
+
+
 def strict_slab_recovery_label_ok(
     label,
     family_name,
@@ -1756,9 +1768,6 @@ def strict_slab_recovery_label_ok(
         if clean_text(x)
     }
 
-    # Important:
-    # In slab/detail recovery, strict mode should accept expected OLD TARGET labels,
-    # not only NEW SOURCE labels.
     if strict_source_labels:
         if allowed_old_labels:
             return label in allowed_old_labels
@@ -1778,110 +1787,6 @@ def strict_slab_recovery_label_ok(
         source_alpha,
         numeric_extra=numeric_extra,
     )
-
-
-def source_numeric_range(source_numeric, extra=5):
-    vals = []
-
-    for g in source_numeric:
-        v = numeric_label_value(g.get("label", ""))
-
-        if v is not None:
-            vals.append(v)
-
-    if not vals:
-        return 1, 999
-
-    return max(1, min(vals) - extra), max(vals) + extra
-
-def is_zero_padded_detail_number(label):
-    label = clean_text(label)
-    return bool(re.fullmatch(r"0\d{1,3}", label))
-def plausible_recovery_label(label, family, source_numeric, source_alpha, numeric_extra=5):
-    label = clean_text(label)
-
-    # Reject slab/detail labels like 01, 02, 04, 08, 09.
-    # Real grid labels are usually 1, 2, 3, 10, 1', etc., not zero-padded.
-    if is_zero_padded_detail_number(label):
-        return False
-
-    if family == "numeric":
-        v = numeric_label_value(label)
-
-        if v is None:
-            return False
-
-        lo, hi = source_numeric_range(source_numeric, extra=numeric_extra)
-
-        return lo <= v <= hi
-
-    if family == "alphabetic":
-        if not is_alpha_label(label):
-            return False
-
-        # In recovery, old target alpha labels may differ from source.
-        # Example: target old A' becomes source M.
-        return bool(re.fullmatch(r"[A-Z]{1,2}'?", label))
-
-    return False
-
-
-def line_overlaps_region_bbox(line, bbox, margin=2000.0):
-    x1, y1 = line["start"]
-    x2, y2 = line["end"]
-
-    if line["orientation"] == "vertical":
-        coord = line["coord"]
-
-        if coord < bbox["min_x"] - margin or coord > bbox["max_x"] + margin:
-            return False
-
-        seg_min = min(y1, y2)
-        seg_max = max(y1, y2)
-
-        return seg_max >= bbox["min_y"] - margin and seg_min <= bbox["max_y"] + margin
-
-    if line["orientation"] == "horizontal":
-        coord = line["coord"]
-
-        if coord < bbox["min_y"] - margin or coord > bbox["max_y"] + margin:
-            return False
-
-        seg_min = min(x1, x2)
-        seg_max = max(x1, x2)
-
-        return seg_max >= bbox["min_x"] - margin and seg_min <= bbox["max_x"] + margin
-
-    return False
-
-
-def get_region_axis_lines(region, all_lines, orientation, order_mode, family, search_margin):
-    bbox = region["bbox"]
-
-    lines = [
-        ln for ln in all_lines
-        if ln.get("orientation") == orientation
-        and line_overlaps_region_bbox(ln, bbox, margin=search_margin)
-    ]
-
-    return sort_axis_lines_for_family(lines, orientation, order_mode, family)
-
-
-def endpoint_points_for_axis_line(line, bbox):
-    if line["orientation"] == "vertical":
-        x = line["coord"]
-
-        return [
-            (x, bbox["min_y"]),
-            (x, bbox["max_y"]),
-        ]
-
-    y = line["coord"]
-
-    return [
-        (bbox["min_x"], y),
-        (bbox["max_x"], y),
-    ]
 
 
 def marker_endpoint_distance(marker, endpoints):
@@ -1913,13 +1818,6 @@ def build_endpoint_recovery_plan(
     strict_source_labels=True,
     allow_virtual_axis_recovery=False,
 ):
-    """
-    Slab/detail-safe endpoint recovery.
-
-    This does not try to sync every detected marker in the region.
-    It only selects likely grid bubbles near the outer grid-frame endpoints.
-    """
-
     blockers = []
     warnings = []
     plan_rows = []
@@ -1967,40 +1865,41 @@ def build_endpoint_recovery_plan(
 
     seen_handles = set()
 
- for family_name, source_groups, target_groups in families:
-    for pos, (source_group, target_group) in enumerate(zip(source_groups, target_groups), start=1):
-        new_label = clean_text(source_group.get("label", ""))
+    for family_name, source_groups, target_groups in families:
+        for pos, (source_group, target_group) in enumerate(zip(source_groups, target_groups), start=1):
+            new_label = clean_text(source_group.get("label", ""))
 
-        orientation = target_group["orientation"]
-        coord = float(target_group["coord"])
+            orientation = target_group["orientation"]
+            coord = float(target_group["coord"])
 
-        allowed_old_labels = set()
+            allowed_old_labels = set()
 
-        main_old_label = clean_text(target_group.get("label", ""))
+            main_old_label = clean_text(target_group.get("label", ""))
 
-        if main_old_label:
-            allowed_old_labels.add(main_old_label)
+            if main_old_label:
+                allowed_old_labels.add(main_old_label)
 
-        for lab in target_group.get("mixed_labels", []):
-            lab = clean_text(lab)
+            for lab in target_group.get("mixed_labels", []):
+                lab = clean_text(lab)
 
-            if not lab:
-                continue
+                if not lab:
+                    continue
 
-            if is_zero_padded_detail_number(lab):
-                continue
+                if is_zero_padded_detail_number(lab):
+                    continue
 
-            if not label_matches_family(lab, family_name):
-                continue
+                if not label_matches_family(lab, family_name):
+                    continue
 
-            if plausible_recovery_label(
-                lab,
-                family_name,
-                source_numeric,
-                source_alpha,
-                numeric_extra=numeric_extra,
-            ):
-                allowed_old_labels.add(lab)
+                if plausible_recovery_label(
+                    lab,
+                    family_name,
+                    source_numeric,
+                    source_alpha,
+                    numeric_extra=numeric_extra,
+                ):
+                    allowed_old_labels.add(lab)
+
             endpoints = endpoint_points_for_axis_group_using_frame(target_group, frame)
 
             endpoint_candidates = {
@@ -2011,43 +1910,36 @@ def build_endpoint_recovery_plan(
             for marker in candidate_markers:
                 old_label = clean_text(marker.get("label", ""))
 
-                # 1. Label must belong to correct family and, by default, already exist in reference.
-          if not strict_slab_recovery_label_ok(
-    old_label,
-    family_name,
-    source_numeric,
-    source_alpha,
-    numeric_extra=numeric_extra,
-    strict_source_labels=strict_source_labels,
-    allowed_old_labels=allowed_old_labels,
-):
-    continue
+                if not strict_slab_recovery_label_ok(
+                    old_label,
+                    family_name,
+                    source_numeric,
+                    source_alpha,
+                    numeric_extra=numeric_extra,
+                    strict_source_labels=strict_source_labels,
+                    allowed_old_labels=allowed_old_labels,
+                ):
+                    continue
 
-                # 2. Marker orientation must match the axis orientation.
                 if marker.get("orientation") != orientation:
                     continue
 
-                # 3. Avoid weak virtual-axis markers in slab details.
                 detection_mode = marker.get("detection_mode", "")
 
                 if not allow_virtual_axis_recovery and detection_mode == "same_label_virtual_axis":
                     continue
 
-                # 4. Must be writable.
                 if not is_marker_writable(marker, allow_block_text_write):
                     continue
 
-                # 5. Bubble radius should look like reference grid bubbles.
                 if not marker_radius_ok(marker, min_radius, max_radius):
                     continue
 
-                # 6. Must sit close to the correct axis line.
                 axis_distance = axis_distance_for_marker(marker, orientation, coord)
 
                 if axis_distance > axis_snap_tolerance:
                     continue
 
-                # 7. Must sit close to one of the grid-frame endpoints.
                 endpoint_distance, endpoint_index = marker_endpoint_distance(marker, endpoints)
 
                 if endpoint_distance > endpoint_radius:
@@ -2146,8 +2038,8 @@ def build_endpoint_recovery_plan(
 
     if not plan_rows:
         blockers.append(
-            "Recovery found no safe endpoint candidates. For slab/detail regions, try increasing "
-            "Endpoint Search Radius slightly or Axis Snap Tolerance slightly. Do not disable strict mode unless necessary."
+            "Recovery found no safe endpoint candidates. Try increasing Endpoint Search Radius "
+            "or Axis Snap Tolerance slightly."
         )
 
     ready = len(blockers) == 0
@@ -2337,31 +2229,13 @@ st.markdown("### 1. Detection Settings")
 c1, c2, c3, c4 = st.columns(4)
 
 with c1:
-    axis_tol = st.slider(
-        "Axis Group Tolerance",
-        0.0,
-        500.0,
-        10.0,
-        0.5,
-    )
+    axis_tol = st.slider("Axis Group Tolerance", 0.0, 500.0, 10.0, 0.5, key="axis_tol")
 
 with c2:
-    text_gap = st.slider(
-        "Text-in-Bubble Gap",
-        20.0,
-        2000.0,
-        180.0,
-        10.0,
-    )
+    text_gap = st.slider("Text-in-Bubble Gap", 20.0, 2000.0, 180.0, 10.0, key="text_gap")
 
 with c3:
-    attach_gap = st.slider(
-        "Gridline Attach Gap",
-        20.0,
-        3000.0,
-        180.0,
-        10.0,
-    )
+    attach_gap = st.slider("Gridline Attach Gap", 20.0, 3000.0, 180.0, 10.0, key="attach_gap")
 
 with c4:
     min_grid_length = st.number_input(
@@ -2369,6 +2243,7 @@ with c4:
         min_value=1.0,
         value=1000.0,
         step=100.0,
+        key="min_grid_length",
     )
 
 d1, d2, d3, d4 = st.columns(4)
@@ -2378,6 +2253,7 @@ with d1:
         "Numeric Axis Order",
         ["Auto", "Ascending", "Descending"],
         index=0,
+        key="numeric_order",
     )
 
 with d2:
@@ -2385,6 +2261,7 @@ with d2:
         "Alphabetic Axis Order",
         ["Auto", "Ascending", "Descending"],
         index=0,
+        key="alpha_order",
     )
 
 with d3:
@@ -2394,6 +2271,7 @@ with d3:
         value=0,
         step=1,
         help="Use 0 for auto. If the target has 8 plans, enter 8.",
+        key="forced_region_count",
     )
 
 with d4:
@@ -2402,6 +2280,7 @@ with d4:
         min_value=1,
         value=4,
         step=1,
+        key="min_region_markers",
     )
 
 e1, e2, e3 = st.columns(3)
@@ -2411,6 +2290,7 @@ with e1:
         "Advanced: allow block TEXT/MTEXT write",
         value=False,
         help="Use only on copied DXF files. Editing block definitions can affect repeated inserts.",
+        key="allow_block_text_write",
     )
 
 with e2:
@@ -2420,6 +2300,7 @@ with e2:
         100,
         50,
         5,
+        key="min_confidence_required",
     )
 
 with e3:
@@ -2430,6 +2311,7 @@ with e3:
         1.5,
         0.1,
         help="Blocks clean sync if a region still has far more markers than the reference.",
+        key="max_region_marker_ratio",
     )
 
 f1, f2, f3 = st.columns(3)
@@ -2439,6 +2321,7 @@ with f1:
         "Ignore interior/detail bubbles for clean sync",
         value=True,
         help="Recommended. Clean sync keeps only perimeter markers so slab/detail bubbles are not touched.",
+        key="ignore_interior_detail_bubbles",
     )
 
 with f2:
@@ -2449,6 +2332,7 @@ with f2:
         0.18,
         0.01,
         help="Higher keeps more markers near the plan edge. Lower is stricter.",
+        key="perimeter_band_ratio",
     )
 
 with f3:
@@ -2458,6 +2342,7 @@ with f3:
         value=1500.0,
         step=100.0,
         help="Minimum drawing-unit distance from region edge to treat a bubble as perimeter.",
+        key="perimeter_min_band",
     )
 
 st.markdown("#### Slab/Grid Endpoint Recovery Settings")
@@ -2469,9 +2354,10 @@ with r1:
         "Recovery Endpoint Search Radius",
         500.0,
         10000.0,
-        1500.0,
+        2500.0,
         100.0,
         help="Search distance around actual grid-frame endpoints. Lower values reject slab/detail bubbles.",
+        key="recovery_endpoint_radius",
     )
 
 with r2:
@@ -2482,6 +2368,7 @@ with r2:
         5,
         1,
         help="Used only when strict source labels is OFF.",
+        key="recovery_numeric_extra",
     )
 
 with r3:
@@ -2489,18 +2376,20 @@ with r3:
         "Recovery Axis Snap Tolerance",
         25.0,
         1000.0,
-        200.0,
+        250.0,
         25.0,
-        help="Candidate bubble must be close to the actual grid axis. Lower is safer for slab/detail drawings.",
+        help="Candidate bubble must be close to the actual grid axis.",
+        key="recovery_axis_snap_tolerance",
     )
 
 r4, r5 = st.columns(2)
 
 with r4:
     recovery_strict_source_labels = st.checkbox(
-        "Recovery: only use labels already in reference",
+        "Recovery: use detected old target labels only",
         value=True,
-        help="Recommended ON. This rejects slab/detail numbers like 01, 02, 58, 103, 116.",
+        help="Recommended ON. This uses labels already detected on target axes and rejects unrelated detail numbers.",
+        key="recovery_strict_source_labels",
     )
 
 with r5:
@@ -2508,6 +2397,7 @@ with r5:
         "Recovery: allow virtual-axis markers",
         value=False,
         help="Recommended OFF for slab/detail regions.",
+        key="recovery_allow_virtual_axis",
     )
 
 
@@ -2520,18 +2410,10 @@ st.markdown("### 2. Upload Files")
 u1, u2 = st.columns(2)
 
 with u1:
-    arch_file = st.file_uploader(
-        "Reference DXF",
-        type=["dxf"],
-        key="arch",
-    )
+    arch_file = st.file_uploader("Reference DXF", type=["dxf"], key="arch_file_upload")
 
 with u2:
-    struc_file = st.file_uploader(
-        "Target DXF",
-        type=["dxf"],
-        key="struc",
-    )
+    struc_file = st.file_uploader("Target DXF", type=["dxf"], key="struc_file_upload")
 
 arch_sig = uploaded_file_signature(arch_file)
 struc_sig = uploaded_file_signature(struc_file)
@@ -2567,7 +2449,6 @@ if arch_file and struc_file:
         finally:
             safe_remove_file(arch_tmp)
             safe_remove_file(struc_tmp)
-
 else:
     st.info("Upload both the Reference DXF and Target DXF to continue.")
     st.stop()
@@ -2585,35 +2466,13 @@ struc_layers = get_layer_names(struc_doc)
 
 st.markdown("### 3. Layer Setup")
 
-arch_line_default = pick_default_layer(
-    arch_layers,
-    ["S-GRID", "GRID", "GRIDLINELAYER"],
-)
+arch_line_default = pick_default_layer(arch_layers, ["S-GRID", "GRID", "GRIDLINELAYER"])
+arch_text_default = pick_default_layer(arch_layers, ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"])
+arch_circle_default = pick_default_layer(arch_layers, ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"])
 
-arch_text_default = pick_default_layer(
-    arch_layers,
-    ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"],
-)
-
-arch_circle_default = pick_default_layer(
-    arch_layers,
-    ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"],
-)
-
-struc_line_default = pick_default_layer(
-    struc_layers,
-    ["GRIDLINELAYER", "S-GRID", "GRID"],
-)
-
-struc_text_default = pick_default_layer(
-    struc_layers,
-    ["DEFAULTLAYER", "S-STRS-IDEN", "S-GRID-IDEN", "GRID-ID"],
-)
-
-struc_circle_default = pick_default_layer(
-    struc_layers,
-    ["DEFAULTLAYER", "S-GRID-IDEN", "GRID-ID"],
-)
+struc_line_default = pick_default_layer(struc_layers, ["GRIDLINELAYER", "S-GRID", "GRID"])
+struc_text_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-STRS-IDEN", "S-GRID-IDEN", "GRID-ID"])
+struc_circle_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-GRID-IDEN", "GRID-ID"])
 
 la, lb, lc = st.columns(3)
 
@@ -2670,10 +2529,10 @@ with sc:
 b1, b2 = st.columns(2)
 
 with b1:
-    analyze = st.button("🔎 Analyze / Prepare Sync", type="primary")
+    analyze = st.button("🔎 Analyze / Prepare Sync", type="primary", key="analyze_button")
 
 with b2:
-    if st.button("🧹 Reset"):
+    if st.button("🧹 Reset", key="reset_button"):
         reset_state()
         st.rerun()
 
@@ -2762,7 +2621,6 @@ if analyze:
                 r["name"]: len(r["markers"])
                 for r in regions
             }
-
         else:
             seg["interior_detail_filter"] = "disabled"
 
@@ -2796,15 +2654,7 @@ if analyze:
             )
 
             if ready:
-                preview.extend(
-                    build_preview_for_region(
-                        r,
-                        source_numeric,
-                        source_alpha,
-                        num,
-                        alp,
-                    )
-                )
+                preview.extend(build_preview_for_region(r, source_numeric, source_alpha, num, alp))
 
         st.session_state.arch_detection = arch_det
         st.session_state.struc_detection = struc_det
@@ -2909,6 +2759,7 @@ if st.session_state.prepared:
         options=all_regions,
         default=ready_regions,
         help="Only clean ready regions are selected by default. Slab/detail regions can be handled in Recovery Mode below.",
+        key="selected_clean_regions",
     )
 
     st.markdown("### 7. Clean Sync Preview")
@@ -2969,7 +2820,7 @@ if st.session_state.prepared:
         st.dataframe(blocked_selected, use_container_width=True)
 
     else:
-        if st.button("✍️ Apply Clean Sync to Selected Regions"):
+        if st.button("✍️ Apply Clean Sync to Selected Regions", key="apply_clean_sync_button"):
             total_changed = 0
             total_skipped = 0
             audit = []
@@ -3059,6 +2910,7 @@ if st.session_state.prepared:
             options=recovery_candidates,
             default=[],
             help="Select slab/detail regions that still need grid-label sync.",
+            key="selected_recovery_regions",
         )
 
         recovery_preview = []
@@ -3129,7 +2981,7 @@ if st.session_state.prepared:
             st.dataframe(recovery_preview, use_container_width=True)
 
         if selected_recovery_regions and recovery_plan_rows_all and not recovery_blocked:
-            if st.button("🩹 Apply Endpoint Recovery Sync"):
+            if st.button("🩹 Apply Endpoint Recovery Sync", key="apply_endpoint_recovery_button"):
                 ch, sk, au = apply_endpoint_recovery_plan(recovery_plan_rows_all)
 
                 st.session_state.changed += ch
@@ -3164,6 +3016,7 @@ if st.session_state.prepared:
             data=audit_csv,
             file_name=f"AUDIT_{st.session_state.struc_name}.csv",
             mime="text/csv",
+            key="download_audit_csv",
         )
 
     st.markdown("### 10. Download")
@@ -3175,4 +3028,5 @@ if st.session_state.prepared:
         data=data,
         file_name=f"RELABELED_{st.session_state.struc_name}",
         mime="application/dxf",
+        key="download_relabelled_dxf",
     )
