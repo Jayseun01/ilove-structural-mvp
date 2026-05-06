@@ -20,7 +20,7 @@ st.set_page_config(
 st.title("🏗️ iLoveStructural")
 st.subheader("Tool 4: Architectural Wall Centerline Agent")
 st.caption(
-    "Upload architectural DXF → detect wall face pairs → generate accurate wall centerlines → bridge openings → clean overlaps → export structural centerlines."
+    "Upload architectural DXF → detect accurate wall centerlines → clean overlaps → suggest 225x225 columns → export structural review DXF."
 )
 
 
@@ -169,9 +169,7 @@ def make_centerline_segment(
         a/b = y range
 
     Important:
-    The center coordinate is calculated from the detected wall faces.
-    For example, for a horizontal wall:
-        center_y = (face_y_1 + face_y_2) / 2
+    The center coordinate is calculated exactly as midpoint between two wall faces.
     """
 
     if actual_thickness is None:
@@ -186,7 +184,6 @@ def make_centerline_segment(
     length = abs(float(b) - float(a))
 
     # Higher is better.
-    # Thickness error is heavily penalized.
     quality_score = (
         float(overlap_length)
         + length * 0.25
@@ -212,14 +209,6 @@ def segment_length(seg):
 
 
 def filter_short_segments(segments, min_length):
-    """
-    Remove short centerline fragments from final output.
-
-    Safe:
-    - This only affects exported DXF output.
-    - It does not change detection/healing calculations.
-    """
-
     if min_length <= 0:
         return list(segments)
 
@@ -230,14 +219,6 @@ def filter_short_segments(segments, min_length):
 
 
 def filter_segments_by_thickness(segments, allowed_thicknesses):
-    """
-    Output-only thickness filter.
-
-    Safe:
-    - Does not affect detection.
-    - Only controls what appears in the final export/clean preview.
-    """
-
     if not allowed_thicknesses:
         return []
 
@@ -280,6 +261,10 @@ def entity_handle(entity):
         return str(entity.dxf.handle)
     except Exception:
         return ""
+
+
+def point_distance(p1, p2):
+    return math.dist((float(p1[0]), float(p1[1])), (float(p2[0]), float(p2[1])))
 
 
 # =========================================================
@@ -485,8 +470,8 @@ def parse_wall_thicknesses(text):
         except Exception:
             pass
 
-    # remove duplicates but preserve order
     clean = []
+
     for v in values:
         if v not in clean:
             clean.append(v)
@@ -525,7 +510,6 @@ def detect_centerlines_from_face_pairs(
                 if face_overlap < min_overlap:
                     continue
 
-                # This is the exact geometric centerline between the two wall faces.
                 center_y = (l1["c"] + l2["c"]) / 2.0
 
                 raw_segments.append(
@@ -563,7 +547,6 @@ def detect_centerlines_from_face_pairs(
                 if face_overlap < min_overlap:
                     continue
 
-                # This is the exact geometric centerline between the two wall faces.
                 center_x = (l1["c"] + l2["c"]) / 2.0
 
                 raw_segments.append(
@@ -628,9 +611,7 @@ def group_segments_by_axis(segments, axis_tol):
 def merge_collinear_segments(segments, axis_tol, bridge_gap):
     """
     Merge same-axis segments if they overlap or have a small gap.
-
     This bridges centerlines across doors/windows/openings.
-    Metadata is preserved conservatively.
     """
 
     if not segments:
@@ -702,11 +683,7 @@ def extend_to_nearby_intersections(segments, axis_tol, extend_tol, iterations=3)
     """
     Extend horizontal/vertical centerlines to nearby intersections.
 
-    This helps line ends meet at T/L/cross junctions.
-
-    Important:
-    Extension changes endpoint lengths, not centerline axis position.
-    For pure dimensional checking, use extension mode OFF or Conservative.
+    Extension changes endpoint length, not the centerline axis position.
     """
 
     if extend_tol <= 0:
@@ -792,9 +769,6 @@ def resolve_overlapping_centerlines(
 
     This mainly fixes cases where 225 and 150 detections create overlapping
     red/green lines in the same location.
-
-    It removes a candidate when most of its length is already covered by a
-    better-priority segment on the same axis.
     """
 
     if not segments:
@@ -862,7 +836,6 @@ def resolve_overlapping_centerlines(
         else:
             kept.append(candidate)
 
-    # Sort back into drawing-friendly order.
     kept = sorted(
         kept,
         key=lambda s: (
@@ -875,6 +848,358 @@ def resolve_overlapping_centerlines(
     )
 
     return kept, removed
+
+
+# =========================================================
+# COLUMN SUGGESTION MODULE
+# =========================================================
+
+def segment_contains_axis_value(seg, value, tol):
+    return (seg["a"] - tol) <= value <= (seg["b"] + tol)
+
+
+def segment_side_lengths_at_point(seg, point_coord):
+    """
+    Returns available segment length on both sides of an intersection point.
+
+    For H segment:
+        point_coord = x
+
+    For V segment:
+        point_coord = y
+    """
+
+    left_or_down = max(0.0, float(point_coord) - float(seg["a"]))
+    right_or_up = max(0.0, float(seg["b"]) - float(point_coord))
+
+    return left_or_down, right_or_up
+
+
+def classify_column_junction(h_seg, v_seg, x, y, min_leg_length):
+    """
+    Classify intersection as:
+    - cross
+    - tee
+    - corner
+    - weak
+
+    Based on whether there is enough centerline length in each direction.
+    """
+
+    h_left, h_right = segment_side_lengths_at_point(h_seg, x)
+    v_down, v_up = segment_side_lengths_at_point(v_seg, y)
+
+    directions = {
+        "left": h_left >= min_leg_length,
+        "right": h_right >= min_leg_length,
+        "down": v_down >= min_leg_length,
+        "up": v_up >= min_leg_length,
+    }
+
+    direction_count = sum(1 for v in directions.values() if v)
+
+    if direction_count >= 4:
+        junction_type = "cross"
+    elif direction_count == 3:
+        junction_type = "tee"
+    elif direction_count == 2:
+        junction_type = "corner"
+    else:
+        junction_type = "weak"
+
+    return junction_type, direction_count, directions
+
+
+def column_candidate_score(
+    h_seg,
+    v_seg,
+    junction_type,
+    direction_count,
+):
+    """
+    Score a possible column location.
+
+    Higher score means more likely to keep after proximity filtering.
+
+    Priority:
+    - 225/225 intersection strongest
+    - 225/150 mixed next
+    - 150/150 lower
+    - cross/tee better than weak endpoint
+    - longer connected walls better
+    """
+
+    h_t = int(h_seg.get("thickness", 0))
+    v_t = int(v_seg.get("thickness", 0))
+
+    thickness_pair = tuple(sorted([h_t, v_t], reverse=True))
+
+    if h_t == 225 and v_t == 225:
+        thickness_score = 1000
+    elif h_t == 225 or v_t == 225:
+        thickness_score = 700
+    elif h_t == 150 and v_t == 150:
+        thickness_score = 300
+    else:
+        thickness_score = 100
+
+    if junction_type == "cross":
+        junction_score = 400
+    elif junction_type == "tee":
+        junction_score = 300
+    elif junction_type == "corner":
+        junction_score = 200
+    else:
+        junction_score = 50
+
+    length_score = min(segment_length(h_seg), segment_length(v_seg)) * 0.05
+    total_length_score = (segment_length(h_seg) + segment_length(v_seg)) * 0.01
+
+    thickness_error_penalty = (
+        float(h_seg.get("thickness_error", 0.0))
+        + float(v_seg.get("thickness_error", 0.0))
+    ) * 50.0
+
+    score = (
+        thickness_score
+        + junction_score
+        + direction_count * 50
+        + length_score
+        + total_length_score
+        - thickness_error_penalty
+    )
+
+    return score, thickness_pair
+
+
+def detect_column_candidates(
+    segments,
+    axis_tol,
+    column_candidate_thicknesses,
+    allow_150_150=False,
+    allow_mixed_225_150=True,
+    min_leg_length=450.0,
+):
+    """
+    Detect candidate column locations from final wall centerline intersections.
+
+    Columns are snapped to the exact intersection of a horizontal and vertical
+    wall centerline axis.
+
+    Review-only structural heuristic:
+    - Not final structural design.
+    - Engineer must review.
+    """
+
+    allowed = set(int(x) for x in column_candidate_thicknesses or [])
+
+    h_segments, v_segments = split_hv_segments(segments)
+
+    candidates = []
+
+    for h in h_segments:
+        if allowed and int(h.get("thickness", 0)) not in allowed:
+            continue
+
+        hy = h["c"]
+
+        for v in v_segments:
+            if allowed and int(v.get("thickness", 0)) not in allowed:
+                continue
+
+            vx = v["c"]
+
+            # Intersection candidate is (vx, hy).
+            if not segment_contains_axis_value(h, vx, axis_tol):
+                continue
+
+            if not segment_contains_axis_value(v, hy, axis_tol):
+                continue
+
+            h_t = int(h.get("thickness", 0))
+            v_t = int(v.get("thickness", 0))
+
+            if h_t == 150 and v_t == 150 and not allow_150_150:
+                continue
+
+            if {h_t, v_t} == {225, 150} and not allow_mixed_225_150:
+                continue
+
+            junction_type, direction_count, directions = classify_column_junction(
+                h,
+                v,
+                vx,
+                hy,
+                min_leg_length=min_leg_length,
+            )
+
+            if junction_type == "weak":
+                continue
+
+            score, thickness_pair = column_candidate_score(
+                h,
+                v,
+                junction_type,
+                direction_count,
+            )
+
+            candidates.append({
+                "x": float(vx),
+                "y": float(hy),
+                "score": float(score),
+                "junction_type": junction_type,
+                "direction_count": int(direction_count),
+                "h_thickness": h_t,
+                "v_thickness": v_t,
+                "thickness_pair": f"{thickness_pair[0]}/{thickness_pair[1]}",
+                "h_length": segment_length(h),
+                "v_length": segment_length(v),
+                "left": directions["left"],
+                "right": directions["right"],
+                "down": directions["down"],
+                "up": directions["up"],
+            })
+
+    candidates = dedupe_column_candidates(
+        candidates,
+        point_tol=axis_tol,
+    )
+
+    return candidates
+
+
+def dedupe_column_candidates(candidates, point_tol):
+    """
+    Merge duplicate candidate points.
+    Keeps highest scoring candidate within point_tol.
+    """
+
+    if not candidates:
+        return []
+
+    sorted_candidates = sorted(
+        candidates,
+        key=lambda c: c["score"],
+        reverse=True,
+    )
+
+    kept = []
+
+    for cand in sorted_candidates:
+        exists = False
+
+        for existing in kept:
+            if point_distance((cand["x"], cand["y"]), (existing["x"], existing["y"])) <= point_tol:
+                exists = True
+                break
+
+        if not exists:
+            kept.append(cand)
+
+    return sorted(
+        kept,
+        key=lambda c: (c["x"], c["y"]),
+    )
+
+
+def apply_column_proximity_filter(
+    candidates,
+    min_column_spacing,
+):
+    """
+    Keep stronger column candidates and remove weaker candidates nearby.
+
+    This is the key rule:
+    Do not place columns at every junction.
+    """
+
+    if not candidates:
+        return [], []
+
+    sorted_candidates = sorted(
+        candidates,
+        key=lambda c: c["score"],
+        reverse=True,
+    )
+
+    accepted = []
+    rejected = []
+
+    for cand in sorted_candidates:
+        too_close_to = None
+        too_close_distance = None
+
+        for acc in accepted:
+            d = point_distance(
+                (cand["x"], cand["y"]),
+                (acc["x"], acc["y"]),
+            )
+
+            if d < min_column_spacing:
+                too_close_to = acc
+                too_close_distance = d
+                break
+
+        if too_close_to is None:
+            accepted.append({
+                **cand,
+                "accepted": True,
+                "reject_reason": "",
+                "nearest_accepted_x": "",
+                "nearest_accepted_y": "",
+                "nearest_accepted_distance": "",
+            })
+        else:
+            rejected.append({
+                **cand,
+                "accepted": False,
+                "reject_reason": "too_close_to_stronger_column_candidate",
+                "nearest_accepted_x": round(too_close_to["x"], 3),
+                "nearest_accepted_y": round(too_close_to["y"], 3),
+                "nearest_accepted_distance": round(too_close_distance, 3),
+            })
+
+    accepted = sorted(
+        accepted,
+        key=lambda c: (c["x"], c["y"]),
+    )
+
+    rejected = sorted(
+        rejected,
+        key=lambda c: (c["x"], c["y"]),
+    )
+
+    return accepted, rejected
+
+
+def columns_to_dataframe(columns):
+    rows = []
+
+    for idx, c in enumerate(columns, start=1):
+        rows.append({
+            "column_id": idx,
+            "x": round(float(c["x"]), 3),
+            "y": round(float(c["y"]), 3),
+            "score": round(float(c["score"]), 3),
+            "junction_type": c.get("junction_type", ""),
+            "direction_count": c.get("direction_count", ""),
+            "h_thickness": c.get("h_thickness", ""),
+            "v_thickness": c.get("v_thickness", ""),
+            "thickness_pair": c.get("thickness_pair", ""),
+            "h_length": round(float(c.get("h_length", 0.0)), 3),
+            "v_length": round(float(c.get("v_length", 0.0)), 3),
+            "left": c.get("left", ""),
+            "right": c.get("right", ""),
+            "down": c.get("down", ""),
+            "up": c.get("up", ""),
+            "accepted": c.get("accepted", ""),
+            "reject_reason": c.get("reject_reason", ""),
+            "nearest_accepted_x": c.get("nearest_accepted_x", ""),
+            "nearest_accepted_y": c.get("nearest_accepted_y", ""),
+            "nearest_accepted_distance": c.get("nearest_accepted_distance", ""),
+        })
+
+    return pd.DataFrame(rows)
 
 
 # =========================================================
@@ -927,10 +1252,6 @@ def vertical_covers(v_segments, x, y1, y2, tol):
 def detect_rectangular_panels(segments, axis_tol, min_panel_width, min_panel_height):
     """
     Review-only rectangular panel detector.
-
-    Important:
-    This is experimental/review geometry.
-    It may create large guessed rectangles, so slab panel export is OFF by default.
     """
 
     h_segments, v_segments = split_hv_segments(segments)
@@ -1069,27 +1390,67 @@ def draw_nodes(msp, nodes, radius, layer):
         )
 
 
+def draw_column_square(msp, x, y, size, layer):
+    half = float(size) / 2.0
+
+    points = [
+        (x - half, y - half),
+        (x + half, y - half),
+        (x + half, y + half),
+        (x - half, y + half),
+        (x - half, y - half),
+    ]
+
+    msp.add_lwpolyline(
+        points,
+        close=True,
+        dxfattribs={"layer": layer},
+    )
+
+    # Small center cross for review.
+    cross = min(float(size) * 0.35, 100.0)
+
+    msp.add_line(
+        (x - cross, y),
+        (x + cross, y),
+        dxfattribs={"layer": layer},
+    )
+
+    msp.add_line(
+        (x, y - cross),
+        (x, y + cross),
+        dxfattribs={"layer": layer},
+    )
+
+
+def draw_columns(msp, columns, column_size, layer):
+    for c in columns:
+        draw_column_square(
+            msp,
+            float(c["x"]),
+            float(c["y"]),
+            float(column_size),
+            layer,
+        )
+
+
 def build_output_dxf(
     raw_segments,
     final_segments,
     panels,
     nodes,
+    columns,
+    column_size,
     draw_raw=True,
     draw_wall_centerlines=True,
     draw_panels_enabled=False,
     draw_nodes_enabled=False,
+    draw_columns_enabled=True,
     min_output_centerline_length=0,
     export_thicknesses=None,
 ):
     """
     Build exported DXF.
-
-    Clean structural mode:
-    - raw centerlines off
-    - wall centerline layers named professionally
-    - slab panels off by default
-    - junction nodes off by default
-    - short fragments filtered
     """
 
     new_doc = ezdxf.new()
@@ -1134,6 +1495,7 @@ def build_output_dxf(
 
     safe_layer(new_doc, "ILS_SLAB_PANEL_REVIEW", color=5)
     safe_layer(new_doc, "ILS_JUNCTION_NODE_REVIEW", color=2)
+    safe_layer(new_doc, f"ILS_COLUMN_{int(column_size)}X{int(column_size)}_REVIEW", color=6)
 
     if draw_raw:
         draw_segments_by_thickness(
@@ -1162,6 +1524,14 @@ def build_output_dxf(
             nodes,
             radius=50,
             layer="ILS_JUNCTION_NODE_REVIEW",
+        )
+
+    if draw_columns_enabled:
+        draw_columns(
+            new_msp,
+            columns,
+            column_size=column_size,
+            layer=f"ILS_COLUMN_{int(column_size)}X{int(column_size)}_REVIEW",
         )
 
     return new_doc
@@ -1291,6 +1661,11 @@ def centerline_accuracy_summary(raw_segments):
 st.info(
     "This MVP works best when architectural walls are drawn as LINE, LWPOLYLINE, or POLYLINE wall faces. "
     "It currently focuses on orthogonal walls: horizontal and vertical."
+)
+
+st.warning(
+    "Column suggestions are preliminary review geometry. They are not final structural design. "
+    "An engineer must review column locations, spans, loads, stability, and code requirements."
 )
 
 st.markdown("### 1. Upload Architectural DXF")
@@ -1487,13 +1862,78 @@ if not export_wall_thicknesses:
     st.stop()
 
 
+with st.expander("Column suggestion settings", expanded=True):
+    col1, col2, col3 = st.columns(3)
+
+    generate_columns = col1.checkbox(
+        "Generate column suggestions",
+        value=True,
+        help="Places preliminary review columns at selected wall centerline junctions.",
+    )
+
+    column_size = col2.number_input(
+        "Column size",
+        min_value=100.0,
+        value=225.0,
+        step=25.0,
+        help="Column square size. Default is 225x225.",
+    )
+
+    min_column_spacing = col3.number_input(
+        "Minimum column spacing",
+        min_value=0.0,
+        value=1800.0,
+        step=100.0,
+        help="Proximity rule: weaker column candidates closer than this to stronger candidates are removed.",
+    )
+
+    col4, col5, col6 = st.columns(3)
+
+    default_column_thicknesses = [225] if 225 in wall_thicknesses else wall_thicknesses
+
+    column_candidate_thicknesses = col4.multiselect(
+        "Use wall thicknesses for column candidates",
+        options=wall_thicknesses,
+        default=default_column_thicknesses,
+        help="Recommended: start with 225 only. Add 150 if you want mixed 225/150 junctions considered.",
+    )
+
+    allow_mixed_225_150 = col5.checkbox(
+        "Allow 225/150 mixed junctions",
+        value=True,
+        help="Allows columns at junctions between 225 and 150 walls if both are selected above.",
+    )
+
+    allow_150_150_columns = col6.checkbox(
+        "Allow 150/150 junctions",
+        value=False,
+        help="Usually OFF. 150/150 partition intersections can create too many columns.",
+    )
+
+    col7, col8 = st.columns(2)
+
+    min_column_leg_length = col7.number_input(
+        "Minimum connected wall leg length",
+        min_value=0.0,
+        value=450.0,
+        step=50.0,
+        help="A junction direction must have at least this much wall length to count as a real support leg.",
+    )
+
+    export_columns = col8.checkbox(
+        "Export columns",
+        value=True,
+        help="Exports accepted column suggestions as 225x225 boxes on a review layer.",
+    )
+
+
 with st.expander("Slab panel review settings", expanded=False):
     p1, p2, p3 = st.columns(3)
 
     show_panel_preview = p1.checkbox(
         "Run slab panel review detection",
         value=False,
-        help="Experimental. Keep OFF while validating wall centerlines.",
+        help="Experimental. Keep OFF while validating wall centerlines and columns.",
     )
 
     export_slab_panels = p2.checkbox(
@@ -1615,23 +2055,6 @@ with st.spinner("Cleaning overlapping duplicate centerlines..."):
         removed_overlap_segments = []
 
 
-with st.spinner("Preparing review geometry..."):
-    if show_panel_preview:
-        panels = detect_rectangular_panels(
-            final_segments,
-            axis_tol=axis_tol,
-            min_panel_width=min_panel_width,
-            min_panel_height=min_panel_height,
-        )
-    else:
-        panels = []
-
-    nodes = collect_junction_nodes(
-        final_segments,
-        axis_tol=axis_tol,
-    )
-
-
 selected_final_segments = filter_segments_by_thickness(
     final_segments,
     export_wall_thicknesses,
@@ -1646,6 +2069,44 @@ else:
     clean_export_segments = filter_short_segments(
         selected_final_segments,
         0.0,
+    )
+
+
+with st.spinner("Generating preliminary column suggestions..."):
+    if generate_columns and column_candidate_thicknesses:
+        raw_column_candidates = detect_column_candidates(
+            clean_export_segments,
+            axis_tol=axis_tol,
+            column_candidate_thicknesses=column_candidate_thicknesses,
+            allow_150_150=allow_150_150_columns,
+            allow_mixed_225_150=allow_mixed_225_150,
+            min_leg_length=min_column_leg_length,
+        )
+
+        accepted_columns, rejected_columns = apply_column_proximity_filter(
+            raw_column_candidates,
+            min_column_spacing=min_column_spacing,
+        )
+    else:
+        raw_column_candidates = []
+        accepted_columns = []
+        rejected_columns = []
+
+
+with st.spinner("Preparing review geometry..."):
+    if show_panel_preview:
+        panels = detect_rectangular_panels(
+            final_segments,
+            axis_tol=axis_tol,
+            min_panel_width=min_panel_width,
+            min_panel_height=min_panel_height,
+        )
+    else:
+        panels = []
+
+    nodes = collect_junction_nodes(
+        final_segments,
+        axis_tol=axis_tol,
     )
 
 
@@ -1670,10 +2131,17 @@ r2.metric("After intersection extension", len(extended_segments))
 r3.metric("Removed overlaps", len(removed_overlap_segments))
 r4.metric("Final export centerlines", len(clean_export_segments))
 
+c1, c2, c3 = st.columns(3)
+
+c1.metric("Raw column candidates", len(raw_column_candidates))
+c2.metric("Accepted columns", len(accepted_columns))
+c3.metric("Rejected by proximity", len(rejected_columns))
+
 st.info(
     f"Output mode: **{output_mode}**. "
     f"Extension mode: **{extension_mode}** using effective tolerance **{round(effective_extend_tol, 3)}**. "
-    f"Exporting thicknesses: **{', '.join(str(x) for x in export_wall_thicknesses)}**."
+    f"Exporting wall thicknesses: **{', '.join(str(x) for x in export_wall_thicknesses)}**. "
+    f"Column size: **{int(column_size)}x{int(column_size)}**."
 )
 
 if not raw_segments:
@@ -1684,11 +2152,13 @@ if not raw_segments:
 
 st.markdown("### 5. Preview Tables")
 
-tab1, tab2, tab3, tab4 = st.tabs(
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
     [
         "Raw Accurate Centerlines",
         "Final Clean Centerlines",
         "Removed Overlaps",
+        "Accepted Columns",
+        "Rejected Column Candidates",
         "Slab Panels Review",
     ]
 )
@@ -1743,6 +2213,41 @@ with tab3:
         )
 
 with tab4:
+    accepted_columns_df = columns_to_dataframe(accepted_columns)
+
+    if accepted_columns_df.empty:
+        st.info("No accepted columns.")
+    else:
+        st.warning(
+            "Column positions are preliminary review suggestions. "
+            "They are snapped to wall centerline intersections and filtered by proximity."
+        )
+
+        st.dataframe(accepted_columns_df, use_container_width=True)
+
+        st.download_button(
+            "📄 Download Accepted Columns CSV",
+            data=accepted_columns_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_ACCEPTED_COLUMNS_REVIEW.csv",
+            mime="text/csv",
+        )
+
+with tab5:
+    rejected_columns_df = columns_to_dataframe(rejected_columns)
+
+    if rejected_columns_df.empty:
+        st.info("No column candidates were rejected by proximity.")
+    else:
+        st.dataframe(rejected_columns_df, use_container_width=True)
+
+        st.download_button(
+            "📄 Download Rejected Column Candidates CSV",
+            data=rejected_columns_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_REJECTED_COLUMNS_PROXIMITY.csv",
+            mime="text/csv",
+        )
+
+with tab6:
     panels_df = panels_to_dataframe(panels)
 
     if panels_df.empty:
@@ -1750,7 +2255,7 @@ with tab4:
     else:
         st.warning(
             "Slab panels are review-only at this stage. "
-            "For clean structural use, export wall centerlines first."
+            "For clean structural use, export wall centerlines and column suggestions first."
         )
 
         st.dataframe(panels_df, use_container_width=True)
@@ -1763,7 +2268,7 @@ with tab4:
         )
 
 
-st.markdown("### 6. Download Structural DXF")
+st.markdown("### 6. Download Structural Review DXF")
 
 if output_mode == "Review mode":
     draw_raw_output = True
@@ -1780,10 +2285,13 @@ output_doc = build_output_dxf(
     final_segments=final_segments,
     panels=panels,
     nodes=nodes,
+    columns=accepted_columns,
+    column_size=column_size,
     draw_raw=draw_raw_output,
     draw_wall_centerlines=True,
     draw_panels_enabled=export_slab_panels,
     draw_nodes_enabled=draw_nodes_output,
+    draw_columns_enabled=export_columns,
     min_output_centerline_length=clean_length,
     export_thicknesses=export_wall_thicknesses,
 )
@@ -1793,19 +2301,19 @@ output_bytes = write_doc_to_bytes(output_doc)
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 if output_mode == "Clean structural mode":
-    output_filename = f"ILS_CLEAN_WALL_CENTERLINES_{timestamp}.dxf"
+    output_filename = f"ILS_CLEAN_WALL_CENTERLINES_COLUMNS_{timestamp}.dxf"
 else:
-    output_filename = f"ILS_REVIEW_WALL_CENTERLINES_{timestamp}.dxf"
+    output_filename = f"ILS_REVIEW_WALL_CENTERLINES_COLUMNS_{timestamp}.dxf"
 
 
 st.download_button(
-    "📥 Download Wall Centerline DXF",
+    "📥 Download Wall Centerline + Column Review DXF",
     data=output_bytes,
     file_name=output_filename,
     mime="application/dxf",
 )
 
 st.success(
-    "Analysis complete. For dimensional checking, compare the raw midpoint centerline CSV/DXF against the architectural wall faces. "
-    "For modelling, use the clean wall centerline layers."
+    "Analysis complete. The DXF contains clean wall centerlines and preliminary 225x225 column review boxes. "
+    "Open the layer ILS_COLUMN_225X225_REVIEW in AutoCAD to inspect suggested columns."
 )
