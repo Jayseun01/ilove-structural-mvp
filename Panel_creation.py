@@ -20,7 +20,7 @@ st.set_page_config(
 st.title("🏗️ iLoveStructural")
 st.subheader("Tool 4: Architectural Wall Centerline Agent")
 st.caption(
-    "Upload architectural DXF → detect wall face pairs → generate wall centerlines → bridge openings → detect slab panels."
+    "Upload architectural DXF → detect wall face pairs → generate wall centerlines → bridge openings → detect slab panels → export clean structural DXF."
 )
 
 
@@ -78,7 +78,8 @@ def get_layer_names(doc):
 
 def safe_layer(doc, name, color=7):
     try:
-        if name not in doc.layers:
+        existing = [layer.dxf.name for layer in doc.layers]
+        if name not in existing:
             doc.layers.new(name=name, dxfattribs={"color": color})
     except Exception:
         pass
@@ -87,17 +88,6 @@ def safe_layer(doc, name, color=7):
 # =========================================================
 # GEOMETRY HELPERS
 # =========================================================
-
-def point_xy(point):
-    try:
-        return float(point.x), float(point.y)
-    except Exception:
-        return float(point[0]), float(point[1])
-
-
-def distance(p1, p2):
-    return math.dist((p1[0], p1[1]), (p2[0], p2[1]))
-
 
 def is_allowed_layer(layer_name, selected_layers, use_all_layers):
     if use_all_layers:
@@ -116,9 +106,17 @@ def is_vertical_segment(x1, y1, x2, y2, ortho_tol):
 
 def make_face_line(orientation, c, a, b, layer, source_type, handle):
     """
-    Face line format:
-    H: c = y, a/b = x range
-    V: c = x, a/b = y range
+    Wall face line format.
+
+    Horizontal:
+        orientation = H
+        c = y
+        a/b = x range
+
+    Vertical:
+        orientation = V
+        c = x
+        a/b = y range
     """
 
     return {
@@ -134,9 +132,17 @@ def make_face_line(orientation, c, a, b, layer, source_type, handle):
 
 def make_centerline_segment(orientation, c, a, b, thickness):
     """
-    Centerline segment format:
-    H: c = y, a/b = x range
-    V: c = x, a/b = y range
+    Centerline segment format.
+
+    Horizontal:
+        orientation = H
+        c = y
+        a/b = x range
+
+    Vertical:
+        orientation = V
+        c = x
+        a/b = y range
     """
 
     return {
@@ -149,7 +155,25 @@ def make_centerline_segment(orientation, c, a, b, thickness):
 
 
 def segment_length(seg):
-    return abs(seg["b"] - seg["a"])
+    return abs(float(seg["b"]) - float(seg["a"]))
+
+
+def filter_short_segments(segments, min_length):
+    """
+    Remove short centerline fragments from final output.
+
+    Safe:
+    - This only affects exported DXF output.
+    - It does not change detection/healing calculations.
+    """
+
+    if min_length <= 0:
+        return list(segments)
+
+    return [
+        s for s in segments
+        if segment_length(s) >= min_length
+    ]
 
 
 def overlap_range(a1, b1, a2, b2):
@@ -158,24 +182,15 @@ def overlap_range(a1, b1, a2, b2):
     return start, end
 
 
-def overlap_length(a1, b1, a2, b2):
-    start, end = overlap_range(a1, b1, a2, b2)
-    return max(0.0, end - start)
-
-
 def copy_segment(seg):
     return {
         "orientation": seg["orientation"],
         "c": float(seg["c"]),
         "a": float(seg["a"]),
         "b": float(seg["b"]),
-        "thickness": seg["thickness"],
+        "thickness": int(seg["thickness"]),
     }
 
-
-# =========================================================
-# DXF WALL FACE EXTRACTION
-# =========================================================
 
 def entity_handle(entity):
     try:
@@ -184,15 +199,25 @@ def entity_handle(entity):
         return ""
 
 
+# =========================================================
+# DXF WALL FACE EXTRACTION
+# =========================================================
+
 def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_line_length):
     """
-    Extract horizontal and vertical LINE/LWPOLYLINE/POLYLINE segments.
+    Extract horizontal and vertical wall face segments.
 
-    This is intentionally simple and MVP-safe:
-    - LINE supported
-    - LWPOLYLINE supported
-    - POLYLINE supported
-    - arcs/curves ignored
+    Supported:
+    - LINE
+    - LWPOLYLINE
+    - POLYLINE
+
+    Ignored:
+    - arcs
+    - splines
+    - hatches
+    - solids
+    - non-orthogonal segments
     """
 
     msp = doc.modelspace()
@@ -212,6 +237,7 @@ def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_l
 
         if is_horizontal_segment(x1, y1, x2, y2, ortho_tol):
             y = (y1 + y2) / 2.0
+
             horizontal.append(
                 make_face_line(
                     orientation="H",
@@ -226,6 +252,7 @@ def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_l
 
         elif is_vertical_segment(x1, y1, x2, y2, ortho_tol):
             x = (x1 + x2) / 2.0
+
             vertical.append(
                 make_face_line(
                     orientation="V",
@@ -253,14 +280,11 @@ def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_l
                 s = e.dxf.start
                 en = e.dxf.end
 
-                x1, y1 = float(s.x), float(s.y)
-                x2, y2 = float(en.x), float(en.y)
-
                 add_segment(
-                    x1,
-                    y1,
-                    x2,
-                    y2,
+                    float(s.x),
+                    float(s.y),
+                    float(en.x),
+                    float(en.y),
                     layer=layer,
                     source_type="LINE",
                     handle=entity_handle(e),
@@ -399,7 +423,13 @@ def detect_centerlines_from_face_pairs(
                 if abs(y_dist - thickness) > thickness_tol:
                     continue
 
-                start, end = overlap_range(l1["a"], l1["b"], l2["a"], l2["b"])
+                start, end = overlap_range(
+                    l1["a"],
+                    l1["b"],
+                    l2["a"],
+                    l2["b"],
+                )
+
                 overlap = end - start
 
                 if overlap < min_overlap:
@@ -426,7 +456,13 @@ def detect_centerlines_from_face_pairs(
                 if abs(x_dist - thickness) > thickness_tol:
                     continue
 
-                start, end = overlap_range(l1["a"], l1["b"], l2["a"], l2["b"])
+                start, end = overlap_range(
+                    l1["a"],
+                    l1["b"],
+                    l2["a"],
+                    l2["b"],
+                )
+
                 overlap = end - start
 
                 if overlap < min_overlap:
@@ -491,6 +527,12 @@ def group_segments_by_axis(segments, axis_tol):
 
 
 def merge_collinear_segments(segments, axis_tol, bridge_gap):
+    """
+    Merge same-axis segments if they overlap or have a small gap.
+
+    This bridges centerlines across doors/windows/openings.
+    """
+
     if not segments:
         return []
 
@@ -548,6 +590,12 @@ def split_hv_segments(segments):
 
 
 def extend_to_nearby_intersections(segments, axis_tol, extend_tol, iterations=3):
+    """
+    Extend horizontal/vertical centerlines to nearby intersections.
+
+    This helps line ends meet at T/L/cross junctions.
+    """
+
     working = [copy_segment(s) for s in segments]
 
     for _ in range(iterations):
@@ -634,6 +682,13 @@ def vertical_covers(v_segments, x, y1, y2, tol):
 
 
 def detect_rectangular_panels(segments, axis_tol, min_panel_width, min_panel_height):
+    """
+    Simple orthogonal rectangular panel detector.
+
+    It checks adjacent X and Y centerline axes and confirms that all four
+    rectangle sides exist.
+    """
+
     h_segments, v_segments = split_hv_segments(segments)
 
     xs = cluster_values([v["c"] for v in v_segments], axis_tol)
@@ -716,6 +771,7 @@ def collect_junction_nodes(segments, axis_tol):
 def draw_segment(msp, seg, layer):
     if seg["orientation"] == "H":
         y = seg["c"]
+
         msp.add_line(
             (seg["a"], y),
             (seg["b"], y),
@@ -724,6 +780,7 @@ def draw_segment(msp, seg, layer):
 
     elif seg["orientation"] == "V":
         x = seg["c"]
+
         msp.add_line(
             (x, seg["a"]),
             (x, seg["b"]),
@@ -768,7 +825,30 @@ def draw_nodes(msp, nodes, radius, layer):
         )
 
 
-def build_output_dxf(raw_segments, healed_segments, panels, nodes, draw_raw=True):
+def build_output_dxf(
+    raw_segments,
+    healed_segments,
+    panels,
+    nodes,
+    draw_raw=True,
+    draw_healed=True,
+    draw_panels_enabled=True,
+    draw_nodes_enabled=False,
+    min_output_centerline_length=0,
+):
+    """
+    Build exported DXF.
+
+    Review mode:
+    - raw centerlines can be included
+    - junction nodes can be included
+
+    Clean structural mode:
+    - raw centerlines usually off
+    - short fragments filtered
+    - junction nodes usually off
+    """
+
     new_doc = ezdxf.new()
     new_msp = new_doc.modelspace()
 
@@ -779,6 +859,11 @@ def build_output_dxf(raw_segments, healed_segments, panels, nodes, draw_raw=True
     safe_layer(new_doc, "ILS_SLAB_PANEL", color=5)
     safe_layer(new_doc, "ILS_JUNCTION_NODE", color=2)
 
+    clean_healed_segments = filter_short_segments(
+        healed_segments,
+        min_output_centerline_length,
+    )
+
     if draw_raw:
         draw_segments_by_thickness(
             new_msp,
@@ -786,27 +871,34 @@ def build_output_dxf(raw_segments, healed_segments, panels, nodes, draw_raw=True
             prefix="ILS_RAW_CENTERLINE",
         )
 
-    draw_segments_by_thickness(
-        new_msp,
-        healed_segments,
-        prefix="ILS_HEALED_CENTERLINE",
-    )
+    if draw_healed:
+        draw_segments_by_thickness(
+            new_msp,
+            clean_healed_segments,
+            prefix="ILS_HEALED_CENTERLINE",
+        )
 
-    draw_panels(
-        new_msp,
-        panels,
-        layer="ILS_SLAB_PANEL",
-    )
+    if draw_panels_enabled:
+        draw_panels(
+            new_msp,
+            panels,
+            layer="ILS_SLAB_PANEL",
+        )
 
-    draw_nodes(
-        new_msp,
-        nodes,
-        radius=50,
-        layer="ILS_JUNCTION_NODE",
-    )
+    if draw_nodes_enabled:
+        draw_nodes(
+            new_msp,
+            nodes,
+            radius=50,
+            layer="ILS_JUNCTION_NODE",
+        )
 
     return new_doc
 
+
+# =========================================================
+# DATAFRAME HELPERS
+# =========================================================
 
 def segments_to_dataframe(segments):
     rows = []
@@ -860,7 +952,7 @@ def panels_to_dataframe(panels):
 # =========================================================
 
 st.info(
-    "This MVP works best when architectural walls are drawn as LINE or LWPOLYLINE wall faces. "
+    "This MVP works best when architectural walls are drawn as LINE, LWPOLYLINE, or POLYLINE wall faces. "
     "It currently focuses on orthogonal walls: horizontal and vertical."
 )
 
@@ -935,7 +1027,7 @@ with st.expander("Geometry tolerances", expanded=True):
         min_value=0.0,
         value=100.0,
         step=50.0,
-        help="Shorter line pieces are ignored.",
+        help="Shorter wall face line pieces are ignored.",
     )
 
     min_overlap = c5.number_input(
@@ -943,7 +1035,7 @@ with st.expander("Geometry tolerances", expanded=True):
         min_value=0.0,
         value=100.0,
         step=50.0,
-        help="Two wall faces must overlap by at least this amount.",
+        help="Two wall faces must overlap by at least this amount to form a centerline.",
     )
 
     axis_tol = c6.number_input(
@@ -972,9 +1064,38 @@ with st.expander("Geometry tolerances", expanded=True):
         help="Line ends near intersections are extended to meet.",
     )
 
-    draw_raw = c9.checkbox(
-        "Include raw centerlines in output",
+    output_mode = c9.selectbox(
+        "Output mode",
+        [
+            "Review mode",
+            "Clean structural mode",
+        ],
+        index=1,
+        help="Review mode exports debug geometry. Clean structural mode exports cleaner modelling geometry.",
+    )
+
+
+with st.expander("Output cleanup", expanded=True):
+    o1, o2, o3 = st.columns(3)
+
+    min_output_centerline_length = o1.number_input(
+        "Minimum output centerline length",
+        min_value=0.0,
+        value=750.0,
+        step=50.0,
+        help="In clean mode, healed centerlines shorter than this are not exported.",
+    )
+
+    export_slab_panels = o2.checkbox(
+        "Export slab panels",
         value=True,
+        help="Exports detected rectangular slab panels as closed polylines.",
+    )
+
+    export_junction_nodes = o3.checkbox(
+        "Export junction nodes",
+        value=False,
+        help="Usually OFF for clean structural output. Useful for review/debug.",
     )
 
 
@@ -1040,7 +1161,7 @@ e3.metric("Ignored / non-orthogonal", extracted["ignored"])
 if len(horizontal_faces) + len(vertical_faces) == 0:
     st.error(
         "No horizontal/vertical wall face lines found. "
-        "Check layer selection or confirm that the drawing uses LINE/LWPOLYLINE entities."
+        "Check layer selection or confirm that the drawing uses LINE/LWPOLYLINE/POLYLINE entities."
     )
     st.stop()
 
@@ -1053,6 +1174,7 @@ with st.spinner("Detecting raw wall centerlines from wall face pairs..."):
         thickness_tol=thickness_tol,
         min_overlap=min_overlap,
     )
+
 
 with st.spinner("Bridging openings and healing centerlines..."):
     merged_segments = merge_collinear_segments(
@@ -1074,6 +1196,7 @@ with st.spinner("Bridging openings and healing centerlines..."):
         bridge_gap=axis_tol,
     )
 
+
 with st.spinner("Detecting rectangular slab panels..."):
     panels = detect_rectangular_panels(
         healed_segments,
@@ -1088,6 +1211,18 @@ with st.spinner("Detecting rectangular slab panels..."):
     )
 
 
+if output_mode == "Clean structural mode":
+    clean_export_segments = filter_short_segments(
+        healed_segments,
+        min_output_centerline_length,
+    )
+else:
+    clean_export_segments = filter_short_segments(
+        healed_segments,
+        0.0,
+    )
+
+
 st.markdown("### 4. Result Summary")
 
 r1, r2, r3, r4 = st.columns(4)
@@ -1097,6 +1232,10 @@ r2.metric("Healed centerlines", len(healed_segments))
 r3.metric("Detected slab panels", len(panels))
 r4.metric("Junction nodes", len(nodes))
 
+st.info(
+    f"Output mode: **{output_mode}**. "
+    f"Clean export centerlines: **{len(clean_export_segments)}** out of **{len(healed_segments)}** healed centerlines."
+)
 
 if not raw_segments:
     st.warning(
@@ -1106,7 +1245,13 @@ if not raw_segments:
 
 st.markdown("### 5. Preview Tables")
 
-tab1, tab2 = st.tabs(["Healed Centerlines", "Slab Panels"])
+tab1, tab2, tab3 = st.tabs(
+    [
+        "All Healed Centerlines",
+        "Clean Export Centerlines",
+        "Slab Panels",
+    ]
+)
 
 with tab1:
     healed_df = segments_to_dataframe(healed_segments)
@@ -1117,13 +1262,28 @@ with tab1:
         st.dataframe(healed_df, use_container_width=True)
 
         st.download_button(
-            "📄 Download Healed Centerlines CSV",
+            "📄 Download All Healed Centerlines CSV",
             data=healed_df.to_csv(index=False).encode("utf-8"),
-            file_name="ILS_HEALED_CENTERLINES.csv",
+            file_name="ILS_ALL_HEALED_CENTERLINES.csv",
             mime="text/csv",
         )
 
 with tab2:
+    clean_df = segments_to_dataframe(clean_export_segments)
+
+    if clean_df.empty:
+        st.info("No clean export centerlines to preview.")
+    else:
+        st.dataframe(clean_df, use_container_width=True)
+
+        st.download_button(
+            "📄 Download Clean Export Centerlines CSV",
+            data=clean_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_CLEAN_EXPORT_CENTERLINES.csv",
+            mime="text/csv",
+        )
+
+with tab3:
     panels_df = panels_to_dataframe(panels)
 
     if panels_df.empty:
@@ -1141,23 +1301,43 @@ with tab2:
 
 st.markdown("### 6. Download Structural DXF")
 
+if output_mode == "Review mode":
+    draw_raw_output = True
+    draw_nodes_output = export_junction_nodes
+    clean_length = 0.0
+else:
+    draw_raw_output = False
+    draw_nodes_output = export_junction_nodes
+    clean_length = min_output_centerline_length
+
+
 output_doc = build_output_dxf(
     raw_segments=raw_segments,
     healed_segments=healed_segments,
     panels=panels,
     nodes=nodes,
-    draw_raw=draw_raw,
+    draw_raw=draw_raw_output,
+    draw_healed=True,
+    draw_panels_enabled=export_slab_panels,
+    draw_nodes_enabled=draw_nodes_output,
+    min_output_centerline_length=clean_length,
 )
 
 output_bytes = write_doc_to_bytes(output_doc)
 
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
+if output_mode == "Clean structural mode":
+    output_filename = f"ILS_CLEAN_STRUCTURAL_CENTERLINES_{timestamp}.dxf"
+else:
+    output_filename = f"ILS_REVIEW_CENTERLINES_{timestamp}.dxf"
+
+
 st.download_button(
     "📥 Download Centerline / Slab Panel DXF",
     data=output_bytes,
-    file_name=f"ILS_ARCH_CENTERLINES_{timestamp}.dxf",
+    file_name=output_filename,
     mime="application/dxf",
 )
 
-st.success("Analysis complete. Download the DXF above and open it in AutoCAD to inspect the generated layers.")
+st.success("Analysis complete. Download the DXF above and inspect the generated layers in AutoCAD.")
