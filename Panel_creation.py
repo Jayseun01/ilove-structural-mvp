@@ -20,7 +20,7 @@ st.set_page_config(
 st.title("🏗️ iLoveStructural")
 st.subheader("Tool 4: Architectural Wall Centerline Agent")
 st.caption(
-    "Upload architectural DXF → detect wall face pairs → generate wall centerlines → bridge openings → export clean structural centerlines."
+    "Upload architectural DXF → detect wall face pairs → generate accurate wall centerlines → bridge openings → clean overlaps → export structural centerlines."
 )
 
 
@@ -144,7 +144,17 @@ def make_face_line(orientation, c, a, b, layer, source_type, handle):
     }
 
 
-def make_centerline_segment(orientation, c, a, b, thickness):
+def make_centerline_segment(
+    orientation,
+    c,
+    a,
+    b,
+    thickness,
+    actual_thickness=None,
+    thickness_error=None,
+    overlap_length=None,
+    source_count=1,
+):
     """
     Centerline segment format.
 
@@ -157,7 +167,31 @@ def make_centerline_segment(orientation, c, a, b, thickness):
         orientation = V
         c = x
         a/b = y range
+
+    Important:
+    The center coordinate is calculated from the detected wall faces.
+    For example, for a horizontal wall:
+        center_y = (face_y_1 + face_y_2) / 2
     """
+
+    if actual_thickness is None:
+        actual_thickness = thickness
+
+    if thickness_error is None:
+        thickness_error = abs(float(actual_thickness) - float(thickness))
+
+    if overlap_length is None:
+        overlap_length = abs(float(b) - float(a))
+
+    length = abs(float(b) - float(a))
+
+    # Higher is better.
+    # Thickness error is heavily penalized.
+    quality_score = (
+        float(overlap_length)
+        + length * 0.25
+        - float(thickness_error) * 100.0
+    )
 
     return {
         "orientation": orientation,
@@ -165,6 +199,11 @@ def make_centerline_segment(orientation, c, a, b, thickness):
         "a": float(min(a, b)),
         "b": float(max(a, b)),
         "thickness": int(thickness),
+        "actual_thickness": float(actual_thickness),
+        "thickness_error": float(thickness_error),
+        "overlap_length": float(overlap_length),
+        "source_count": int(source_count),
+        "quality_score": float(quality_score),
     }
 
 
@@ -216,6 +255,11 @@ def overlap_range(a1, b1, a2, b2):
     return start, end
 
 
+def interval_overlap_length(a1, b1, a2, b2):
+    start, end = overlap_range(a1, b1, a2, b2)
+    return max(0.0, end - start)
+
+
 def copy_segment(seg):
     return {
         "orientation": seg["orientation"],
@@ -223,6 +267,11 @@ def copy_segment(seg):
         "a": float(seg["a"]),
         "b": float(seg["b"]),
         "thickness": int(seg["thickness"]),
+        "actual_thickness": float(seg.get("actual_thickness", seg["thickness"])),
+        "thickness_error": float(seg.get("thickness_error", 0.0)),
+        "overlap_length": float(seg.get("overlap_length", segment_length(seg))),
+        "source_count": int(seg.get("source_count", 1)),
+        "quality_score": float(seg.get("quality_score", 0.0)),
     }
 
 
@@ -458,9 +507,10 @@ def detect_centerlines_from_face_pairs(
     for thickness in wall_thicknesses:
         for i, l1 in enumerate(horizontal_faces):
             for l2 in horizontal_faces[i + 1:]:
-                y_dist = abs(l1["c"] - l2["c"])
+                actual_thickness = abs(l1["c"] - l2["c"])
+                thickness_error = abs(actual_thickness - thickness)
 
-                if abs(y_dist - thickness) > thickness_tol:
+                if thickness_error > thickness_tol:
                     continue
 
                 start, end = overlap_range(
@@ -470,11 +520,12 @@ def detect_centerlines_from_face_pairs(
                     l2["b"],
                 )
 
-                overlap = end - start
+                face_overlap = end - start
 
-                if overlap < min_overlap:
+                if face_overlap < min_overlap:
                     continue
 
+                # This is the exact geometric centerline between the two wall faces.
                 center_y = (l1["c"] + l2["c"]) / 2.0
 
                 raw_segments.append(
@@ -484,6 +535,9 @@ def detect_centerlines_from_face_pairs(
                         a=start,
                         b=end,
                         thickness=thickness,
+                        actual_thickness=actual_thickness,
+                        thickness_error=thickness_error,
+                        overlap_length=face_overlap,
                     )
                 )
 
@@ -491,9 +545,10 @@ def detect_centerlines_from_face_pairs(
     for thickness in wall_thicknesses:
         for i, l1 in enumerate(vertical_faces):
             for l2 in vertical_faces[i + 1:]:
-                x_dist = abs(l1["c"] - l2["c"])
+                actual_thickness = abs(l1["c"] - l2["c"])
+                thickness_error = abs(actual_thickness - thickness)
 
-                if abs(x_dist - thickness) > thickness_tol:
+                if thickness_error > thickness_tol:
                     continue
 
                 start, end = overlap_range(
@@ -503,11 +558,12 @@ def detect_centerlines_from_face_pairs(
                     l2["b"],
                 )
 
-                overlap = end - start
+                face_overlap = end - start
 
-                if overlap < min_overlap:
+                if face_overlap < min_overlap:
                     continue
 
+                # This is the exact geometric centerline between the two wall faces.
                 center_x = (l1["c"] + l2["c"]) / 2.0
 
                 raw_segments.append(
@@ -517,6 +573,9 @@ def detect_centerlines_from_face_pairs(
                         a=start,
                         b=end,
                         thickness=thickness,
+                        actual_thickness=actual_thickness,
+                        thickness_error=thickness_error,
+                        overlap_length=face_overlap,
                     )
                 )
 
@@ -571,6 +630,7 @@ def merge_collinear_segments(segments, axis_tol, bridge_gap):
     Merge same-axis segments if they overlap or have a small gap.
 
     This bridges centerlines across doors/windows/openings.
+    Metadata is preserved conservatively.
     """
 
     if not segments:
@@ -588,37 +648,46 @@ def merge_collinear_segments(segments, axis_tol, bridge_gap):
         avg_c = sum(s["c"] for s in group) / len(group)
 
         intervals = sorted(
-            [(s["a"], s["b"]) for s in group],
+            [(s["a"], s["b"], s) for s in group],
             key=lambda x: x[0],
         )
 
-        cur_a, cur_b = intervals[0]
+        cur_a, cur_b, cur_seg = intervals[0]
+        cur_members = [cur_seg]
 
-        for a, b in intervals[1:]:
-            if a <= cur_b + bridge_gap:
-                cur_b = max(cur_b, b)
-            else:
-                merged.append(
-                    make_centerline_segment(
-                        orientation=orientation,
-                        c=avg_c,
-                        a=cur_a,
-                        b=cur_b,
-                        thickness=thickness,
-                    )
-                )
+        def flush_current():
+            best_error = min(float(s.get("thickness_error", 0.0)) for s in cur_members)
+            best_actual = sorted(
+                cur_members,
+                key=lambda s: float(s.get("thickness_error", 0.0))
+            )[0].get("actual_thickness", thickness)
 
-                cur_a, cur_b = a, b
+            total_overlap = sum(float(s.get("overlap_length", segment_length(s))) for s in cur_members)
+            source_count = sum(int(s.get("source_count", 1)) for s in cur_members)
 
-        merged.append(
-            make_centerline_segment(
+            return make_centerline_segment(
                 orientation=orientation,
                 c=avg_c,
                 a=cur_a,
                 b=cur_b,
                 thickness=thickness,
+                actual_thickness=best_actual,
+                thickness_error=best_error,
+                overlap_length=total_overlap,
+                source_count=source_count,
             )
-        )
+
+        for a, b, seg in intervals[1:]:
+            if a <= cur_b + bridge_gap:
+                cur_b = max(cur_b, b)
+                cur_members.append(seg)
+            else:
+                merged.append(flush_current())
+
+                cur_a, cur_b = a, b
+                cur_members = [seg]
+
+        merged.append(flush_current())
 
     return merged
 
@@ -634,7 +703,14 @@ def extend_to_nearby_intersections(segments, axis_tol, extend_tol, iterations=3)
     Extend horizontal/vertical centerlines to nearby intersections.
 
     This helps line ends meet at T/L/cross junctions.
+
+    Important:
+    Extension changes endpoint lengths, not centerline axis position.
+    For pure dimensional checking, use extension mode OFF or Conservative.
     """
+
+    if extend_tol <= 0:
+        return [copy_segment(s) for s in segments]
 
     working = [copy_segment(s) for s in segments]
 
@@ -672,6 +748,133 @@ def extend_to_nearby_intersections(segments, axis_tol, extend_tol, iterations=3)
         )
 
     return working
+
+
+# =========================================================
+# OVERLAP CLEANUP
+# =========================================================
+
+def segment_priority(seg):
+    """
+    Higher priority segment wins when overlaps are detected.
+
+    Priority:
+    1. Better thickness match
+    2. Larger original face overlap
+    3. Longer final segment
+    4. Prefer 225 over 150 if still tied
+    """
+
+    thickness_error = float(seg.get("thickness_error", 0.0))
+    face_overlap = float(seg.get("overlap_length", segment_length(seg)))
+    length = segment_length(seg)
+    thickness = int(seg.get("thickness", 0))
+
+    prefer_225 = 1 if thickness == 225 else 0
+
+    return (
+        -thickness_error,
+        face_overlap,
+        length,
+        prefer_225,
+        float(seg.get("quality_score", 0.0)),
+    )
+
+
+def resolve_overlapping_centerlines(
+    segments,
+    axis_tol,
+    min_overlap_length=100.0,
+    min_overlap_ratio=0.60,
+):
+    """
+    Remove duplicate/overlapping centerlines on nearly the same axis.
+
+    This mainly fixes cases where 225 and 150 detections create overlapping
+    red/green lines in the same location.
+
+    It removes a candidate when most of its length is already covered by a
+    better-priority segment on the same axis.
+    """
+
+    if not segments:
+        return [], []
+
+    sorted_segments = sorted(
+        [copy_segment(s) for s in segments],
+        key=segment_priority,
+        reverse=True,
+    )
+
+    kept = []
+    removed = []
+
+    for candidate in sorted_segments:
+        cand_len = segment_length(candidate)
+
+        if cand_len <= 0:
+            removed.append({
+                **candidate,
+                "removed_reason": "zero_length",
+                "overlap_with_thickness": "",
+                "overlap_amount": 0.0,
+                "overlap_ratio": 0.0,
+            })
+            continue
+
+        duplicate_found = False
+        duplicate_info = None
+
+        for existing in kept:
+            if candidate["orientation"] != existing["orientation"]:
+                continue
+
+            if abs(candidate["c"] - existing["c"]) > axis_tol:
+                continue
+
+            overlap = interval_overlap_length(
+                candidate["a"],
+                candidate["b"],
+                existing["a"],
+                existing["b"],
+            )
+
+            if overlap < min_overlap_length:
+                continue
+
+            overlap_ratio = overlap / max(cand_len, 1e-9)
+
+            if overlap_ratio >= min_overlap_ratio:
+                duplicate_found = True
+                duplicate_info = {
+                    "removed_reason": "overlapped_by_better_centerline",
+                    "overlap_with_thickness": existing.get("thickness", ""),
+                    "overlap_amount": round(overlap, 3),
+                    "overlap_ratio": round(overlap_ratio, 3),
+                }
+                break
+
+        if duplicate_found:
+            removed.append({
+                **candidate,
+                **duplicate_info,
+            })
+        else:
+            kept.append(candidate)
+
+    # Sort back into drawing-friendly order.
+    kept = sorted(
+        kept,
+        key=lambda s: (
+            s["orientation"],
+            s["thickness"],
+            s["c"],
+            s["a"],
+            s["b"],
+        ),
+    )
+
+    return kept, removed
 
 
 # =========================================================
@@ -726,7 +929,7 @@ def detect_rectangular_panels(segments, axis_tol, min_panel_width, min_panel_hei
     Review-only rectangular panel detector.
 
     Important:
-    This is intentionally treated as experimental/review geometry.
+    This is experimental/review geometry.
     It may create large guessed rectangles, so slab panel export is OFF by default.
     """
 
@@ -868,7 +1071,7 @@ def draw_nodes(msp, nodes, radius, layer):
 
 def build_output_dxf(
     raw_segments,
-    healed_segments,
+    final_segments,
     panels,
     nodes,
     draw_raw=True,
@@ -899,21 +1102,20 @@ def build_output_dxf(
         export_thicknesses,
     )
 
-    healed_for_output = filter_segments_by_thickness(
-        healed_segments,
+    final_for_output = filter_segments_by_thickness(
+        final_segments,
         export_thicknesses,
     )
 
-    clean_healed_segments = filter_short_segments(
-        healed_for_output,
+    clean_final_segments = filter_short_segments(
+        final_for_output,
         min_output_centerline_length,
     )
 
-    # Dynamic layer creation.
     all_thicknesses = sorted(
         set(
             [int(s["thickness"]) for s in raw_for_output]
-            + [int(s["thickness"]) for s in clean_healed_segments]
+            + [int(s["thickness"]) for s in clean_final_segments]
         )
     )
 
@@ -943,7 +1145,7 @@ def build_output_dxf(
     if draw_wall_centerlines:
         draw_segments_by_thickness(
             new_msp,
-            clean_healed_segments,
+            clean_final_segments,
             prefix="ILS_WALL_CENTERLINE",
         )
 
@@ -988,6 +1190,48 @@ def segments_to_dataframe(segments):
             "id": idx,
             "orientation": s["orientation"],
             "thickness": s["thickness"],
+            "actual_thickness": round(float(s.get("actual_thickness", s["thickness"])), 3),
+            "thickness_error": round(float(s.get("thickness_error", 0.0)), 3),
+            "overlap_length": round(float(s.get("overlap_length", segment_length(s))), 3),
+            "source_count": int(s.get("source_count", 1)),
+            "quality_score": round(float(s.get("quality_score", 0.0)), 3),
+            "x1": round(x1, 3),
+            "y1": round(y1, 3),
+            "x2": round(x2, 3),
+            "y2": round(y2, 3),
+            "length": round(segment_length(s), 3),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def removed_segments_to_dataframe(segments):
+    rows = []
+
+    for idx, s in enumerate(segments, start=1):
+        if s["orientation"] == "H":
+            x1 = s["a"]
+            y1 = s["c"]
+            x2 = s["b"]
+            y2 = s["c"]
+        else:
+            x1 = s["c"]
+            y1 = s["a"]
+            x2 = s["c"]
+            y2 = s["b"]
+
+        rows.append({
+            "id": idx,
+            "orientation": s["orientation"],
+            "thickness": s["thickness"],
+            "actual_thickness": round(float(s.get("actual_thickness", s["thickness"])), 3),
+            "thickness_error": round(float(s.get("thickness_error", 0.0)), 3),
+            "overlap_length": round(float(s.get("overlap_length", segment_length(s))), 3),
+            "quality_score": round(float(s.get("quality_score", 0.0)), 3),
+            "removed_reason": s.get("removed_reason", ""),
+            "overlap_with_thickness": s.get("overlap_with_thickness", ""),
+            "overlap_amount": s.get("overlap_amount", ""),
+            "overlap_ratio": s.get("overlap_ratio", ""),
             "x1": round(x1, 3),
             "y1": round(y1, 3),
             "x2": round(x2, 3),
@@ -1014,6 +1258,30 @@ def panels_to_dataframe(panels):
         })
 
     return pd.DataFrame(rows)
+
+
+def centerline_accuracy_summary(raw_segments):
+    if not raw_segments:
+        return {
+            "raw_count": 0,
+            "avg_thickness_error": 0.0,
+            "max_thickness_error": 0.0,
+            "perfect_or_near_perfect": 0,
+        }
+
+    errors = [abs(float(s.get("thickness_error", 0.0))) for s in raw_segments]
+
+    near_perfect = len([
+        e for e in errors
+        if e <= 1.0
+    ])
+
+    return {
+        "raw_count": len(raw_segments),
+        "avg_thickness_error": sum(errors) / len(errors),
+        "max_thickness_error": max(errors),
+        "perfect_or_near_perfect": near_perfect,
+    }
 
 
 # =========================================================
@@ -1130,10 +1398,26 @@ with st.expander("Geometry tolerances", expanded=True):
         min_value=0.0,
         value=300.0,
         step=50.0,
-        help="Line ends near intersections are extended to meet.",
+        help="Base tolerance for extending line ends to nearby intersections.",
     )
 
-    output_mode = c9.selectbox(
+    extension_mode = c9.selectbox(
+        "Intersection extension mode",
+        [
+            "Off",
+            "Conservative",
+            "Normal",
+            "Aggressive",
+        ],
+        index=1,
+        help="Use Off or Conservative when checking dimensional accuracy. Normal/Aggressive can make modelling lines longer.",
+    )
+
+
+with st.expander("Output mode and cleanup", expanded=True):
+    o1, o2, o3 = st.columns(3)
+
+    output_mode = o1.selectbox(
         "Output mode",
         [
             "Review mode",
@@ -1141,6 +1425,45 @@ with st.expander("Geometry tolerances", expanded=True):
         ],
         index=1,
         help="Review mode exports debug geometry. Clean structural mode exports cleaner modelling geometry.",
+    )
+
+    min_output_centerline_length = o2.number_input(
+        "Minimum output centerline length",
+        min_value=0.0,
+        value=750.0,
+        step=50.0,
+        help="In clean mode, final centerlines shorter than this are not exported.",
+    )
+
+    overlap_cleanup_enabled = o3.checkbox(
+        "Remove overlapping duplicate centerlines",
+        value=True,
+        help="Recommended. Removes weaker red/green duplicate overlaps.",
+    )
+
+    o4, o5, o6 = st.columns(3)
+
+    overlap_cleanup_ratio = o4.number_input(
+        "Overlap cleanup ratio",
+        min_value=0.10,
+        max_value=1.00,
+        value=0.60,
+        step=0.05,
+        help="A weaker line is removed when this fraction of its length overlaps a better line.",
+    )
+
+    overlap_cleanup_min_length = o5.number_input(
+        "Minimum duplicate overlap length",
+        min_value=0.0,
+        value=100.0,
+        step=50.0,
+        help="Minimum overlap length before duplicate cleanup can remove a line.",
+    )
+
+    export_junction_nodes = o6.checkbox(
+        "Export junction nodes",
+        value=False,
+        help="Usually OFF for clean structural output. Useful for review/debug.",
     )
 
 
@@ -1151,66 +1474,47 @@ if not wall_thicknesses:
     st.stop()
 
 
-with st.expander("Output cleanup", expanded=True):
-    o1, o2, o3 = st.columns(3)
-
-    min_output_centerline_length = o1.number_input(
-        "Minimum output centerline length",
-        min_value=0.0,
-        value=750.0,
-        step=50.0,
-        help="In clean mode, healed centerlines shorter than this are not exported.",
-    )
-
-    export_wall_thicknesses = o2.multiselect(
+with st.expander("Wall thickness export", expanded=True):
+    export_wall_thicknesses = st.multiselect(
         "Export wall thicknesses",
         options=wall_thicknesses,
         default=wall_thicknesses,
         help="Use this to export only 225 walls, only 150 walls, or both.",
     )
 
-    export_junction_nodes = o3.checkbox(
-        "Export junction nodes",
+if not export_wall_thicknesses:
+    st.warning("Select at least one wall thickness to export.")
+    st.stop()
+
+
+with st.expander("Slab panel review settings", expanded=False):
+    p1, p2, p3 = st.columns(3)
+
+    show_panel_preview = p1.checkbox(
+        "Run slab panel review detection",
         value=False,
-        help="Usually OFF for clean structural output. Useful for review/debug.",
+        help="Experimental. Keep OFF while validating wall centerlines.",
     )
 
-    o4, o5 = st.columns(2)
-
-    export_slab_panels = o4.checkbox(
+    export_slab_panels = p2.checkbox(
         "Export slab panels",
         value=False,
         help="Experimental/review only. OFF is recommended for clean wall centerline export.",
     )
 
-    show_panel_preview = o5.checkbox(
-        "Run slab panel review detection",
-        value=True,
-        help="Keeps slab panel detection available in preview, even if not exported.",
-    )
-
-
-with st.expander("Slab panel review settings", expanded=False):
-    p1, p2 = st.columns(2)
-
-    min_panel_width = p1.number_input(
+    min_panel_width = p3.number_input(
         "Minimum panel width",
         min_value=0.0,
         value=500.0,
         step=100.0,
     )
 
-    min_panel_height = p2.number_input(
+    min_panel_height = st.number_input(
         "Minimum panel height",
         min_value=0.0,
         value=500.0,
         step=100.0,
     )
-
-
-if not export_wall_thicknesses:
-    st.warning("Select at least one wall thickness to export.")
-    st.stop()
 
 
 analyze = st.button(
@@ -1255,7 +1559,7 @@ if len(horizontal_faces) + len(vertical_faces) == 0:
     st.stop()
 
 
-with st.spinner("Detecting raw wall centerlines from wall face pairs..."):
+with st.spinner("Detecting exact midpoint raw wall centerlines from wall face pairs..."):
     raw_segments = detect_centerlines_from_face_pairs(
         horizontal_faces=horizontal_faces,
         vertical_faces=vertical_faces,
@@ -1265,6 +1569,9 @@ with st.spinner("Detecting raw wall centerlines from wall face pairs..."):
     )
 
 
+accuracy = centerline_accuracy_summary(raw_segments)
+
+
 with st.spinner("Bridging openings and healing centerlines..."):
     merged_segments = merge_collinear_segments(
         raw_segments,
@@ -1272,24 +1579,46 @@ with st.spinner("Bridging openings and healing centerlines..."):
         bridge_gap=bridge_gap,
     )
 
-    healed_segments = extend_to_nearby_intersections(
+    if extension_mode == "Off":
+        effective_extend_tol = 0.0
+    elif extension_mode == "Conservative":
+        effective_extend_tol = intersection_extend_tol * 0.5
+    elif extension_mode == "Normal":
+        effective_extend_tol = intersection_extend_tol
+    else:
+        effective_extend_tol = intersection_extend_tol * 1.5
+
+    extended_segments = extend_to_nearby_intersections(
         merged_segments,
         axis_tol=axis_tol,
-        extend_tol=intersection_extend_tol,
+        extend_tol=effective_extend_tol,
         iterations=3,
     )
 
-    healed_segments = merge_collinear_segments(
-        healed_segments,
+    extended_segments = merge_collinear_segments(
+        extended_segments,
         axis_tol=axis_tol,
         bridge_gap=axis_tol,
     )
 
 
+with st.spinner("Cleaning overlapping duplicate centerlines..."):
+    if overlap_cleanup_enabled:
+        final_segments, removed_overlap_segments = resolve_overlapping_centerlines(
+            extended_segments,
+            axis_tol=axis_tol,
+            min_overlap_length=overlap_cleanup_min_length,
+            min_overlap_ratio=overlap_cleanup_ratio,
+        )
+    else:
+        final_segments = extended_segments
+        removed_overlap_segments = []
+
+
 with st.spinner("Preparing review geometry..."):
     if show_panel_preview:
         panels = detect_rectangular_panels(
-            healed_segments,
+            final_segments,
             axis_tol=axis_tol,
             min_panel_width=min_panel_width,
             min_panel_height=min_panel_height,
@@ -1298,41 +1627,53 @@ with st.spinner("Preparing review geometry..."):
         panels = []
 
     nodes = collect_junction_nodes(
-        healed_segments,
+        final_segments,
         axis_tol=axis_tol,
     )
 
 
-selected_healed_segments = filter_segments_by_thickness(
-    healed_segments,
+selected_final_segments = filter_segments_by_thickness(
+    final_segments,
     export_wall_thicknesses,
 )
 
 if output_mode == "Clean structural mode":
     clean_export_segments = filter_short_segments(
-        selected_healed_segments,
+        selected_final_segments,
         min_output_centerline_length,
     )
 else:
     clean_export_segments = filter_short_segments(
-        selected_healed_segments,
+        selected_final_segments,
         0.0,
     )
 
 
-st.markdown("### 4. Result Summary")
+st.markdown("### 4. Centerline Accuracy and Cleanup Summary")
+
+a1, a2, a3, a4 = st.columns(4)
+
+a1.metric("Raw midpoint centerlines", len(raw_segments))
+a2.metric("Avg thickness error", round(accuracy["avg_thickness_error"], 3))
+a3.metric("Max thickness error", round(accuracy["max_thickness_error"], 3))
+a4.metric("Near-perfect ≤ 1mm", accuracy["perfect_or_near_perfect"])
+
+st.caption(
+    "The raw centerline coordinate is calculated exactly as the midpoint between two detected wall faces. "
+    "Thickness error measures how close the detected wall-face spacing is to the target wall thickness."
+)
 
 r1, r2, r3, r4 = st.columns(4)
 
-r1.metric("Raw centerline fragments", len(raw_segments))
-r2.metric("Healed centerlines", len(healed_segments))
-r3.metric("Clean export centerlines", len(clean_export_segments))
-r4.metric("Review slab panels", len(panels))
+r1.metric("After gap bridging", len(merged_segments))
+r2.metric("After intersection extension", len(extended_segments))
+r3.metric("Removed overlaps", len(removed_overlap_segments))
+r4.metric("Final export centerlines", len(clean_export_segments))
 
 st.info(
     f"Output mode: **{output_mode}**. "
-    f"Exporting thicknesses: **{', '.join(str(x) for x in export_wall_thicknesses)}**. "
-    f"Clean export centerlines: **{len(clean_export_segments)}** out of **{len(healed_segments)}** healed centerlines."
+    f"Extension mode: **{extension_mode}** using effective tolerance **{round(effective_extend_tol, 3)}**. "
+    f"Exporting thicknesses: **{', '.join(str(x) for x in export_wall_thicknesses)}**."
 )
 
 if not raw_segments:
@@ -1343,26 +1684,27 @@ if not raw_segments:
 
 st.markdown("### 5. Preview Tables")
 
-tab1, tab2, tab3 = st.tabs(
+tab1, tab2, tab3, tab4 = st.tabs(
     [
-        "All Healed Centerlines",
-        "Clean Export Centerlines",
+        "Raw Accurate Centerlines",
+        "Final Clean Centerlines",
+        "Removed Overlaps",
         "Slab Panels Review",
     ]
 )
 
 with tab1:
-    healed_df = segments_to_dataframe(healed_segments)
+    raw_df = segments_to_dataframe(raw_segments)
 
-    if healed_df.empty:
-        st.info("No healed centerlines to preview.")
+    if raw_df.empty:
+        st.info("No raw centerlines to preview.")
     else:
-        st.dataframe(healed_df, use_container_width=True)
+        st.dataframe(raw_df, use_container_width=True)
 
         st.download_button(
-            "📄 Download All Healed Centerlines CSV",
-            data=healed_df.to_csv(index=False).encode("utf-8"),
-            file_name="ILS_ALL_HEALED_CENTERLINES.csv",
+            "📄 Download Raw Accurate Centerlines CSV",
+            data=raw_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_RAW_ACCURATE_CENTERLINES.csv",
             mime="text/csv",
         )
 
@@ -1370,18 +1712,37 @@ with tab2:
     clean_df = segments_to_dataframe(clean_export_segments)
 
     if clean_df.empty:
-        st.info("No clean export centerlines to preview.")
+        st.info("No final clean centerlines to preview.")
     else:
         st.dataframe(clean_df, use_container_width=True)
 
         st.download_button(
-            "📄 Download Clean Export Centerlines CSV",
+            "📄 Download Final Clean Centerlines CSV",
             data=clean_df.to_csv(index=False).encode("utf-8"),
-            file_name="ILS_CLEAN_EXPORT_CENTERLINES.csv",
+            file_name="ILS_FINAL_CLEAN_CENTERLINES.csv",
             mime="text/csv",
         )
 
 with tab3:
+    removed_df = removed_segments_to_dataframe(removed_overlap_segments)
+
+    if removed_df.empty:
+        st.info("No overlapping duplicate centerlines were removed.")
+    else:
+        st.warning(
+            "These centerlines were removed because they overlapped better-quality centerlines on the same axis."
+        )
+
+        st.dataframe(removed_df, use_container_width=True)
+
+        st.download_button(
+            "📄 Download Removed Overlaps CSV",
+            data=removed_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_REMOVED_OVERLAP_CENTERLINES.csv",
+            mime="text/csv",
+        )
+
+with tab4:
     panels_df = panels_to_dataframe(panels)
 
     if panels_df.empty:
@@ -1416,7 +1777,7 @@ else:
 
 output_doc = build_output_dxf(
     raw_segments=raw_segments,
-    healed_segments=healed_segments,
+    final_segments=final_segments,
     panels=panels,
     nodes=nodes,
     draw_raw=draw_raw_output,
@@ -1445,6 +1806,6 @@ st.download_button(
 )
 
 st.success(
-    "Analysis complete. For clean structural modelling, use the layers named "
-    "ILS_WALL_CENTERLINE_225 and/or ILS_WALL_CENTERLINE_150."
+    "Analysis complete. For dimensional checking, compare the raw midpoint centerline CSV/DXF against the architectural wall faces. "
+    "For modelling, use the clean wall centerline layers."
 )
