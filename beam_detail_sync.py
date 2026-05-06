@@ -1,242 +1,478 @@
-# beam_detail_sync.py
-# iLoveStructural - Tool 3: Beam Detail Grid/Axis Endpoint Label Sync
-#
-# Purpose:
-# - Upload old_label -> new_label mapping from Tool 2 audit CSV and/or manual table
-# - Upload beam detail DXF
-# - Detect grid/axis labels inside/near circular bubbles
-# - Preview proposed changes
-# - User approves rows
-# - Apply approved changes to writable TEXT/MTEXT/ATTRIB entities
-# - Download audit CSV and updated DXF
-#
-# Safe philosophy:
-# - Does NOT alter rebar notes/dimensions unless they are detected inside/near a circle AND mapped
-# - Does NOT modify block definition text
-# - Writes only modelspace TEXT/MTEXT in Safe Mode
-# - Optionally writes INSERT attributes in Attribute Mode
-
-import io
+import streamlit as st
+import ezdxf
+import tempfile
+import os
 import math
 import re
-from typing import Dict, List, Any, Optional, Tuple
-
-import ezdxf
+import io
+import csv
 import pandas as pd
-import streamlit as st
 
 
-# ============================================================
-# Basic text helpers
-# ============================================================
+# =========================================================
+# APP CONFIG
+# =========================================================
 
-def clean_text(value) -> str:
-    """Clean TEXT/MTEXT/ATTRIB content into a simple comparable label."""
+st.set_page_config(
+    page_title="iLoveStructural - Beam Detail Label Sync",
+    page_icon="🏗️",
+    layout="wide",
+)
+
+st.title("🏗️ iLoveStructural")
+st.subheader("Tool 3: Beam Detail Grid Label Sync")
+st.caption(
+    "Workflow: Upload beam detail DXF → load/edit old/new label mapping → detect circular detail labels → preview → apply approved changes."
+)
+
+
+# =========================================================
+# CONSTANTS
+# =========================================================
+
+WRITE_MODE_SAFE = "Safe mode: modelspace TEXT/MTEXT only"
+WRITE_MODE_ATTRIB = "Attribute mode: modelspace TEXT/MTEXT + INSERT attributes"
+
+ALL_LAYERS = "__ALL_LAYERS__"
+
+
+# =========================================================
+# BASIC HELPERS
+# =========================================================
+
+def clean_text(value):
     if value is None:
         return ""
 
-    s = str(value)
-
-    # Common MTEXT line breaks / formatting leftovers
-    s = s.replace("\\P", " ")
-    s = s.replace("\\~", " ")
-
-    # Remove simple MTEXT formatting codes like {\...;} conservatively
-    s = re.sub(r"\\[A-Za-z][^;]*;", "", s)
-    s = s.replace("{", "").replace("}", "")
-
-    # Normalize whitespace
-    s = re.sub(r"\s+", " ", s).strip()
-
-    return s
+    txt = str(value)
+    txt = txt.replace("\\P", " ")
+    txt = txt.replace("\n", " ")
+    txt = txt.replace("′", "'")
+    txt = txt.replace("×", "X")
+    txt = re.sub(r"\s+", " ", txt)
+    return txt.strip().upper()
 
 
-def is_zero_padded_number(label: str) -> bool:
-    """Reject detail numbers like 01, 02, 003."""
-    s = clean_text(label)
-    return bool(re.fullmatch(r"0\d+", s))
+def probable_grid_label(text):
+    text = clean_text(text)
+
+    patterns = [
+        r"[A-Z]{1,3}",
+        r"[A-Z]{1,3}'",
+        r"\d{1,3}",
+        r"\d{1,3}[A-Z]?",
+        r"\d{1,3}[A-Z]?'?",
+    ]
+
+    return any(re.fullmatch(p, text) for p in patterns)
 
 
-def is_numeric_label(label: str) -> bool:
-    s = clean_text(label)
-    return bool(re.fullmatch(r"\d+", s))
+def is_zero_padded_detail_number(text):
+    text = clean_text(text)
+    return bool(re.fullmatch(r"0\d{1,3}", text))
 
 
-def is_alpha_label(label: str) -> bool:
-    s = clean_text(label).upper()
-    return bool(re.fullmatch(r"[A-Z]{1,3}", s))
+def euclidean(p1, p2):
+    return math.dist((p1[0], p1[1]), (p2[0], p2[1]))
 
 
-def probable_grid_label(label: str, max_numeric_label: int = 99) -> bool:
-    """
-    Conservative grid label filter.
+def safe_remove_file(path):
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
 
-    Accepts:
-    - 1, 2, 3 ... up to max_numeric_label
-    - A, B, C, AA, AB etc.
 
-    Rejects:
-    - 01, 02
-    - 2Y16
-    - 3-250
-    - 450 if max_numeric_label is 99
-    - long notes
-    """
-    s = clean_text(label)
+def save_uploaded_to_temp(uploaded_file):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp:
+        tmp.write(uploaded_file.getvalue())
+        return tmp.name
 
-    if not s:
-        return False
 
-    if is_zero_padded_number(s):
-        return False
+def uploaded_file_signature(uploaded_file):
+    if uploaded_file is None:
+        return None
+    return uploaded_file.name, len(uploaded_file.getvalue())
 
-    if is_numeric_label(s):
-        try:
-            return 1 <= int(s) <= int(max_numeric_label)
-        except Exception:
-            return False
 
-    if is_alpha_label(s):
+def write_doc_to_temp_bytes(doc):
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf")
+    tmp_path = tmp.name
+    tmp.close()
+
+    try:
+        doc.saveas(tmp_path)
+        with open(tmp_path, "rb") as f:
+            return f.read()
+    finally:
+        safe_remove_file(tmp_path)
+
+
+def get_entity_handle(entity):
+    try:
+        return entity.dxf.handle
+    except Exception:
+        return ""
+
+
+def get_layer_names(doc):
+    return sorted([layer.dxf.name for layer in doc.layers])
+
+
+def layer_allowed(entity_layer, selected_layer):
+    if selected_layer == ALL_LAYERS:
         return True
+
+    return clean_text(entity_layer) == clean_text(selected_layer)
+
+
+def audit_to_csv_bytes(rows):
+    if not rows:
+        return b""
+
+    fieldnames = sorted(set().union(*[row.keys() for row in rows]))
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer.writeheader()
+
+    for row in rows:
+        safe_row = {}
+        for k in fieldnames:
+            v = row.get(k, "")
+            if k in ("entity", "marker"):
+                v = ""
+            safe_row[k] = v
+        writer.writerow(safe_row)
+
+    return buffer.getvalue().encode("utf-8")
+
+
+# =========================================================
+# DXF TEXT HELPERS
+# =========================================================
+
+def get_text_value(entity):
+    try:
+        if entity.dxftype() == "TEXT":
+            return clean_text(entity.dxf.text)
+
+        if entity.dxftype() == "MTEXT":
+            return clean_text(entity.text)
+
+        if entity.dxftype() == "ATTRIB":
+            return clean_text(entity.dxf.text)
+
+    except Exception:
+        pass
+
+    return ""
+
+
+def set_text_value(entity, new_value):
+    try:
+        if entity.dxftype() == "TEXT":
+            entity.dxf.text = new_value
+            return True
+
+        if entity.dxftype() == "MTEXT":
+            entity.text = new_value
+            return True
+
+        if entity.dxftype() == "ATTRIB":
+            entity.dxf.text = new_value
+            return True
+
+    except Exception:
+        pass
 
     return False
 
 
-def boolish(value) -> bool:
-    if value is None:
-        return False
-
-    if isinstance(value, bool):
-        return value
-
-    s = str(value).strip().lower()
-    return s in {"true", "yes", "y", "1", "changed", "ok"}
-
-
-# ============================================================
-# Geometry helpers
-# ============================================================
-
-def get_xy(point) -> Tuple[float, float]:
-    """Safely get x/y from ezdxf point/vector."""
+def get_text_point(entity):
     try:
-        return float(point.x), float(point.y)
+        if entity.dxftype() == "TEXT":
+            try:
+                ap = entity.dxf.align_point
+                if ap is not None and (float(ap.x) != 0.0 or float(ap.y) != 0.0):
+                    return float(ap.x), float(ap.y)
+            except Exception:
+                pass
+
+            ins = entity.dxf.insert
+            return float(ins.x), float(ins.y)
+
+        if entity.dxftype() in ("MTEXT", "ATTRIB"):
+            ins = entity.dxf.insert
+            return float(ins.x), float(ins.y)
+
     except Exception:
-        try:
-            return float(point[0]), float(point[1])
-        except Exception:
-            return 0.0, 0.0
+        pass
+
+    return 0.0, 0.0
 
 
-def rotate_point(x: float, y: float, angle_deg: float) -> Tuple[float, float]:
-    a = math.radians(angle_deg or 0.0)
-    ca = math.cos(a)
-    sa = math.sin(a)
-    return x * ca - y * sa, x * sa + y * ca
+def get_insert_transform(insert_entity):
+    try:
+        ins = insert_entity.dxf.insert
+        sx = float(getattr(insert_entity.dxf, "xscale", 1.0) or 1.0)
+        sy = float(getattr(insert_entity.dxf, "yscale", 1.0) or 1.0)
+        rot = float(getattr(insert_entity.dxf, "rotation", 0.0) or 0.0)
+
+        return float(ins.x), float(ins.y), sx, sy, rot
+    except Exception:
+        return 0.0, 0.0, 1.0, 1.0, 0.0
 
 
-def transform_block_point(
-    local_x: float,
-    local_y: float,
-    insert_x: float,
-    insert_y: float,
-    xscale: float,
-    yscale: float,
-    rotation_deg: float,
-) -> Tuple[float, float]:
-    """Simple INSERT transform for non-nested block geometry."""
-    sx = local_x * (xscale or 1.0)
-    sy = local_y * (yscale or 1.0)
-    rx, ry = rotate_point(sx, sy, rotation_deg or 0.0)
-    return insert_x + rx, insert_y + ry
+def transform_block_point(local_point, insert_entity):
+    x, y = local_point
+    ix, iy, sx, sy, rot = get_insert_transform(insert_entity)
+
+    x *= sx
+    y *= sy
+
+    a = math.radians(rot)
+    xr = x * math.cos(a) - y * math.sin(a)
+    yr = x * math.sin(a) + y * math.cos(a)
+
+    return xr + ix, yr + iy
 
 
-def dist2d(x1, y1, x2, y2) -> float:
-    return math.hypot(float(x1) - float(x2), float(y1) - float(y2))
+def transform_block_radius(radius, insert_entity):
+    _, _, sx, sy, _ = get_insert_transform(insert_entity)
+    return float(radius) * ((abs(sx) + abs(sy)) / 2.0)
 
 
-# ============================================================
-# CSV mapping extraction
-# ============================================================
+# =========================================================
+# WRITE PROFILE
+# =========================================================
 
-def find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    """Find a column by relaxed normalized name."""
-    normalized = {
-        re.sub(r"[^a-z0-9]", "", str(c).strip().lower()): c
-        for c in df.columns
+def marker_write_profile(marker, write_mode):
+    source = marker.get("text_source", "")
+    text_type = marker.get("text_type", "")
+
+    if source == "modelspace" and text_type in ("TEXT", "MTEXT"):
+        return {
+            "writable": True,
+            "write_risk": "low",
+            "write_reason": "modelspace_text",
+        }
+
+    if source == "insert_attrib" and text_type == "ATTRIB":
+        if write_mode == WRITE_MODE_ATTRIB:
+            return {
+                "writable": True,
+                "write_risk": "medium",
+                "write_reason": "insert_attribute_instance",
+            }
+
+        return {
+            "writable": False,
+            "write_risk": "blocked",
+            "write_reason": "attribute_blocked_in_safe_mode",
+        }
+
+    return {
+        "writable": False,
+        "write_risk": "blocked",
+        "write_reason": "unsupported_or_block_definition_text",
     }
 
-    for cand in candidates:
-        key = re.sub(r"[^a-z0-9]", "", cand.strip().lower())
-        if key in normalized:
-            return normalized[key]
+
+# =========================================================
+# DXF EXTRACTION
+# =========================================================
+
+def extract_texts(doc, selected_text_layer):
+    texts = []
+    msp = doc.modelspace()
+
+    for e in msp:
+        try:
+            if e.dxftype() in ("TEXT", "MTEXT"):
+                if not layer_allowed(e.dxf.layer, selected_text_layer):
+                    continue
+
+                texts.append({
+                    "entity": e,
+                    "text": get_text_value(e),
+                    "point": get_text_point(e),
+                    "layer": e.dxf.layer,
+                    "type": e.dxftype(),
+                    "source": "modelspace",
+                    "handle": get_entity_handle(e),
+                })
+
+            elif e.dxftype() == "INSERT":
+                try:
+                    for att in e.attribs:
+                        if not layer_allowed(att.dxf.layer, selected_text_layer):
+                            continue
+
+                        texts.append({
+                            "entity": att,
+                            "text": get_text_value(att),
+                            "point": get_text_point(att),
+                            "layer": att.dxf.layer,
+                            "type": "ATTRIB",
+                            "source": "insert_attrib",
+                            "parent_insert": e,
+                            "parent_layer": e.dxf.layer,
+                            "handle": get_entity_handle(att),
+                        })
+                except Exception:
+                    pass
+
+                # Optional read-only block definition text detection.
+                # We detect it for review, but do not write it in this MVP.
+                try:
+                    if e.dxf.name in doc.blocks:
+                        block = doc.blocks[e.dxf.name]
+
+                        for be in block:
+                            if be.dxftype() not in ("TEXT", "MTEXT"):
+                                continue
+
+                            if not layer_allowed(be.dxf.layer, selected_text_layer):
+                                continue
+
+                            lp = get_text_point(be)
+                            wp = transform_block_point(lp, e)
+
+                            texts.append({
+                                "entity": be,
+                                "text": get_text_value(be),
+                                "point": wp,
+                                "layer": be.dxf.layer,
+                                "type": be.dxftype(),
+                                "source": "block_text_readonly",
+                                "parent_insert": e,
+                                "parent_layer": e.dxf.layer,
+                                "handle": get_entity_handle(be),
+                            })
+                except Exception:
+                    pass
+
+        except Exception:
+            continue
+
+    return texts
+
+
+def extract_circles(doc, selected_circle_layer):
+    circles = []
+    msp = doc.modelspace()
+
+    for e in msp:
+        try:
+            if e.dxftype() == "CIRCLE":
+                if not layer_allowed(e.dxf.layer, selected_circle_layer):
+                    continue
+
+                c = e.dxf.center
+
+                circles.append({
+                    "entity": e,
+                    "center": (float(c.x), float(c.y)),
+                    "radius": float(e.dxf.radius),
+                    "layer": e.dxf.layer,
+                    "source": "modelspace",
+                    "handle": get_entity_handle(e),
+                })
+
+            elif e.dxftype() == "INSERT":
+                try:
+                    if e.dxf.name not in doc.blocks:
+                        continue
+
+                    block = doc.blocks[e.dxf.name]
+
+                    for be in block:
+                        if be.dxftype() != "CIRCLE":
+                            continue
+
+                        if not layer_allowed(be.dxf.layer, selected_circle_layer):
+                            continue
+
+                        c = be.dxf.center
+
+                        circles.append({
+                            "entity": e,
+                            "nested_entity": be,
+                            "center": transform_block_point((float(c.x), float(c.y)), e),
+                            "radius": transform_block_radius(float(be.dxf.radius), e),
+                            "layer": be.dxf.layer,
+                            "source": "block_circle",
+                            "handle": get_entity_handle(e),
+                            "nested_handle": get_entity_handle(be),
+                        })
+                except Exception:
+                    pass
+
+        except Exception:
+            continue
+
+    return circles
+
+
+# =========================================================
+# MAPPING HELPERS
+# =========================================================
+
+def find_col(fieldnames, candidates):
+    upper_map = {clean_text(x): x for x in fieldnames}
+
+    for c in candidates:
+        c_clean = clean_text(c)
+        if c_clean in upper_map:
+            return upper_map[c_clean]
 
     return None
 
 
-def mapping_from_audit_csv(uploaded_file) -> pd.DataFrame:
-    """
-    Extract old_label -> new_label rows from Tool 2 audit CSV.
+def mapping_from_audit_csv(uploaded_csv):
+    if uploaded_csv is None:
+        return [], []
 
-    Supports flexible column names:
-    old:
-      old_label, old, target_old_label, from
-    new:
-      new_label, new, proposed_new_label, to, source_label
+    raw = uploaded_csv.getvalue().decode("utf-8", errors="ignore")
+    reader = csv.DictReader(io.StringIO(raw))
 
-    If changed column exists and contains any true rows, prefer changed rows.
-    """
-    if uploaded_file is None:
-        return pd.DataFrame(columns=["old_label", "new_label"])
+    if not reader.fieldnames:
+        return [], ["CSV has no header row."]
 
-    try:
-        df = pd.read_csv(uploaded_file)
-    except Exception:
-        uploaded_file.seek(0)
-        df = pd.read_csv(uploaded_file, encoding="latin1")
+    old_col = find_col(reader.fieldnames, [
+        "old_label",
+        "old",
+        "target_old_label",
+        "from",
+        "source_old_label",
+    ])
 
-    if df.empty:
-        return pd.DataFrame(columns=["old_label", "new_label"])
+    new_col = find_col(reader.fieldnames, [
+        "new_label",
+        "new",
+        "proposed_new_label",
+        "to",
+        "source_label",
+    ])
 
-    old_col = find_column(
-        df,
-        [
-            "old_label",
-            "old",
-            "target_old_label",
-            "from",
-            "from_label",
-            "existing_label",
-        ],
-    )
+    changed_col = find_col(reader.fieldnames, [
+        "changed",
+        "updated",
+    ])
 
-    new_col = find_column(
-        df,
-        [
-            "new_label",
-            "new",
-            "proposed_new_label",
-            "to",
-            "to_label",
-            "source_label",
-            "replacement_label",
-        ],
-    )
+    warnings = []
 
     if old_col is None or new_col is None:
-        return pd.DataFrame(columns=["old_label", "new_label"])
+        warnings.append(
+            f"Could not find old/new label columns. CSV columns found: {reader.fieldnames}"
+        )
+        return [], warnings
 
-    work = df.copy()
+    mapping = {}
 
-    changed_col = find_column(work, ["changed", "is_changed", "will_change"])
-    if changed_col is not None:
-        changed_mask = work[changed_col].apply(boolish)
-        if changed_mask.any():
-            work = work[changed_mask].copy()
-
-    out_rows = []
-
-    for _, row in work.iterrows():
+    for row in reader:
         old_label = clean_text(row.get(old_col, ""))
         new_label = clean_text(row.get(new_col, ""))
 
@@ -246,461 +482,748 @@ def mapping_from_audit_csv(uploaded_file) -> pd.DataFrame:
         if old_label == new_label:
             continue
 
-        out_rows.append(
+        if changed_col:
+            changed_value = clean_text(row.get(changed_col, ""))
+            # Keep rows marked true, but also allow blank/unknown CSVs.
+            if changed_value and changed_value not in ("TRUE", "1", "YES", "Y"):
+                continue
+
+        if old_label not in mapping:
+            mapping[old_label] = new_label
+
+        elif mapping[old_label] != new_label:
+            warnings.append(
+                f"Conflicting mapping for {old_label}: {mapping[old_label]} vs {new_label}. Keeping first."
+            )
+
+    rows = [
+        {
+            "old_label": old_label,
+            "new_label": new_label,
+            "apply": True,
+        }
+        for old_label, new_label in sorted(mapping.items())
+    ]
+
+    return rows, warnings
+
+
+def normalize_mapping_rows(rows):
+    mapping = {}
+    warnings = []
+
+    for idx, row in enumerate(rows, start=1):
+        apply_row = row.get("apply", True)
+
+        if isinstance(apply_row, str):
+            apply_row = apply_row.strip().lower() in ("true", "1", "yes", "y")
+
+        if not apply_row:
+            continue
+
+        old_label = clean_text(row.get("old_label", ""))
+        new_label = clean_text(row.get("new_label", ""))
+
+        if not old_label and not new_label:
+            continue
+
+        if not old_label or not new_label:
+            warnings.append(f"Mapping row {idx} is incomplete and was ignored.")
+            continue
+
+        if not probable_grid_label(old_label):
+            warnings.append(f"Mapping row {idx}: old label '{old_label}' does not look like a grid label.")
+
+        if not probable_grid_label(new_label):
+            warnings.append(f"Mapping row {idx}: new label '{new_label}' does not look like a grid label.")
+
+        if old_label in mapping and mapping[old_label] != new_label:
+            warnings.append(
+                f"Duplicate old label '{old_label}' has conflicting values. Keeping first: {mapping[old_label]}."
+            )
+            continue
+
+        if old_label != new_label:
+            mapping[old_label] = new_label
+
+    return mapping, warnings
+
+
+def default_mapping_df(csv_rows):
+    rows = list(csv_rows)
+
+    # Add blank manual rows.
+    for _ in range(8):
+        rows.append({
+            "apply": True,
+            "old_label": "",
+            "new_label": "",
+        })
+
+    return pd.DataFrame(rows, columns=["apply", "old_label", "new_label"])
+
+
+# =========================================================
+# BEAM DETAIL MARKER DETECTION
+# =========================================================
+
+def text_inside_circle(text_point, circle_center, radius, extra_gap):
+    return euclidean(text_point, circle_center) <= radius + extra_gap
+
+
+def detect_detail_label_markers(
+    doc,
+    text_layer,
+    circle_layer,
+    mapping,
+    text_gap,
+    write_mode,
+    require_mapping_for_preview=False,
+):
+    texts = extract_texts(doc, text_layer)
+    circles = extract_circles(doc, circle_layer)
+
+    markers = []
+    rejected = []
+
+    for c in circles:
+        center = c["center"]
+        radius = c["radius"]
+
+        candidates = []
+
+        for t in texts:
+            label = clean_text(t["text"])
+
+            if not label:
+                continue
+
+            if not probable_grid_label(label):
+                continue
+
+            if is_zero_padded_detail_number(label):
+                continue
+
+            if require_mapping_for_preview and label not in mapping:
+                continue
+
+            if text_inside_circle(t["point"], center, radius, extra_gap=text_gap):
+                candidates.append(t)
+
+        if not candidates:
+            rejected.append({
+                "circle_center": center,
+                "circle_radius": radius,
+                "reason": "No probable grid label text inside circle",
+                "circle_layer": c.get("layer", ""),
+                "circle_source": c.get("source", ""),
+            })
+            continue
+
+        candidates = sorted(candidates, key=lambda t: euclidean(t["point"], center))
+        t = candidates[0]
+
+        old_label = clean_text(t["text"])
+        new_label = mapping.get(old_label, "")
+
+        marker = {
+            "old_label": old_label,
+            "new_label": new_label,
+            "mapped": bool(new_label),
+            "entity": t["entity"],
+            "text_point": t["point"],
+            "circle_center": center,
+            "circle_radius": radius,
+            "text_layer": t.get("layer", ""),
+            "circle_layer": c.get("layer", ""),
+            "text_source": t.get("source", ""),
+            "text_type": t.get("type", ""),
+            "text_handle": t.get("handle", ""),
+            "circle_source": c.get("source", ""),
+            "circle_handle": c.get("handle", ""),
+            "candidate_texts": [x["text"] for x in candidates[:5]],
+            "text_matches": len(candidates),
+        }
+
+        profile = marker_write_profile(marker, write_mode)
+
+        marker["writable"] = profile["writable"]
+        marker["write_risk"] = profile["write_risk"]
+        marker["write_reason"] = profile["write_reason"]
+
+        confidence = 60
+
+        if len(candidates) == 1:
+            confidence += 15
+
+        if marker["mapped"]:
+            confidence += 15
+
+        if marker["writable"]:
+            confidence += 10
+        else:
+            confidence -= 20
+
+        marker["confidence"] = max(0, min(100, confidence))
+
+        markers.append(marker)
+
+    return {
+        "texts": texts,
+        "circles": circles,
+        "markers": markers,
+        "rejected": rejected,
+    }
+
+
+def build_preview_rows(markers):
+    rows = []
+
+    for idx, m in enumerate(markers, start=1):
+        old_label = clean_text(m.get("old_label", ""))
+        new_label = clean_text(m.get("new_label", ""))
+
+        will_change = bool(new_label and old_label != new_label and m.get("writable"))
+
+        rows.append({
+            "apply": will_change,
+            "row_id": idx,
+            "old_label": old_label,
+            "new_label": new_label,
+            "will_change": will_change,
+            "mapped": m.get("mapped", False),
+            "writable": m.get("writable", False),
+            "write_risk": m.get("write_risk", ""),
+            "write_reason": m.get("write_reason", ""),
+            "confidence": m.get("confidence", 0),
+            "text_source": m.get("text_source", ""),
+            "text_type": m.get("text_type", ""),
+            "text_layer": m.get("text_layer", ""),
+            "circle_layer": m.get("circle_layer", ""),
+            "text_handle": m.get("text_handle", ""),
+            "x": round(float(m["circle_center"][0]), 3),
+            "y": round(float(m["circle_center"][1]), 3),
+        })
+
+    return rows
+
+
+def build_dry_run_summary_from_preview(approved_markers, skipped_markers, all_markers):
+    """
+    Display-only dry-run summary.
+    This does not modify DXF, mappings, markers, detection, or apply logic.
+    """
+
+    total_detected = len(all_markers or [])
+
+    mapped_found = len([
+        m for m in all_markers
+        if m.get("mapped")
+    ])
+
+    approved_rows = len(approved_markers or [])
+
+    approved_changes = len([
+        m for m in approved_markers
+        if clean_text(m.get("old_label", "")) != clean_text(m.get("new_label", ""))
+        and m.get("writable")
+        and clean_text(m.get("new_label", ""))
+    ])
+
+    already_matching = len([
+        m for m in approved_markers
+        if clean_text(m.get("old_label", "")) == clean_text(m.get("new_label", ""))
+        and clean_text(m.get("new_label", ""))
+    ])
+
+    blocked_or_not_writable = len([
+        m for m in approved_markers
+        if not m.get("writable")
+    ])
+
+    unmapped_detected = len([
+        m for m in all_markers
+        if not m.get("mapped")
+    ])
+
+    unchecked_rows = len(skipped_markers or [])
+
+    return {
+        "total_detected": total_detected,
+        "mapped_found": mapped_found,
+        "approved_rows": approved_rows,
+        "approved_changes": approved_changes,
+        "already_matching": already_matching,
+        "blocked_or_not_writable": blocked_or_not_writable,
+        "unmapped_detected": unmapped_detected,
+        "unchecked_rows": unchecked_rows,
+    }
+
+
+def preview_editor_to_approved_markers(markers, editor_result):
+    if editor_result is None:
+        return [], markers
+
+    try:
+        rows = editor_result.to_dict("records")
+    except Exception:
+        rows = list(editor_result)
+
+    marker_by_id = {
+        i + 1: marker
+        for i, marker in enumerate(markers)
+    }
+
+    approved = []
+    skipped = []
+
+    for row in rows:
+        row_id = row.get("row_id")
+        marker = marker_by_id.get(row_id)
+
+        if marker is None:
+            continue
+
+        apply_row = row.get("apply", False)
+
+        if isinstance(apply_row, str):
+            apply_row = apply_row.strip().lower() in ("true", "1", "yes", "y")
+
+        edited_new_label = clean_text(row.get("new_label", marker.get("new_label", "")))
+
+        marker_copy = dict(marker)
+        marker_copy["new_label"] = edited_new_label
+
+        if apply_row:
+            approved.append(marker_copy)
+        else:
+            skipped.append(marker_copy)
+
+    return approved, skipped
+
+
+def apply_label_changes(markers):
+    changed = 0
+    skipped = 0
+    audit = []
+    seen_handles = set()
+
+    for m in markers:
+        entity = m["entity"]
+        handle = m.get("text_handle") or get_entity_handle(entity) or f"entity_{id(entity)}"
+
+        if handle in seen_handles:
+            skipped += 1
+            audit.append({
+                "old_label": m.get("old_label", ""),
+                "new_label": m.get("new_label", ""),
+                "changed": False,
+                "skipped": True,
+                "reason": "duplicate_entity_handle_skipped",
+                "text_handle": handle,
+                "text_layer": m.get("text_layer", ""),
+            })
+            continue
+
+        seen_handles.add(handle)
+
+        old_label = get_text_value(entity)
+        new_label = clean_text(m.get("new_label", ""))
+
+        base = {
+            "old_label": old_label,
+            "new_label": new_label,
+            "text_handle": handle,
+            "text_layer": m.get("text_layer", ""),
+            "circle_layer": m.get("circle_layer", ""),
+            "text_source": m.get("text_source", ""),
+            "text_type": m.get("text_type", ""),
+            "write_risk": m.get("write_risk", ""),
+            "write_reason": m.get("write_reason", ""),
+            "confidence": m.get("confidence", ""),
+            "x": round(float(m["circle_center"][0]), 3),
+            "y": round(float(m["circle_center"][1]), 3),
+        }
+
+        if not m.get("writable"):
+            skipped += 1
+            row = dict(base)
+            row.update({
+                "changed": False,
+                "skipped": True,
+                "reason": "not_writable",
+            })
+            audit.append(row)
+            continue
+
+        if not new_label:
+            skipped += 1
+            row = dict(base)
+            row.update({
+                "changed": False,
+                "skipped": True,
+                "reason": "blank_new_label",
+            })
+            audit.append(row)
+            continue
+
+        if old_label == new_label:
+            row = dict(base)
+            row.update({
+                "changed": False,
+                "skipped": False,
+                "reason": "already_matches",
+            })
+            audit.append(row)
+            continue
+
+        ok = set_text_value(entity, new_label)
+
+        if ok:
+            changed += 1
+        else:
+            skipped += 1
+
+        row = dict(base)
+        row.update({
+            "changed": ok,
+            "skipped": not ok,
+            "reason": "updated" if ok else "write_failed",
+        })
+        audit.append(row)
+
+    return changed, skipped, audit
+
+
+# =========================================================
+# SESSION STATE
+# =========================================================
+
+def init_state():
+    defaults = {
+        "doc_loaded": False,
+        "doc": None,
+        "dxf_name": "",
+        "dxf_sig": None,
+        "detection": {},
+        "preview_rows": [],
+        "audit": [],
+        "changed": 0,
+        "skipped": 0,
+        "prepared": False,
+    }
+
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+def reset_state():
+    for k in [
+        "doc_loaded",
+        "doc",
+        "dxf_name",
+        "dxf_sig",
+        "detection",
+        "preview_rows",
+        "audit",
+        "changed",
+        "skipped",
+        "prepared",
+    ]:
+        if k in st.session_state:
+            del st.session_state[k]
+
+
+init_state()
+
+
+# =========================================================
+# UI - SETTINGS
+# =========================================================
+
+st.markdown("### 1. Mapping Source")
+
+m1, m2 = st.columns(2)
+
+with m1:
+    audit_csv_file = st.file_uploader(
+        "Optional: Upload Plan Sync Audit CSV",
+        type=["csv"],
+        help="Recommended if you already ran Tool 2. The tool reads old_label → new_label mapping.",
+        key="audit_csv_upload",
+    )
+
+with m2:
+    st.info(
+        "If no CSV is available, manually enter old/new label mapping below. "
+        "Manual edits override or add to CSV mappings."
+    )
+
+csv_rows, csv_warnings = mapping_from_audit_csv(audit_csv_file)
+
+for w in csv_warnings:
+    st.warning(w)
+
+st.write("#### Label Mapping Table")
+
+mapping_df = default_mapping_df(csv_rows)
+
+edited_mapping = st.data_editor(
+    mapping_df,
+    use_container_width=True,
+    hide_index=True,
+    num_rows="dynamic",
+    column_config={
+        "apply": st.column_config.CheckboxColumn(
+            "Use?",
+            default=True,
+            help="Uncheck a mapping row to ignore it.",
+        ),
+        "old_label": st.column_config.TextColumn(
+            "Old Label",
+            help="Label currently found in beam detail bubbles.",
+        ),
+        "new_label": st.column_config.TextColumn(
+            "New Label",
+            help="Replacement label.",
+        ),
+    },
+    key="mapping_editor",
+)
+
+mapping, mapping_warnings = normalize_mapping_rows(
+    edited_mapping.to_dict("records")
+)
+
+for w in mapping_warnings:
+    st.warning(w)
+
+st.write({
+    "active_mapping_count": len(mapping),
+    "mapping": mapping,
+})
+
+# Safe addition:
+# Optional mapping export. This only exports the current old_label -> new_label table.
+# It does not affect DXF detection or writing.
+if mapping:
+    mapping_export_df = pd.DataFrame(
+        [
             {
                 "old_label": old_label,
                 "new_label": new_label,
             }
-        )
-
-    if not out_rows:
-        return pd.DataFrame(columns=["old_label", "new_label"])
-
-    out = pd.DataFrame(out_rows)
-    out = out.drop_duplicates(subset=["old_label"], keep="last").reset_index(drop=True)
-    return out
-
-
-def dataframe_to_mapping(df: pd.DataFrame) -> Dict[str, str]:
-    """Convert manual/editor mapping table to dict."""
-    mapping = {}
-
-    if df is None or df.empty:
-        return mapping
-
-    if "old_label" not in df.columns or "new_label" not in df.columns:
-        return mapping
-
-    for _, row in df.iterrows():
-        old_label = clean_text(row.get("old_label", ""))
-        new_label = clean_text(row.get("new_label", ""))
-
-        if not old_label or not new_label:
-            continue
-
-        if old_label == new_label:
-            continue
-
-        mapping[old_label] = new_label
-
-    return mapping
-
-
-def mapping_df_with_blank_rows(base_df: pd.DataFrame, blank_rows: int = 5) -> pd.DataFrame:
-    if base_df is None or base_df.empty:
-        base_df = pd.DataFrame(columns=["old_label", "new_label"])
-
-    base_df = base_df[["old_label", "new_label"]].copy()
-
-    blanks = pd.DataFrame(
-        [{"old_label": "", "new_label": ""} for _ in range(blank_rows)]
+            for old_label, new_label in sorted(mapping.items())
+        ]
     )
 
-    return pd.concat([base_df, blanks], ignore_index=True)
+    st.download_button(
+        "📄 Download Current Mapping CSV",
+        data=mapping_export_df.to_csv(index=False).encode("utf-8"),
+        file_name="BEAM_DETAIL_LABEL_MAPPING.csv",
+        mime="text/csv",
+        key="download_beam_detail_mapping_csv",
+    )
 
 
-# ============================================================
-# DXF reading / writing
-# ============================================================
+st.markdown("### 2. Upload Beam Detail DXF")
 
-def read_dxf_from_upload(uploaded_file):
-    """Read DXF from Streamlit uploader."""
-    data = uploaded_file.getvalue()
+dxf_file = st.file_uploader(
+    "Beam Detail / Target DXF",
+    type=["dxf"],
+    key="beam_detail_dxf_upload",
+)
 
-    # DXF is normally text. Try utf-8 first, fallback latin1.
-    try:
-        text = data.decode("utf-8")
-    except Exception:
-        text = data.decode("latin1", errors="ignore")
+dxf_sig = uploaded_file_signature(dxf_file)
 
-    return ezdxf.read(io.StringIO(text))
+if dxf_sig != st.session_state.dxf_sig:
+    reset_state()
+    init_state()
+    st.session_state.dxf_sig = dxf_sig
 
-
-def write_dxf_to_bytes(doc) -> bytes:
-    """Write ezdxf document to downloadable bytes."""
-    stream = io.StringIO()
-    doc.write(stream)
-    return stream.getvalue().encode("utf-8", errors="ignore")
-
-
-def get_layer_names(doc) -> List[str]:
-    try:
-        names = sorted([layer.dxf.name for layer in doc.layers])
-        return names
-    except Exception:
-        return []
-
-
-# ============================================================
-# DXF entity extraction
-# ============================================================
-
-def get_entity_layer(entity) -> str:
-    try:
-        return str(entity.dxf.layer)
-    except Exception:
-        return ""
-
-
-def get_entity_handle(entity) -> str:
-    try:
-        return str(entity.dxf.handle)
-    except Exception:
-        return ""
-
-
-def extract_entity_text(entity) -> str:
-    dxftype = entity.dxftype()
-
-    try:
-        if dxftype in {"TEXT", "ATTRIB"}:
-            return clean_text(entity.dxf.text)
-
-        if dxftype == "MTEXT":
-            try:
-                return clean_text(entity.plain_text())
-            except Exception:
-                return clean_text(entity.text)
-
-    except Exception:
-        return ""
-
-    return ""
-
-
-def get_text_insert_xy(entity) -> Tuple[float, float]:
-    try:
-        if entity.dxftype() in {"TEXT", "ATTRIB", "MTEXT"}:
-            return get_xy(entity.dxf.insert)
-    except Exception:
-        pass
-
-    return 0.0, 0.0
-
-
-def extract_text_records(doc, include_insert_attributes: bool = True) -> List[Dict[str, Any]]:
-    """
-    Extract text-like records.
-
-    Writable:
-    - modelspace TEXT
-    - modelspace MTEXT
-    - ATTRIB if write mode allows it
-
-    Review-only:
-    - block definition TEXT/MTEXT transformed through simple INSERT
-    """
-    records = []
-    msp = doc.modelspace()
-
-    # Modelspace TEXT/MTEXT
-    for e in msp:
-        dxftype = e.dxftype()
-
-        if dxftype in {"TEXT", "MTEXT"}:
-            label = extract_entity_text(e)
-            if not label:
-                continue
-
-            x, y = get_text_insert_xy(e)
-
-            records.append(
-                {
-                    "entity": e,
-                    "raw_text": label,
-                    "label": clean_text(label),
-                    "x": x,
-                    "y": y,
-                    "layer": get_entity_layer(e),
-                    "handle": get_entity_handle(e),
-                    "text_type": dxftype,
-                    "text_source": "modelspace",
-                    "base_writable": True,
-                }
-            )
-
-        # INSERT attributes
-        if dxftype == "INSERT" and include_insert_attributes:
-            try:
-                attribs = list(e.attribs())
-            except Exception:
-                attribs = []
-
-            for a in attribs:
-                label = extract_entity_text(a)
-                if not label:
-                    continue
-
-                x, y = get_text_insert_xy(a)
-
-                records.append(
-                    {
-                        "entity": a,
-                        "raw_text": label,
-                        "label": clean_text(label),
-                        "x": x,
-                        "y": y,
-                        "layer": get_entity_layer(a) or get_entity_layer(e),
-                        "handle": get_entity_handle(a),
-                        "text_type": "ATTRIB",
-                        "text_source": "insert_attribute",
-                        "base_writable": True,
-                    }
-                )
-
-    # Simple block TEXT/MTEXT inside INSERT - review only, not written
-    for ins in msp.query("INSERT"):
-        try:
-            block_name = ins.dxf.name
-            block = doc.blocks.get(block_name)
-        except Exception:
-            continue
-
-        ix, iy = get_xy(ins.dxf.insert)
+if dxf_file:
+    if not st.session_state.doc_loaded:
+        tmp_path = None
 
         try:
-            xs = float(ins.dxf.xscale)
-        except Exception:
-            xs = 1.0
+            tmp_path = save_uploaded_to_temp(dxf_file)
+            st.session_state.doc = ezdxf.readfile(tmp_path)
+            st.session_state.dxf_name = dxf_file.name
+            st.session_state.doc_loaded = True
+            st.success("DXF loaded successfully.")
 
-        try:
-            ys = float(ins.dxf.yscale)
-        except Exception:
-            ys = 1.0
+        except Exception as e:
+            st.error(f"Failed to load DXF: {e}")
+            st.stop()
 
-        try:
-            rot = float(ins.dxf.rotation)
-        except Exception:
-            rot = 0.0
+        finally:
+            safe_remove_file(tmp_path)
 
-        for be in block:
-            if be.dxftype() not in {"TEXT", "MTEXT"}:
-                continue
-
-            label = extract_entity_text(be)
-            if not label:
-                continue
-
-            lx, ly = get_text_insert_xy(be)
-            wx, wy = transform_block_point(lx, ly, ix, iy, xs, ys, rot)
-
-            records.append(
-                {
-                    "entity": None,
-                    "raw_text": label,
-                    "label": clean_text(label),
-                    "x": wx,
-                    "y": wy,
-                    "layer": get_entity_layer(be),
-                    "handle": f"{get_entity_handle(ins)}:{get_entity_handle(be)}",
-                    "text_type": be.dxftype(),
-                    "text_source": "block_definition_review_only",
-                    "base_writable": False,
-                }
-            )
-
-    return records
+else:
+    st.info("Upload a Beam Detail DXF to continue.")
+    st.stop()
 
 
-def extract_circle_records(doc) -> List[Dict[str, Any]]:
-    """
-    Extract modelspace circles and simple block circles inside INSERT.
-
-    Block circles are used for detection/review but are not themselves modified.
-    """
-    records = []
-    msp = doc.modelspace()
-
-    # Modelspace CIRCLE
-    for c in msp.query("CIRCLE"):
-        try:
-            cx, cy = get_xy(c.dxf.center)
-            r = float(c.dxf.radius)
-        except Exception:
-            continue
-
-        records.append(
-            {
-                "x": cx,
-                "y": cy,
-                "radius": r,
-                "layer": get_entity_layer(c),
-                "handle": get_entity_handle(c),
-                "circle_source": "modelspace",
-            }
-        )
-
-    # Simple block CIRCLE inside INSERT
-    for ins in msp.query("INSERT"):
-        try:
-            block_name = ins.dxf.name
-            block = doc.blocks.get(block_name)
-        except Exception:
-            continue
-
-        ix, iy = get_xy(ins.dxf.insert)
-
-        try:
-            xs = float(ins.dxf.xscale)
-        except Exception:
-            xs = 1.0
-
-        try:
-            ys = float(ins.dxf.yscale)
-        except Exception:
-            ys = 1.0
-
-        try:
-            rot = float(ins.dxf.rotation)
-        except Exception:
-            rot = 0.0
-
-        scale_for_radius = (abs(xs) + abs(ys)) / 2.0
-
-        for bc in block:
-            if bc.dxftype() != "CIRCLE":
-                continue
-
-            try:
-                lx, ly = get_xy(bc.dxf.center)
-                local_r = float(bc.dxf.radius)
-            except Exception:
-                continue
-
-            wx, wy = transform_block_point(lx, ly, ix, iy, xs, ys, rot)
-            wr = abs(local_r * scale_for_radius)
-
-            records.append(
-                {
-                    "x": wx,
-                    "y": wy,
-                    "radius": wr,
-                    "layer": get_entity_layer(bc),
-                    "handle": f"{get_entity_handle(ins)}:{get_entity_handle(bc)}",
-                    "circle_source": "block_circle",
-                }
-            )
-
-    return records
+doc = st.session_state.doc
+layers = get_layer_names(doc)
+layer_options = [ALL_LAYERS] + layers
 
 
-# ============================================================
-# Detection
-# ============================================================
+st.markdown("### 3. Detection Settings")
 
-def layer_allowed(layer: str, selected_layers: List[str], use_all_layers: bool) -> bool:
-    if use_all_layers:
-        return True
+c1, c2, c3 = st.columns(3)
 
-    if not selected_layers:
-        return True
+with c1:
+    text_layer = st.selectbox(
+        "Beam Detail Label Text Layer",
+        layer_options,
+        index=0,
+        help="Choose the layer containing endpoint label text. Use ALL_LAYERS if unsure.",
+        key="beam_text_layer",
+    )
 
-    return layer in selected_layers
+with c2:
+    circle_layer = st.selectbox(
+        "Beam Detail Bubble/Circle Layer",
+        layer_options,
+        index=0,
+        help="Choose the layer containing circular endpoint bubbles. Use ALL_LAYERS if unsure.",
+        key="beam_circle_layer",
+    )
+
+with c3:
+    text_gap = st.slider(
+        "Text-in-Bubble Gap",
+        20.0,
+        2000.0,
+        180.0,
+        10.0,
+        help="Extra tolerance for matching text to circular bubbles.",
+        key="beam_text_gap",
+    )
+
+c4, c5 = st.columns(2)
+
+with c4:
+    write_mode = st.selectbox(
+        "Write Mode",
+        [
+            WRITE_MODE_SAFE,
+            WRITE_MODE_ATTRIB,
+        ],
+        index=0,
+        help="Start with Safe mode. Attribute mode writes INSERT attributes too.",
+        key="beam_write_mode",
+    )
+
+with c5:
+    require_mapping_for_preview = st.checkbox(
+        "Only show labels that exist in mapping",
+        value=False,
+        help="If ON, unmapped bubble labels are hidden from preview.",
+        key="require_mapping_for_preview",
+    )
+
+analyze = st.button(
+    "🔎 Analyze Beam Detail Labels",
+    type="primary",
+    key="analyze_beam_detail_labels",
+)
 
 
-def detect_bubble_labels(
-    text_records: List[Dict[str, Any]],
-    circle_records: List[Dict[str, Any]],
-    text_layers: List[str],
-    circle_layers: List[str],
-    use_all_layers: bool,
-    text_in_bubble_gap: float,
-    max_numeric_label: int,
-    min_circle_radius: float,
-    max_circle_radius: float,
-    require_mapping_for_preview: bool,
-    mapping: Dict[str, str],
-    write_mode: str,
-) -> pd.DataFrame:
-    rows = []
-    row_id = 1
+# =========================================================
+# ANALYZE
+# =========================================================
 
-    for t in text_records:
-        label = clean_text(t.get("label", ""))
+if analyze:
+    if not mapping:
+        st.warning("No active mapping found. Add mapping rows or upload a valid audit CSV first.")
 
-        if not probable_grid_label(label, max_numeric_label=max_numeric_label):
-            continue
+    detection = detect_detail_label_markers(
+        doc,
+        text_layer=text_layer,
+        circle_layer=circle_layer,
+        mapping=mapping,
+        text_gap=text_gap,
+        write_mode=write_mode,
+        require_mapping_for_preview=require_mapping_for_preview,
+    )
 
-        if require_mapping_for_preview and label not in mapping:
-            continue
+    preview_rows = build_preview_rows(detection["markers"])
 
-        if not layer_allowed(t.get("layer", ""), text_layers, use_all_layers):
-            continue
+    st.session_state.detection = detection
+    st.session_state.preview_rows = preview_rows
+    st.session_state.audit = []
+    st.session_state.changed = 0
+    st.session_state.skipped = 0
+    st.session_state.prepared = True
 
-        best_circle = None
-        best_score = None
+    mapped_count = len([m for m in detection["markers"] if m.get("mapped")])
+    writable_mapped = len([
+        m for m in detection["markers"]
+        if m.get("mapped") and m.get("writable")
+    ])
 
-        for c in circle_records:
-            if not layer_allowed(c.get("layer", ""), circle_layers, use_all_layers):
-                continue
+    st.success(
+        f"Analysis complete. Circles found: {len(detection['circles'])}. "
+        f"Text candidates found: {len(detection['texts'])}. "
+        f"Detail label markers found: {len(detection['markers'])}. "
+        f"Mapped labels: {mapped_count}. Writable mapped labels: {writable_mapped}."
+    )
 
-            radius = float(c.get("radius", 0.0))
-            if radius <= 0:
-                continue
 
-            if min_circle_radius > 0 and radius < min_circle_radius:
-                continue
+# =========================================================
+# RESULTS / PREVIEW / APPLY
+# =========================================================
 
-            if max_circle_radius > 0 and radius > max_circle_radius:
-                continue
+if st.session_state.prepared:
+    st.markdown("---")
+    st.markdown("### 4. Detection Summary")
 
-            d = dist2d(t["x"], t["y"], c["x"], c["y"])
+    detection = st.session_state.detection
 
-            # Text must be inside or near the circle
-            if d <= radius + float(text_in_bubble_gap):
-                # Lower is better
-                normalized = d / radius if radius else d
+    summary = {
+        "texts_found": len(detection.get("texts", [])),
+        "circles_found": len(detection.get("circles", [])),
+        "detail_label_markers_found": len(detection.get("markers", [])),
+        "rejected_circles": len(detection.get("rejected", [])),
+        "mapped_markers": len([m for m in detection.get("markers", []) if m.get("mapped")]),
+        "writable_markers": len([m for m in detection.get("markers", []) if m.get("writable")]),
+        "write_mode": write_mode,
+    }
 
-                if best_score is None or normalized < best_score:
-                    best_score = normalized
-                    best_circle = c
+    st.write(summary)
 
-        if best_circle is None:
-            continue
+    if detection.get("rejected"):
+        with st.expander("Rejected circles / no label found", expanded=False):
+            st.dataframe(detection["rejected"], use_container_width=True)
 
-        mapped = label in mapping
-        proposed_new = mapping.get(label, "")
+    st.markdown("### 5. Preview Beam Detail Label Changes")
 
-        will_change = bool(mapped and proposed_new and proposed_new != label)
+    if not st.session_state.preview_rows:
+        st.info("No beam detail label markers found.")
+    else:
+        preview_df = pd.DataFrame(st.session_state.preview_rows)
 
-        writable, write_risk, write_reason = get_write_status(t, write_mode)
-
-        default_apply = bool(mapped and will_change and writable)
-
-        confidence = "high" if best_score is not None and best_score <= 1.0 else "medium"
-
-        rows.append(
-            {
-                "apply": default_apply,
-                "row_id": row_id,
-                "old_label": label,
-                "new_label": proposed_new,
-                "will_change": will_change,
-                "mapped": mapped,
-                "writable": writable,
-                "write_risk": write_risk,
-                "write_reason": write_reason,
-                "confidence": confidence,
-                "text_source": t.get("text_source", ""),
-                "text_type": t.get("text_type", ""),
-                "text_layer": t.get("layer", ""),
-                "circle_layer": best_circle.get("layer", ""),
-                "text_handle": t.get("handle", ""),
-                "circle_handle": best_circle.get("handle", ""),
-                "x": round(float(t.get("x", 0.0)), 3),
-                "y": round(float(t.get("y", 0.0)), 3),
-            }
-        )
-
-        row_id += 1
-
-    if not rows:
-        return pd.DataFrame(
-            columns=[
-                "apply",
+        edited_preview = st.data_editor(
+            preview_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "apply": st.column_config.CheckboxColumn(
+                    "Apply?",
+                    default=True,
+                    help="Only checked rows will be modified.",
+                ),
+                "new_label": st.column_config.TextColumn(
+                    "New Label",
+                    help="Editable replacement label.",
+                ),
+            },
+            disabled=[
                 "row_id",
                 "old_label",
-                "new_label",
                 "will_change",
                 "mapped",
                 "writable",
@@ -712,581 +1235,114 @@ def detect_bubble_labels(
                 "text_layer",
                 "circle_layer",
                 "text_handle",
-                "circle_handle",
                 "x",
                 "y",
-            ]
-        )
-
-    return pd.DataFrame(rows)
-
-
-def get_write_status(text_record: Dict[str, Any], write_mode: str) -> Tuple[bool, str, str]:
-    """
-    Decide whether a detected text record is writable.
-
-    write_mode:
-    - Safe mode: modelspace TEXT/MTEXT only
-    - Attribute mode: modelspace TEXT/MTEXT + INSERT attributes
-    """
-    source = text_record.get("text_source", "")
-    text_type = text_record.get("text_type", "")
-    base_writable = bool(text_record.get("base_writable", False))
-
-    if not base_writable:
-        return False, "blocked", "Review-only text from block definition; not modified."
-
-    if source == "modelspace" and text_type in {"TEXT", "MTEXT"}:
-        return True, "safe", "Writable modelspace TEXT/MTEXT."
-
-    if source == "insert_attribute" and text_type == "ATTRIB":
-        if write_mode.startswith("Attribute"):
-            return True, "attribute", "Writable INSERT attribute because Attribute Mode is enabled."
-        return False, "blocked", "INSERT attribute blocked in Safe Mode."
-
-    return False, "blocked", "Unsupported or unsafe text source."
-
-
-# ============================================================
-# Dry-run summary
-# ============================================================
-
-def build_dry_run_summary(preview_df: pd.DataFrame) -> Dict[str, int]:
-    """
-    Display-only dry-run summary.
-
-    This does not modify the DXF, preview table, mappings, or apply logic.
-    It only counts what is already present in the preview dataframe.
-    """
-    if preview_df is None or preview_df.empty:
-        return {
-            "total_detected": 0,
-            "mapped_found": 0,
-            "approved_changes": 0,
-            "already_matching": 0,
-            "blocked_or_not_writable": 0,
-            "unmapped_ignored": 0,
-        }
-
-    df = preview_df.copy()
-
-    def safe_bool_col(col_name, default=False):
-        if col_name not in df.columns:
-            return pd.Series([default] * len(df), index=df.index)
-
-        return df[col_name].fillna(default).apply(boolish)
-
-    mapped = safe_bool_col("mapped", False)
-    writable = safe_bool_col("writable", False)
-    will_change = safe_bool_col("will_change", False)
-    apply_col = safe_bool_col("apply", False)
-
-    return {
-        "total_detected": int(len(df)),
-        "mapped_found": int(mapped.sum()),
-        "approved_changes": int((mapped & writable & will_change & apply_col).sum()),
-        "already_matching": int((mapped & ~will_change).sum()),
-        "blocked_or_not_writable": int((mapped & will_change & ~writable).sum()),
-        "unmapped_ignored": int((~mapped).sum()),
-    }
-
-
-# ============================================================
-# Apply changes
-# ============================================================
-
-def set_entity_text(entity, new_text: str) -> bool:
-    """Write new text to TEXT/MTEXT/ATTRIB entity."""
-    if entity is None:
-        return False
-
-    try:
-        dxftype = entity.dxftype()
-
-        if dxftype in {"TEXT", "ATTRIB"}:
-            entity.dxf.text = str(new_text)
-            return True
-
-        if dxftype == "MTEXT":
-            # Keep it simple: replace MTEXT content with plain label.
-            entity.text = str(new_text)
-            return True
-
-    except Exception:
-        return False
-
-    return False
-
-
-def apply_approved_changes(
-    text_records: List[Dict[str, Any]],
-    edited_preview_df: pd.DataFrame,
-    write_mode: str,
-) -> pd.DataFrame:
-    """
-    Apply approved changes from edited preview table.
-
-    Dedupe by text_handle so the same entity is not changed twice.
-    """
-    handle_to_record = {
-        str(r.get("handle", "")): r
-        for r in text_records
-        if r.get("handle", "")
-    }
-
-    audit_rows = []
-    changed_handles = set()
-
-    if edited_preview_df is None or edited_preview_df.empty:
-        return pd.DataFrame(columns=AUDIT_COLUMNS)
-
-    for _, row in edited_preview_df.iterrows():
-        apply_row = boolish(row.get("apply", False))
-        old_label = clean_text(row.get("old_label", ""))
-        new_label = clean_text(row.get("new_label", ""))
-        text_handle = str(row.get("text_handle", "")).strip()
-
-        mapped = boolish(row.get("mapped", False))
-        writable = boolish(row.get("writable", False))
-        will_change = boolish(row.get("will_change", False))
-
-        base_audit = {
-            "old_label": old_label,
-            "new_label": new_label,
-            "changed": False,
-            "skipped": True,
-            "reason": "",
-            "text_handle": text_handle,
-            "text_layer": row.get("text_layer", ""),
-            "circle_layer": row.get("circle_layer", ""),
-            "text_source": row.get("text_source", ""),
-            "text_type": row.get("text_type", ""),
-            "write_risk": row.get("write_risk", ""),
-            "write_reason": row.get("write_reason", ""),
-            "confidence": row.get("confidence", ""),
-            "x": row.get("x", ""),
-            "y": row.get("y", ""),
-        }
-
-        if not apply_row:
-            base_audit["reason"] = "Not approved."
-            audit_rows.append(base_audit)
-            continue
-
-        if not mapped:
-            base_audit["reason"] = "No mapping."
-            audit_rows.append(base_audit)
-            continue
-
-        if not writable:
-            base_audit["reason"] = "Not writable."
-            audit_rows.append(base_audit)
-            continue
-
-        if not will_change:
-            base_audit["reason"] = "Already matching or no change required."
-            audit_rows.append(base_audit)
-            continue
-
-        if not new_label:
-            base_audit["reason"] = "Blank new label."
-            audit_rows.append(base_audit)
-            continue
-
-        if text_handle in changed_handles:
-            base_audit["reason"] = "Duplicate entity handle skipped."
-            audit_rows.append(base_audit)
-            continue
-
-        rec = handle_to_record.get(text_handle)
-        if not rec:
-            base_audit["reason"] = "Text entity not found."
-            audit_rows.append(base_audit)
-            continue
-
-        writable_now, _, reason_now = get_write_status(rec, write_mode)
-        if not writable_now:
-            base_audit["reason"] = f"Blocked at write time: {reason_now}"
-            audit_rows.append(base_audit)
-            continue
-
-        ok = set_entity_text(rec.get("entity"), new_label)
-
-        if ok:
-            changed_handles.add(text_handle)
-            base_audit["changed"] = True
-            base_audit["skipped"] = False
-            base_audit["reason"] = "Changed."
-        else:
-            base_audit["reason"] = "Write failed."
-
-        audit_rows.append(base_audit)
-
-    if not audit_rows:
-        return pd.DataFrame(columns=AUDIT_COLUMNS)
-
-    return pd.DataFrame(audit_rows, columns=AUDIT_COLUMNS)
-
-
-AUDIT_COLUMNS = [
-    "old_label",
-    "new_label",
-    "changed",
-    "skipped",
-    "reason",
-    "text_handle",
-    "text_layer",
-    "circle_layer",
-    "text_source",
-    "text_type",
-    "write_risk",
-    "write_reason",
-    "confidence",
-    "x",
-    "y",
-]
-
-
-# ============================================================
-# Streamlit App
-# ============================================================
-
-def main():
-    st.set_page_config(
-        page_title="iLoveStructural - Beam Detail Grid Label Sync",
-        layout="wide",
-    )
-
-    st.title("iLoveStructural — Beam Detail Grid Label Sync")
-    st.caption(
-        "Tool 3: Sync grid/axis endpoint labels inside circular bubbles in beam longitudinal details."
-    )
-
-    st.info(
-        "Recommended: Run Tool 2 Plan Grid Label Sync first and upload its audit CSV here. "
-        "If you have not synced the plan, manually enter old/new mappings."
-    )
-
-    # --------------------------------------------------------
-    # Mapping input
-    # --------------------------------------------------------
-    st.header("1. Label Mapping")
-
-    audit_csv = st.file_uploader(
-        "Optional: Upload Tool 2 audit CSV",
-        type=["csv"],
-        help="CSV should contain old_label and new_label columns, or similar names.",
-    )
-
-    csv_mapping_df = pd.DataFrame(columns=["old_label", "new_label"])
-
-    if audit_csv is not None:
-        csv_mapping_df = mapping_from_audit_csv(audit_csv)
-
-        if csv_mapping_df.empty:
-            st.warning(
-                "No mapping rows found in the uploaded CSV. "
-                "You can still enter mappings manually below."
-            )
-        else:
-            st.success(f"Loaded {len(csv_mapping_df)} mapping row(s) from CSV.")
-
-    st.subheader("Manual / Override Mapping Table")
-
-    st.caption(
-        "You may edit this table. Manual rows override CSV mappings when the same old_label appears."
-    )
-
-    initial_mapping_df = mapping_df_with_blank_rows(csv_mapping_df, blank_rows=8)
-
-    mapping_editor_df = st.data_editor(
-        initial_mapping_df,
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "old_label": st.column_config.TextColumn("old_label"),
-            "new_label": st.column_config.TextColumn("new_label"),
-        },
-        key="beam_mapping_editor",
-    )
-
-    mapping = dataframe_to_mapping(mapping_editor_df)
-
-    c_map1, c_map2 = st.columns([1, 3])
-    c_map1.metric("Active mappings", len(mapping))
-
-    mapping_export_df = pd.DataFrame(
-        [{"old_label": k, "new_label": v} for k, v in mapping.items()]
-    )
-
-    c_map2.download_button(
-        "Download mapping CSV",
-        data=mapping_export_df.to_csv(index=False).encode("utf-8"),
-        file_name="beam_label_mapping.csv",
-        mime="text/csv",
-        disabled=mapping_export_df.empty,
-    )
-
-    if mapping:
-        with st.expander("View active mapping dictionary"):
-            st.dataframe(mapping_export_df, use_container_width=True)
-    else:
-        st.warning("No active mappings yet. Add at least one old_label → new_label pair.")
-
-    # --------------------------------------------------------
-    # DXF upload
-    # --------------------------------------------------------
-    st.header("2. Beam Detail DXF")
-
-    dxf_upload = st.file_uploader(
-        "Upload Beam Detail / Target DXF",
-        type=["dxf"],
-    )
-
-    if dxf_upload is None:
-        st.stop()
-
-    try:
-        doc = read_dxf_from_upload(dxf_upload)
-    except Exception as e:
-        st.error(f"Could not read DXF: {e}")
-        st.stop()
-
-    layers = get_layer_names(doc)
-
-    st.success("DXF loaded successfully.")
-
-    # --------------------------------------------------------
-    # Settings
-    # --------------------------------------------------------
-    st.header("3. Detection Settings")
-
-    with st.expander("Layer and safety settings", expanded=True):
-        use_all_layers = st.checkbox(
-            "Use all layers",
-            value=True,
-            help="If checked, text and circles from all layers are considered.",
-        )
-
-        if use_all_layers:
-            text_layers = []
-            circle_layers = []
-        else:
-            text_layers = st.multiselect(
-                "Text layers",
-                options=layers,
-                default=layers,
-            )
-
-            circle_layers = st.multiselect(
-                "Circle / bubble layers",
-                options=layers,
-                default=layers,
-            )
-
-        c1, c2, c3 = st.columns(3)
-
-        text_in_bubble_gap = c1.number_input(
-            "Text-in-bubble gap",
-            min_value=0.0,
-            value=2.0,
-            step=0.5,
-            help="Extra distance allowed outside the circle radius.",
-        )
-
-        max_numeric_label = c2.number_input(
-            "Max numeric grid label",
-            min_value=1,
-            value=99,
-            step=1,
-            help="Numeric labels above this are ignored, helping avoid dimensions.",
-        )
-
-        require_mapping_for_preview = c3.checkbox(
-            "Show mapped labels only",
-            value=True,
-            help="Recommended. Reduces noise by hiding unmapped detected bubble labels.",
-        )
-
-        c4, c5, c6 = st.columns(3)
-
-        min_circle_radius = c4.number_input(
-            "Minimum circle radius",
-            min_value=0.0,
-            value=0.0,
-            step=0.5,
-            help="0 means no minimum filter.",
-        )
-
-        max_circle_radius = c5.number_input(
-            "Maximum circle radius",
-            min_value=0.0,
-            value=0.0,
-            step=0.5,
-            help="0 means no maximum filter.",
-        )
-
-        write_mode = c6.selectbox(
-            "Write mode",
-            options=[
-                "Safe mode: modelspace TEXT/MTEXT only",
-                "Attribute mode: modelspace TEXT/MTEXT + INSERT attributes",
             ],
-            index=0,
+            key="beam_preview_editor",
         )
 
-    # --------------------------------------------------------
-    # Extract and detect
-    # --------------------------------------------------------
-    st.header("4. Preview Detected Bubble Labels")
-
-    text_records = extract_text_records(
-        doc,
-        include_insert_attributes=True,
-    )
-
-    circle_records = extract_circle_records(doc)
-
-    c_ext1, c_ext2 = st.columns(2)
-    c_ext1.metric("Text-like records extracted", len(text_records))
-    c_ext2.metric("Circle records extracted", len(circle_records))
-
-    preview_df = detect_bubble_labels(
-        text_records=text_records,
-        circle_records=circle_records,
-        text_layers=text_layers,
-        circle_layers=circle_layers,
-        use_all_layers=use_all_layers,
-        text_in_bubble_gap=text_in_bubble_gap,
-        max_numeric_label=max_numeric_label,
-        min_circle_radius=min_circle_radius,
-        max_circle_radius=max_circle_radius,
-        require_mapping_for_preview=require_mapping_for_preview,
-        mapping=mapping,
-        write_mode=write_mode,
-    )
-
-    if preview_df.empty:
-        st.warning(
-            "No bubble labels detected with the current settings. "
-            "Try increasing Text-in-bubble gap, using all layers, or disabling mapped-only preview."
+        approved_markers, skipped_markers = preview_editor_to_approved_markers(
+            detection["markers"],
+            edited_preview,
         )
-        st.stop()
 
-    st.caption(
-        "Review rows below. Only rows with apply=True, mapped=True, writable=True, "
-        "and will_change=True will be written."
-    )
+        # Safe addition:
+        # Dry-run summary only reads the preview result.
+        # It does not change DXF detection, marker selection, or writing.
+        dry_run_summary = build_dry_run_summary_from_preview(
+            approved_markers=approved_markers,
+            skipped_markers=skipped_markers,
+            all_markers=detection.get("markers", []),
+        )
 
-    edited_preview_df = st.data_editor(
-        preview_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "apply": st.column_config.CheckboxColumn("apply"),
-            "old_label": st.column_config.TextColumn("old_label", disabled=True),
-            "new_label": st.column_config.TextColumn(
-                "new_label",
-                help="You may edit the proposed replacement before applying.",
-            ),
-            "will_change": st.column_config.CheckboxColumn("will_change", disabled=True),
-            "mapped": st.column_config.CheckboxColumn("mapped", disabled=True),
-            "writable": st.column_config.CheckboxColumn("writable", disabled=True),
-        },
-        disabled=[
-            "row_id",
-            "old_label",
-            "will_change",
-            "mapped",
-            "writable",
-            "write_risk",
-            "write_reason",
-            "confidence",
-            "text_source",
-            "text_type",
-            "text_layer",
-            "circle_layer",
-            "text_handle",
-            "circle_handle",
-            "x",
-            "y",
-        ],
-        key="beam_preview_editor",
-    )
+        will_change = dry_run_summary["approved_changes"]
+        blocked = dry_run_summary["blocked_or_not_writable"]
 
-    # --------------------------------------------------------
-    # Dry-run summary
-    # --------------------------------------------------------
-    st.subheader("Dry-Run Summary")
+        st.markdown("### 6. Apply Approved Changes")
 
-    summary = build_dry_run_summary(edited_preview_df)
+        st.write({
+            "total_detected": dry_run_summary["total_detected"],
+            "mapped_found": dry_run_summary["mapped_found"],
+            "approved_rows": dry_run_summary["approved_rows"],
+            "will_change": dry_run_summary["approved_changes"],
+            "already_matching": dry_run_summary["already_matching"],
+            "blocked_or_not_writable": dry_run_summary["blocked_or_not_writable"],
+            "unmapped_detected": dry_run_summary["unmapped_detected"],
+            "unchecked_rows": dry_run_summary["unchecked_rows"],
+        })
 
-    s1, s2, s3 = st.columns(3)
-    s4, s5, s6 = st.columns(3)
+        d1, d2, d3, d4 = st.columns(4)
 
-    s1.metric("Total bubble labels detected", summary["total_detected"])
-    s2.metric("Mapped labels found", summary["mapped_found"])
-    s3.metric("Approved changes", summary["approved_changes"])
+        d1.metric("Detected labels", dry_run_summary["total_detected"])
+        d2.metric("Mapped labels", dry_run_summary["mapped_found"])
+        d3.metric("Will change", dry_run_summary["approved_changes"])
+        d4.metric("Blocked", dry_run_summary["blocked_or_not_writable"])
 
-    s4.metric("Already matching", summary["already_matching"])
-    s5.metric("Blocked / not writable", summary["blocked_or_not_writable"])
-    s6.metric("Unmapped ignored", summary["unmapped_ignored"])
+        confirm = st.checkbox(
+            "I reviewed the preview and understand this will modify the DXF.",
+            value=False,
+            key="confirm_beam_detail_apply",
+        )
 
-    # --------------------------------------------------------
-    # Apply
-    # --------------------------------------------------------
-    st.header("5. Apply Approved Changes")
+        if st.button(
+            "✍️ Apply Approved Beam Detail Label Sync",
+            disabled=not confirm or not approved_markers,
+            key="apply_beam_detail_sync",
+        ):
+            changed, skipped, audit = apply_label_changes(approved_markers)
 
-    st.warning(
-        "This will modify only approved writable labels in memory. "
-        "Your original uploaded DXF is not changed. Download the updated DXF after applying."
-    )
+            unchecked_audit = []
 
-    apply_clicked = st.button(
-        "Apply Approved Beam Detail Label Changes",
-        type="primary",
-        disabled=summary["approved_changes"] == 0,
-    )
+            for m in skipped_markers:
+                unchecked_audit.append({
+                    "old_label": m.get("old_label", ""),
+                    "new_label": m.get("new_label", ""),
+                    "changed": False,
+                    "skipped": True,
+                    "reason": "user_unchecked",
+                    "text_handle": m.get("text_handle", ""),
+                    "text_layer": m.get("text_layer", ""),
+                    "x": round(float(m["circle_center"][0]), 3),
+                    "y": round(float(m["circle_center"][1]), 3),
+                })
 
-    if not apply_clicked:
-        st.stop()
+            st.session_state.changed += changed
+            st.session_state.skipped += skipped + len(skipped_markers)
+            st.session_state.audit.extend(audit + unchecked_audit)
 
-    audit_df = apply_approved_changes(
-        text_records=text_records,
-        edited_preview_df=edited_preview_df,
-        write_mode=write_mode,
-    )
+            if changed:
+                st.success(f"Beam detail label sync complete. Changed {changed} text entities.")
+            else:
+                st.info("Beam detail label sync completed. No text entities needed changing.")
 
-    changed_count = int(audit_df["changed"].sum()) if not audit_df.empty else 0
-    skipped_count = int(audit_df["skipped"].sum()) if not audit_df.empty else 0
+            if skipped:
+                st.warning(f"Skipped {skipped} approved rows.")
 
-    st.success(f"Apply complete. Changed: {changed_count}. Skipped: {skipped_count}.")
+            if skipped_markers:
+                st.info(f"{len(skipped_markers)} rows were unchecked and skipped.")
 
-    st.subheader("Audit Report")
-    st.dataframe(audit_df, use_container_width=True)
+    if st.session_state.audit:
+        st.markdown("### 7. Audit Report")
+        st.dataframe(st.session_state.audit, use_container_width=True)
 
-    audit_bytes = audit_df.to_csv(index=False).encode("utf-8")
-
-    st.download_button(
-        "Download Beam Detail Sync Audit CSV",
-        data=audit_bytes,
-        file_name="beam_detail_label_sync_audit.csv",
-        mime="text/csv",
-    )
-
-    try:
-        updated_dxf_bytes = write_dxf_to_bytes(doc)
+        audit_csv = audit_to_csv_bytes(st.session_state.audit)
 
         st.download_button(
-            "Download Updated Beam Detail DXF",
-            data=updated_dxf_bytes,
-            file_name="beam_detail_labels_synced.dxf",
-            mime="application/dxf",
+            "📄 Download Beam Detail Audit CSV",
+            data=audit_csv,
+            file_name=f"BEAM_DETAIL_AUDIT_{st.session_state.dxf_name}.csv",
+            mime="text/csv",
+            key="download_beam_detail_audit_csv",
         )
 
-    except Exception as e:
-        st.error(f"Could not write updated DXF: {e}")
+    st.markdown("### 8. Download Updated DXF")
 
+    dxf_bytes = write_doc_to_temp_bytes(st.session_state.doc)
 
-if __name__ == "__main__":
-    main()
+    st.download_button(
+        "📥 Download Updated Beam Detail DXF",
+        data=dxf_bytes,
+        file_name=f"BEAM_DETAIL_RELABELED_{st.session_state.dxf_name}",
+        mime="application/dxf",
+        key="download_beam_detail_dxf",
+    )
