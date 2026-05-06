@@ -20,7 +20,7 @@ st.set_page_config(
 st.title("🏗️ iLoveStructural")
 st.subheader("Tool 4: Architectural Wall Centerline Agent")
 st.caption(
-    "Upload architectural DXF → detect wall face pairs → generate wall centerlines → bridge openings → detect slab panels → export clean structural DXF."
+    "Upload architectural DXF → detect wall face pairs → generate wall centerlines → bridge openings → export clean structural centerlines."
 )
 
 
@@ -83,6 +83,20 @@ def safe_layer(doc, name, color=7):
             doc.layers.new(name=name, dxfattribs={"color": color})
     except Exception:
         pass
+
+
+def layer_color_for_thickness(thickness):
+    try:
+        t = int(thickness)
+    except Exception:
+        t = 0
+
+    if t == 225:
+        return 1  # red
+    if t == 150:
+        return 3  # green
+
+    return 7
 
 
 # =========================================================
@@ -173,6 +187,26 @@ def filter_short_segments(segments, min_length):
     return [
         s for s in segments
         if segment_length(s) >= min_length
+    ]
+
+
+def filter_segments_by_thickness(segments, allowed_thicknesses):
+    """
+    Output-only thickness filter.
+
+    Safe:
+    - Does not affect detection.
+    - Only controls what appears in the final export/clean preview.
+    """
+
+    if not allowed_thicknesses:
+        return []
+
+    allowed = set(int(x) for x in allowed_thicknesses)
+
+    return [
+        s for s in segments
+        if int(s.get("thickness", 0)) in allowed
     ]
 
 
@@ -402,7 +436,13 @@ def parse_wall_thicknesses(text):
         except Exception:
             pass
 
-    return values
+    # remove duplicates but preserve order
+    clean = []
+    for v in values:
+        if v not in clean:
+            clean.append(v)
+
+    return clean
 
 
 def detect_centerlines_from_face_pairs(
@@ -635,7 +675,7 @@ def extend_to_nearby_intersections(segments, axis_tol, extend_tol, iterations=3)
 
 
 # =========================================================
-# PANEL DETECTION
+# PANEL DETECTION - REVIEW ONLY
 # =========================================================
 
 def cluster_values(values, tol):
@@ -683,10 +723,11 @@ def vertical_covers(v_segments, x, y1, y2, tol):
 
 def detect_rectangular_panels(segments, axis_tol, min_panel_width, min_panel_height):
     """
-    Simple orthogonal rectangular panel detector.
+    Review-only rectangular panel detector.
 
-    It checks adjacent X and Y centerline axes and confirms that all four
-    rectangle sides exist.
+    Important:
+    This is intentionally treated as experimental/review geometry.
+    It may create large guessed rectangles, so slab panel export is OFF by default.
     """
 
     h_segments, v_segments = split_hv_segments(segments)
@@ -831,58 +872,86 @@ def build_output_dxf(
     panels,
     nodes,
     draw_raw=True,
-    draw_healed=True,
-    draw_panels_enabled=True,
+    draw_wall_centerlines=True,
+    draw_panels_enabled=False,
     draw_nodes_enabled=False,
     min_output_centerline_length=0,
+    export_thicknesses=None,
 ):
     """
     Build exported DXF.
 
-    Review mode:
-    - raw centerlines can be included
-    - junction nodes can be included
-
     Clean structural mode:
-    - raw centerlines usually off
+    - raw centerlines off
+    - wall centerline layers named professionally
+    - slab panels off by default
+    - junction nodes off by default
     - short fragments filtered
-    - junction nodes usually off
     """
 
     new_doc = ezdxf.new()
     new_msp = new_doc.modelspace()
 
-    safe_layer(new_doc, "ILS_RAW_CENTERLINE_225", color=8)
-    safe_layer(new_doc, "ILS_RAW_CENTERLINE_150", color=9)
-    safe_layer(new_doc, "ILS_HEALED_CENTERLINE_225", color=1)
-    safe_layer(new_doc, "ILS_HEALED_CENTERLINE_150", color=3)
-    safe_layer(new_doc, "ILS_SLAB_PANEL", color=5)
-    safe_layer(new_doc, "ILS_JUNCTION_NODE", color=2)
+    export_thicknesses = export_thicknesses or []
+
+    raw_for_output = filter_segments_by_thickness(
+        raw_segments,
+        export_thicknesses,
+    )
+
+    healed_for_output = filter_segments_by_thickness(
+        healed_segments,
+        export_thicknesses,
+    )
 
     clean_healed_segments = filter_short_segments(
-        healed_segments,
+        healed_for_output,
         min_output_centerline_length,
     )
+
+    # Dynamic layer creation.
+    all_thicknesses = sorted(
+        set(
+            [int(s["thickness"]) for s in raw_for_output]
+            + [int(s["thickness"]) for s in clean_healed_segments]
+        )
+    )
+
+    for thickness in all_thicknesses:
+        safe_layer(
+            new_doc,
+            f"ILS_RAW_CENTERLINE_{thickness}",
+            color=8,
+        )
+
+        safe_layer(
+            new_doc,
+            f"ILS_WALL_CENTERLINE_{thickness}",
+            color=layer_color_for_thickness(thickness),
+        )
+
+    safe_layer(new_doc, "ILS_SLAB_PANEL_REVIEW", color=5)
+    safe_layer(new_doc, "ILS_JUNCTION_NODE_REVIEW", color=2)
 
     if draw_raw:
         draw_segments_by_thickness(
             new_msp,
-            raw_segments,
+            raw_for_output,
             prefix="ILS_RAW_CENTERLINE",
         )
 
-    if draw_healed:
+    if draw_wall_centerlines:
         draw_segments_by_thickness(
             new_msp,
             clean_healed_segments,
-            prefix="ILS_HEALED_CENTERLINE",
+            prefix="ILS_WALL_CENTERLINE",
         )
 
     if draw_panels_enabled:
         draw_panels(
             new_msp,
             panels,
-            layer="ILS_SLAB_PANEL",
+            layer="ILS_SLAB_PANEL_REVIEW",
         )
 
     if draw_nodes_enabled:
@@ -890,7 +959,7 @@ def build_output_dxf(
             new_msp,
             nodes,
             radius=50,
-            layer="ILS_JUNCTION_NODE",
+            layer="ILS_JUNCTION_NODE_REVIEW",
         )
 
     return new_doc
@@ -1075,6 +1144,13 @@ with st.expander("Geometry tolerances", expanded=True):
     )
 
 
+wall_thicknesses = parse_wall_thicknesses(wall_thickness_text)
+
+if not wall_thicknesses:
+    st.error("Enter at least one wall thickness, for example: 225,150")
+    st.stop()
+
+
 with st.expander("Output cleanup", expanded=True):
     o1, o2, o3 = st.columns(3)
 
@@ -1086,10 +1162,11 @@ with st.expander("Output cleanup", expanded=True):
         help="In clean mode, healed centerlines shorter than this are not exported.",
     )
 
-    export_slab_panels = o2.checkbox(
-        "Export slab panels",
-        value=True,
-        help="Exports detected rectangular slab panels as closed polylines.",
+    export_wall_thicknesses = o2.multiselect(
+        "Export wall thicknesses",
+        options=wall_thicknesses,
+        default=wall_thicknesses,
+        help="Use this to export only 225 walls, only 150 walls, or both.",
     )
 
     export_junction_nodes = o3.checkbox(
@@ -1098,8 +1175,22 @@ with st.expander("Output cleanup", expanded=True):
         help="Usually OFF for clean structural output. Useful for review/debug.",
     )
 
+    o4, o5 = st.columns(2)
 
-with st.expander("Slab panel detection", expanded=False):
+    export_slab_panels = o4.checkbox(
+        "Export slab panels",
+        value=False,
+        help="Experimental/review only. OFF is recommended for clean wall centerline export.",
+    )
+
+    show_panel_preview = o5.checkbox(
+        "Run slab panel review detection",
+        value=True,
+        help="Keeps slab panel detection available in preview, even if not exported.",
+    )
+
+
+with st.expander("Slab panel review settings", expanded=False):
     p1, p2 = st.columns(2)
 
     min_panel_width = p1.number_input(
@@ -1117,10 +1208,8 @@ with st.expander("Slab panel detection", expanded=False):
     )
 
 
-wall_thicknesses = parse_wall_thicknesses(wall_thickness_text)
-
-if not wall_thicknesses:
-    st.error("Enter at least one wall thickness, for example: 225,150")
+if not export_wall_thicknesses:
+    st.warning("Select at least one wall thickness to export.")
     st.stop()
 
 
@@ -1197,13 +1286,16 @@ with st.spinner("Bridging openings and healing centerlines..."):
     )
 
 
-with st.spinner("Detecting rectangular slab panels..."):
-    panels = detect_rectangular_panels(
-        healed_segments,
-        axis_tol=axis_tol,
-        min_panel_width=min_panel_width,
-        min_panel_height=min_panel_height,
-    )
+with st.spinner("Preparing review geometry..."):
+    if show_panel_preview:
+        panels = detect_rectangular_panels(
+            healed_segments,
+            axis_tol=axis_tol,
+            min_panel_width=min_panel_width,
+            min_panel_height=min_panel_height,
+        )
+    else:
+        panels = []
 
     nodes = collect_junction_nodes(
         healed_segments,
@@ -1211,14 +1303,19 @@ with st.spinner("Detecting rectangular slab panels..."):
     )
 
 
+selected_healed_segments = filter_segments_by_thickness(
+    healed_segments,
+    export_wall_thicknesses,
+)
+
 if output_mode == "Clean structural mode":
     clean_export_segments = filter_short_segments(
-        healed_segments,
+        selected_healed_segments,
         min_output_centerline_length,
     )
 else:
     clean_export_segments = filter_short_segments(
-        healed_segments,
+        selected_healed_segments,
         0.0,
     )
 
@@ -1229,11 +1326,12 @@ r1, r2, r3, r4 = st.columns(4)
 
 r1.metric("Raw centerline fragments", len(raw_segments))
 r2.metric("Healed centerlines", len(healed_segments))
-r3.metric("Detected slab panels", len(panels))
-r4.metric("Junction nodes", len(nodes))
+r3.metric("Clean export centerlines", len(clean_export_segments))
+r4.metric("Review slab panels", len(panels))
 
 st.info(
     f"Output mode: **{output_mode}**. "
+    f"Exporting thicknesses: **{', '.join(str(x) for x in export_wall_thicknesses)}**. "
     f"Clean export centerlines: **{len(clean_export_segments)}** out of **{len(healed_segments)}** healed centerlines."
 )
 
@@ -1249,7 +1347,7 @@ tab1, tab2, tab3 = st.tabs(
     [
         "All Healed Centerlines",
         "Clean Export Centerlines",
-        "Slab Panels",
+        "Slab Panels Review",
     ]
 )
 
@@ -1287,14 +1385,19 @@ with tab3:
     panels_df = panels_to_dataframe(panels)
 
     if panels_df.empty:
-        st.info("No rectangular slab panels detected yet.")
+        st.info("No rectangular slab panels detected, or slab panel review detection is turned off.")
     else:
+        st.warning(
+            "Slab panels are review-only at this stage. "
+            "For clean structural use, export wall centerlines first."
+        )
+
         st.dataframe(panels_df, use_container_width=True)
 
         st.download_button(
-            "📄 Download Slab Panels CSV",
+            "📄 Download Slab Panels Review CSV",
             data=panels_df.to_csv(index=False).encode("utf-8"),
-            file_name="ILS_SLAB_PANELS.csv",
+            file_name="ILS_SLAB_PANELS_REVIEW.csv",
             mime="text/csv",
         )
 
@@ -1317,10 +1420,11 @@ output_doc = build_output_dxf(
     panels=panels,
     nodes=nodes,
     draw_raw=draw_raw_output,
-    draw_healed=True,
+    draw_wall_centerlines=True,
     draw_panels_enabled=export_slab_panels,
     draw_nodes_enabled=draw_nodes_output,
     min_output_centerline_length=clean_length,
+    export_thicknesses=export_wall_thicknesses,
 )
 
 output_bytes = write_doc_to_bytes(output_doc)
@@ -1328,16 +1432,19 @@ output_bytes = write_doc_to_bytes(output_doc)
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 if output_mode == "Clean structural mode":
-    output_filename = f"ILS_CLEAN_STRUCTURAL_CENTERLINES_{timestamp}.dxf"
+    output_filename = f"ILS_CLEAN_WALL_CENTERLINES_{timestamp}.dxf"
 else:
-    output_filename = f"ILS_REVIEW_CENTERLINES_{timestamp}.dxf"
+    output_filename = f"ILS_REVIEW_WALL_CENTERLINES_{timestamp}.dxf"
 
 
 st.download_button(
-    "📥 Download Centerline / Slab Panel DXF",
+    "📥 Download Wall Centerline DXF",
     data=output_bytes,
     file_name=output_filename,
     mime="application/dxf",
 )
 
-st.success("Analysis complete. Download the DXF above and inspect the generated layers in AutoCAD.")
+st.success(
+    "Analysis complete. For clean structural modelling, use the layers named "
+    "ILS_WALL_CENTERLINE_225 and/or ILS_WALL_CENTERLINE_150."
+)
