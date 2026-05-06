@@ -1480,23 +1480,104 @@ def filter_region_perimeter_markers(region, axis_tol, band_ratio=0.18, min_band=
     return filtered
 
 
-def region_for_endpoint_recovery(region, axis_tol):
+def region_for_endpoint_recovery(
+    region,
+    axis_tol,
+    source_numeric=None,
+    source_alpha=None,
+    numeric_orientation=None,
+    alpha_orientation=None,
+    numeric_order="Auto",
+    alpha_order="Auto",
+):
     """
-    Endpoint recovery uses all detected markers, not only the perimeter-filtered
-    markers used for clean sync.
+    Smart endpoint recovery region selector.
 
-    This fixes cases where Section 5 removes a valid numeric/alphabetic endpoint
-    bubble and recovery then reports fewer axis groups than expected.
+    Default behavior:
+    - Prefer the normal region markers, usually perimeter-filtered markers.
+    - Only switch to all detected markers if it produces a safer axis-group count.
+
+    This avoids the over-correction where all interior/detail bubbles create
+    too many numeric/alphabetic groups.
     """
-    recovery_region = dict(region)
+
+    filtered_region = dict(region)
 
     all_markers = region.get("all_markers", region.get("markers", []))
 
-    recovery_region["markers"] = all_markers
-    recovery_region["axis_groups"] = group_markers_by_axis(all_markers, tol=axis_tol)
-    recovery_region["recovery_uses_all_markers"] = True
+    all_region = dict(region)
+    all_region["markers"] = all_markers
+    all_region["axis_groups"] = group_markers_by_axis(all_markers, tol=axis_tol)
+    all_region["recovery_uses_all_markers"] = True
 
-    return recovery_region
+    filtered_region["recovery_uses_all_markers"] = False
+
+    if (
+        source_numeric is None
+        or source_alpha is None
+        or numeric_orientation is None
+        or alpha_orientation is None
+    ):
+        return filtered_region
+
+    expected_numeric = len(source_numeric)
+    expected_alpha = len(source_alpha)
+
+    def count_score(candidate_region):
+        numeric_groups, alpha_groups = get_family_groups(
+            candidate_region,
+            numeric_orientation,
+            alpha_orientation,
+            numeric_order,
+            alpha_order,
+        )
+
+        found_numeric = len(numeric_groups)
+        found_alpha = len(alpha_groups)
+
+        score = 0
+
+        for found, expected in [
+            (found_numeric, expected_numeric),
+            (found_alpha, expected_alpha),
+        ]:
+            if expected == 0:
+                score += 1000
+
+            elif found == expected:
+                score += 0
+
+            elif found > expected:
+                extra = found - expected
+
+                if extra <= 2:
+                    score += 10 + extra
+                else:
+                    score += 200 + extra * 20
+
+            else:
+                missing = expected - found
+                score += 500 + missing * 50
+
+        return score, found_numeric, found_alpha
+
+    filtered_score, filtered_num, filtered_alpha = count_score(filtered_region)
+    all_score, all_num, all_alpha = count_score(all_region)
+
+    filtered_region["recovery_axis_selection_score"] = filtered_score
+    filtered_region["recovery_numeric_groups_found"] = filtered_num
+    filtered_region["recovery_alpha_groups_found"] = filtered_alpha
+    filtered_region["recovery_axis_selection"] = "filtered_markers"
+
+    all_region["recovery_axis_selection_score"] = all_score
+    all_region["recovery_numeric_groups_found"] = all_num
+    all_region["recovery_alpha_groups_found"] = all_alpha
+    all_region["recovery_axis_selection"] = "all_detected_markers"
+
+    if all_score < filtered_score:
+        return all_region
+
+    return filtered_region
 
 
 def marker_xy(marker):
@@ -5455,7 +5536,16 @@ if st.session_state.prepared:
                 })
                 continue
 
-            r_recovery = region_for_endpoint_recovery(r, axis_tol)
+            r_recovery = region_for_endpoint_recovery(
+                r,
+                axis_tol,
+                source_numeric=st.session_state.source_numeric,
+                source_alpha=st.session_state.source_alpha,
+                numeric_orientation=family["numeric_orientation"],
+                alpha_orientation=family["alpha_orientation"],
+                numeric_order=numeric_order,
+                alpha_order=alpha_order,
+            )
 
             recovery_axis_diagnostics.extend(
                 build_recovery_axis_diagnostics(
@@ -5502,8 +5592,6 @@ if st.session_state.prepared:
             if rec_plan_rows:
                 recovery_plan_rows_all.extend(rec_plan_rows)
                 recovery_preview.extend(recovery_preview_rows(rec_plan_rows))
-
-        if recovery_axis_diagnostics:
             with st.expander("Recovery Axis Group Diagnostics", expanded=False):
                 st.dataframe(recovery_axis_diagnostics, use_container_width=True)
 
