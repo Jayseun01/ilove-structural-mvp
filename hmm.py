@@ -9,125 +9,163 @@ import csv
 import difflib
 
 # =========================================================
-# 🧠 STRUCTURAL AI RECONCILER (Principal Engineer Refactor)
+# 1. AI VIBE RECONCILER (The Logic Bridge)
 # =========================================================
+
 class StructuralAI:
     """
-    Handles the 'pain' of structural vs architectural label drift.
-    Includes fuzzy logic and engineering-specific matching rules.
+    Intelligent logic to handle the 'pain' of Arch vs Structural drift.
+    Optimized for Gemini 3.1 Vibe-Logic.
     """
-    @staticmethod
-    def clean(value):
-        if value is None: return ""
-        txt = str(value).replace("\\P", " ").replace("\n", " ").replace("′", "'")
-        return re.sub(r"\s+", " ", txt).strip().upper()
-
     @staticmethod
     def get_match_confidence(source, target):
         s = StructuralAI.clean(source)
         t = StructuralAI.clean(target)
         if not s or not t: return 0
         if s == t: return 100
-        
-        # Engineering Rule 1: Decimal Naming (A maps to A.1, A-1)
+        # Sync sub-grids: A -> A.1
         if t.startswith(s + '.') or t.startswith(s + '-'): return 95
-        
-        # Engineering Rule 2: Primed Labels (1 maps to 1')
+        # Sync primed: 1 -> 1'
         if s.strip("'") == t.strip("'"): return 90
-        
-        # Fuzzy Logic: Structural Similarity (OCR/Typo recovery)
+        # Fuzzy string check
         ratio = difflib.SequenceMatcher(None, s, t).ratio()
         return round(ratio * 100) if ratio > 0.8 else 0
 
-# =========================================================
-# 🏗️ APP CONFIG & UI VIBE
-# =========================================================
-st.set_page_config(page_title="iLoveStructural: AI Edition", page_icon="🏗️", layout="wide")
+    @staticmethod
+    def clean(value):
+        if value is None: return ""
+        txt = str(value).replace("\\P", " ").replace("\n", " ").replace("′", "'")
+        return re.sub(r"\s+", " ", txt).strip().upper()
 
+# =========================================================
+# 2. CORE GEOMETRY & DXF HELPERS
+# =========================================================
+
+def save_uploaded_to_temp(uploaded_file):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp:
+        tmp.write(uploaded_file.getvalue())
+        return tmp.name
+
+def write_doc_to_temp_bytes(doc):
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf")
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        doc.saveas(tmp_path)
+        with open(tmp_path, "rb") as f:
+            return f.read()
+    finally:
+        if os.path.exists(tmp_path): os.remove(tmp_path)
+
+def euclidean(p1, p2):
+    return math.dist((p1[0], p1[1]), (p2[0], p2[1]))
+
+def probable_grid_label(text):
+    text = StructuralAI.clean(text)
+    return any(re.fullmatch(p, text) for p in [r"[A-Z]{1,3}", r"[A-Z]{1,3}'", r"\d{1,3}", r"\d{1,3}[A-Z]?", r"\d{1,3}[A-Z]?'?"])
+
+# =========================================================
+# 3. EXTRACTION LOGIC (The Structural Engine)
+# =========================================================
+
+def extract_markers(doc, text_layer, circle_layer):
+    """Simplified for the Vibe Refactor."""
+    msp = doc.modelspace()
+    found = []
+    texts = [e for e in msp if e.dxftype() in ('TEXT', 'MTEXT') and e.dxf.layer == text_layer]
+    circles = [e for e in msp if e.dxftype() == 'CIRCLE' and e.dxf.layer == circle_layer]
+    
+    for c in circles:
+        cp = (c.dxf.center.x, c.dxf.center.y)
+        cr = c.dxf.radius
+        best_t = None
+        min_d = 999999
+        for t in texts:
+            tp = (t.dxf.insert.x, t.dxf.insert.y)
+            d = euclidean(cp, tp)
+            if d < cr * 1.5 and d < min_d:
+                val = t.dxf.text if t.dxftype() == 'TEXT' else t.text
+                if probable_grid_label(val):
+                    min_d = d
+                    best_t = t
+        if best_t:
+            found.append({"label": best_t.dxf.text if best_t.dxftype() == 'TEXT' else best_t.text, "entity": best_t, "pos": cp})
+    return found
+
+# =========================================================
+# 4. APP INTERFACE
+# =========================================================
+
+st.set_page_config(page_title="iLoveStructural: AI Edition", page_icon="🏗️", layout="wide")
 st.title("🏗️ iLoveStructural: AI Edition")
 st.subheader("Tool 2: Grid Label Sync (Enhanced with Fuzzy Logic)")
-st.caption("Optimized for structural engineers to beat time by intelligently syncing architectural drift.")
 
-# ... [Internal DXF Helpers - Refactored for AI Pipeline] ...
-
-def get_text_value(entity):
-    try:
-        if entity.dxftype() == "TEXT": return StructuralAI.clean(entity.dxf.text)
-        if entity.dxftype() == "MTEXT": return StructuralAI.clean(entity.text)
-        if entity.dxftype() == "ATTRIB": return StructuralAI.clean(entity.dxf.text)
-    except: return ""
-
-def set_text_value(entity, new_value):
-    try:
-        val = str(new_value).upper()
-        if entity.dxftype() == "TEXT": entity.dxf.text = val
-        elif entity.dxftype() == "MTEXT": entity.text = val
-        elif entity.dxftype() == "ATTRIB": entity.dxf.text = val
-        return True
-    except: return False
-
-# =========================================================
-# 🛠️ AI-POWERED SYNC ENGINE
-# =========================================================
-def apply_intelligent_sync(source_groups, target_groups):
-    """
-    The 'Heart' of the refactor. Uses AI confidence to resolve labels 
-    instead of strict equality.
-    """
-    changed, skipped, audit = 0, 0, []
-    
-    for i, (s_grp, t_grp) in enumerate(zip(source_groups, target_groups), start=1):
-        src_label = StructuralAI.clean(s_grp["label"])
-        target_old = StructuralAI.clean(t_grp["label"])
-        
-        conf = StructuralAI.get_match_confidence(src_label, target_old)
-        
-        # AI Logic: If we are confident (~50%) or if it's the exact geometric pos
-        if conf > 50 or i == t_grp.get("axis_position"):
-            for marker in t_grp["markers"]:
-                ent = marker["text_entity"]
-                old_raw = get_text_value(ent)
-                
-                if old_raw != src_label:
-                    if set_text_value(ent, src_label):
-                        changed += 1
-                        audit.append({"mode": "AI_FUZZY", "conf": conf, "from": old_raw, "to": src_label})
-                else:
-                    skipped += 1
-    return changed, skipped, audit
-
-# =========================================================
-# 📁 FILE & DOWNLOAD HANDLERS
-# =========================================================
-def get_download_data(doc):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp:
-        doc.saveas(tmp.name)
-        with open(tmp.name, "rb") as f: data = f.read()
-    if os.path.exists(tmp.name): os.remove(tmp.name)
-    return data
-
-# =========================================================
-# 🖥️ MAIN INTERFACE
-# =========================================================
-st.markdown("### 1. Upload Structural Data")
-c1, c2 = st.columns(2)
-with c1: arch_file = st.file_uploader("Reference (Arch) DXF", type=["dxf"])
-with c2: struc_file = st.file_uploader("Target (Struc) DXF", type=["dxf"])
+u1, u2 = st.columns(2)
+with u1: arch_file = st.file_uploader("Reference (Arch) DXF", type=["dxf"])
+with u2: struc_file = st.file_uploader("Target (Struc) DXF", type=["dxf"])
 
 if arch_file and struc_file:
-    # Initialize Document objects
-    # (Assuming user has ezdxf installation)
-    st.info("Files loaded. AI processing enabled.")
+    # 1. Load Docs
+    arch_doc = ezdxf.readfile(save_uploaded_to_temp(arch_file))
+    struc_doc = ezdxf.readfile(save_uploaded_to_temp(struc_file))
     
-    if st.button("🔥 Run AI Optimal Sync", type="primary"):
-        with st.spinner("Reconciling architectural intent with structural geometry..."):
-            # EXECUTION: This is where we plug into your existing extraction logic
-            # and use apply_intelligent_sync() instead of the old version.
-            st.success("Grid Label Sync complete. Architectural intent mapped to Structural geometry.")
-            
-            # --- THE DOWNLOAD STEP ---
-            # (In a real run, this uses the relabeled 'struc_doc')
-            # st.download_button("📥 Download Relabeled DXF", data=get_download_data(struc_doc), file_name="AI_SYNCED_DRAWING.dxf")
+    # 2. Config Layers (Defaults for Engineering)
+    st.sidebar.markdown("### Layer Settings")
+    txt_lay = st.sidebar.text_input("Grid Text Layer", "S-GRID-IDEN")
+    circ_lay = st.sidebar.text_input("Grid Bubble Layer", "S-GRID-IDEN")
 
-st.markdown("---")
-st.caption("Terminal Status: Ready for Structural Verification | Powered by Gemini 3.1 Vibe-Logic")
+    if st.button("🔥 Run AI Optimal Sync", type="primary"):
+        with st.spinner("Processing labels with Gemini-Fuzzy logic..."):
+            
+            # Extract
+            arch_markers = extract_markers(arch_doc, txt_lay, circ_lay)
+            struc_markers = extract_markers(struc_doc, txt_lay, circ_lay)
+            
+            if not arch_markers or not struc_markers:
+                st.error("No markers found on those layers. Check your layer names.")
+            else:
+                changed = 0
+                # AI Matching Loop
+                for sm in struc_markers:
+                    best_match = None
+                    max_conf = 0
+                    
+                    # Match by spatial vibe (closest coordinate first) then fuzzy text
+                    for am in arch_markers:
+                        dist = euclidean(sm["pos"], am["pos"])
+                        if dist < 1000: # Standard tolerance for grid jumps
+                            conf = StructuralAI.get_match_confidence(am["label"], sm["label"])
+                            if conf > max_conf:
+                                max_conf = conf
+                                best_match = am
+                    
+                    if best_match and max_conf > 50:
+                        entity = sm["entity"]
+                        new_val = StructuralAI.clean(best_match["label"])
+                        if hasattr(entity.dxf, 'text'): 
+                            entity.dxf.text = new_val
+                        else: 
+                            entity.text = new_val
+                        changed += 1
+
+                st.success(f"AI Sync complete! Processed {changed} labels.")
+                
+                # =========================================================
+                # THE MISSING DOWNLOAD BUTTON
+                # =========================================================
+                st.markdown("### 2. Output Download")
+                processed_data = write_doc_to_temp_bytes(struc_doc)
+                
+                st.download_button(
+                    label="📥 DOWNLOAD SYNCED DXF",
+                    data=processed_data,
+                    file_name=f"AI_SYNCED_{struc_file.name}",
+                    mime="application/dxf",
+                    key="download_final"
+                )
+                st.balloons()
+
+else:
+    st.info("Upload Architecture and Structural DXFs to begin AI optimization.")
+
+st.caption("Terminal Status: Online | Powered by Gemini 3.1 Vibe-Logic")
