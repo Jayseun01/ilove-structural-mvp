@@ -2269,8 +2269,9 @@ if arch_file and struc_file:
 
             st.success("DXF files loaded successfully.")
 
-        except Exception as e:
-            st.error(f"Failed to load DXF files: {e}")
+     except Exception as e:
+        st.error(f"Prepare failed: {e}")
+        raise  # <--- ADD THIS WORD HERE
             st.stop()
 
         finally:
