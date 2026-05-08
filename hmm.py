@@ -963,7 +963,8 @@ def get_family_groups(region_or_axis_groups, numeric_orientation, alpha_orientat
         alpha_orientation,
         alpha_order,
         "alpha",
-        # =========================================================
+    )
+# =========================================================
 # REGION SEGMENTATION / PERIMETER FILTER
 # =========================================================
 def marker_is_near_region_perimeter(marker, bbox, band_ratio=0.18, min_band=1500.0):
