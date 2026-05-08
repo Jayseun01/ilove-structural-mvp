@@ -7,33 +7,27 @@ import re
 import io
 import csv
 
-
 # =========================================================
 # APP CONFIG
 # =========================================================
-
 st.set_page_config(
     page_title="iLoveStructural - Grid Label Sync",
     page_icon="🏗️",
     layout="wide",
 )
-
 st.title("🏗️ iLoveStructural")
 st.subheader("Tool 2: Grid Label Sync")
 st.caption(
     "Workflow: Upload reference/target DXFs → detect grid labels → sync clean regions → use endpoint recovery for slab/detail regions."
 )
 
-
 # =========================================================
 # FILE HELPERS
 # =========================================================
-
 def save_uploaded_to_temp(uploaded_file):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp:
         tmp.write(uploaded_file.getvalue())
-        return tmp.name
-
+    return tmp.name
 
 def safe_remove_file(path):
     try:
@@ -42,12 +36,10 @@ def safe_remove_file(path):
     except Exception:
         pass
 
-
 def write_doc_to_temp_bytes(doc):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf")
     tmp_path = tmp.name
     tmp.close()
-
     try:
         doc.saveas(tmp_path)
         with open(tmp_path, "rb") as f:
@@ -55,19 +47,15 @@ def write_doc_to_temp_bytes(doc):
     finally:
         safe_remove_file(tmp_path)
 
-
 def uploaded_file_signature(uploaded_file):
     if uploaded_file is None:
         return None
     return uploaded_file.name, len(uploaded_file.getvalue())
 
-
 def audit_to_csv_bytes(audit_rows):
     if not audit_rows:
         return b""
-
     fieldnames = sorted(set().union(*[row.keys() for row in audit_rows]))
-
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=fieldnames)
     writer.writeheader()
@@ -83,15 +71,12 @@ def audit_to_csv_bytes(audit_rows):
 
     return buffer.getvalue().encode("utf-8")
 
-
 # =========================================================
 # TEXT / LABEL HELPERS
 # =========================================================
-
 def clean_text(value):
     if value is None:
         return ""
-
     txt = str(value)
     txt = txt.replace("\\P", " ")
     txt = txt.replace("\n", " ")
@@ -99,10 +84,8 @@ def clean_text(value):
     txt = re.sub(r"\s+", " ", txt)
     return txt.strip().upper()
 
-
 def probable_grid_label(text):
     text = clean_text(text)
-
     patterns = [
         r"[A-Z]{1,3}",
         r"[A-Z]{1,3}'",
@@ -113,40 +96,31 @@ def probable_grid_label(text):
 
     return any(re.fullmatch(p, text) for p in patterns)
 
-
 def is_numeric_label(text):
     return bool(re.fullmatch(r"\d{1,3}[A-Z]?'?", clean_text(text)))
-
 
 def is_alpha_label(text):
     return bool(re.fullmatch(r"[A-Z]{1,3}'?", clean_text(text)))
 
-
 def numeric_label_value(text):
     txt = clean_text(text)
     m = re.fullmatch(r"(\d{1,3})([A-Z]?)(?:')?", txt)
-
     if not m:
         return None
 
     return int(m.group(1))
 
-
 # =========================================================
 # GEOMETRY HELPERS
 # =========================================================
-
 def euclidean(p1, p2):
     return math.dist((p1[0], p1[1]), (p2[0], p2[1]))
-
 
 def is_vertical(x1, y1, x2, y2, tol=2.0):
     return abs(x1 - x2) <= tol and abs(y2 - y1) > tol
 
-
 def is_horizontal(x1, y1, x2, y2, tol=2.0):
     return abs(y1 - y2) <= tol and abs(x2 - x1) > tol
-
 
 def point_projects_on_segment(px, py, x1, y1, x2, y2, pad=0.0):
     return (
@@ -154,11 +128,9 @@ def point_projects_on_segment(px, py, x1, y1, x2, y2, pad=0.0):
         and min(y1, y2) - pad <= py <= max(y1, y2) + pad
     )
 
-
 def point_to_segment_distance(px, py, x1, y1, x2, y2):
     dx = x2 - x1
     dy = y2 - y1
-
     if dx == 0 and dy == 0:
         return math.dist((px, py), (x1, y1))
 
@@ -170,11 +142,9 @@ def point_to_segment_distance(px, py, x1, y1, x2, y2):
 
     return math.dist((px, py), (qx, qy))
 
-
 def bbox_from_markers(markers):
     xs = [m["circle_center"][0] for m in markers]
     ys = [m["circle_center"][1] for m in markers]
-
     return {
         "min_x": min(xs),
         "max_x": max(xs),
@@ -185,28 +155,22 @@ def bbox_from_markers(markers):
         "centroid": (sum(xs) / len(xs), sum(ys) / len(ys)),
     }
 
-
 def squared_distance(p1, p2):
     return (p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2
-
 
 # =========================================================
 # DXF HELPERS
 # =========================================================
-
 def get_layer_names(doc):
     return sorted([layer.dxf.name for layer in doc.layers])
 
-
 def pick_default_layer(layers, candidates):
     upper = {x.upper(): x for x in layers}
-
     for c in candidates:
         if c.upper() in upper:
             return upper[c.upper()]
 
     return layers[0] if layers else None
-
 
 def get_entity_handle(entity):
     try:
@@ -214,23 +178,19 @@ def get_entity_handle(entity):
     except Exception:
         return ""
 
-
 def get_insert_transform(insert_entity):
     try:
         ins = insert_entity.dxf.insert
         sx = float(getattr(insert_entity.dxf, "xscale", 1.0) or 1.0)
         sy = float(getattr(insert_entity.dxf, "yscale", 1.0) or 1.0)
         rot = float(getattr(insert_entity.dxf, "rotation", 0.0) or 0.0)
-
         return float(ins.x), float(ins.y), sx, sy, rot
     except Exception:
         return 0.0, 0.0, 1.0, 1.0, 0.0
 
-
 def transform_block_point(local_point, insert_entity):
     x, y = local_point
     ix, iy, sx, sy, rot = get_insert_transform(insert_entity)
-
     x *= sx
     y *= sy
 
@@ -240,11 +200,9 @@ def transform_block_point(local_point, insert_entity):
 
     return xr + ix, yr + iy
 
-
 def transform_block_radius(radius, insert_entity):
     _, _, sx, sy, _ = get_insert_transform(insert_entity)
     return float(radius) * ((abs(sx) + abs(sy)) / 2.0)
-
 
 def get_text_point(entity):
     try:
@@ -255,7 +213,6 @@ def get_text_point(entity):
                     return float(ap.x), float(ap.y)
             except Exception:
                 pass
-
             ins = entity.dxf.insert
             return float(ins.x), float(ins.y)
 
@@ -268,12 +225,10 @@ def get_text_point(entity):
 
     return 0.0, 0.0
 
-
 def get_text_value(entity):
     try:
         if entity.dxftype() == "TEXT":
             return clean_text(entity.dxf.text)
-
         if entity.dxftype() == "MTEXT":
             return clean_text(entity.text)
 
@@ -285,13 +240,11 @@ def get_text_value(entity):
 
     return ""
 
-
 def set_text_value(entity, new_value):
     try:
         if entity.dxftype() == "TEXT":
             entity.dxf.text = new_value
             return True
-
         if entity.dxftype() == "MTEXT":
             entity.text = new_value
             return True
@@ -305,15 +258,12 @@ def set_text_value(entity, new_value):
 
     return False
 
-
 # =========================================================
 # ENTITY EXTRACTION
 # =========================================================
-
 def extract_texts(doc, layer_name):
     texts = []
     msp = doc.modelspace()
-
     for e in msp:
         try:
             if e.dxftype() in ("TEXT", "MTEXT", "ATTRIB"):
@@ -380,11 +330,9 @@ def extract_texts(doc, layer_name):
 
     return texts
 
-
 def extract_circles(doc, layer_name):
     circles = []
     msp = doc.modelspace()
-
     for e in msp:
         try:
             if e.dxftype() == "CIRCLE":
@@ -435,10 +383,8 @@ def extract_circles(doc, layer_name):
 
     return circles
 
-
 def add_axis_segment(lines, entity, x1, y1, x2, y2, layer_name, min_length):
     length = math.dist((x1, y1), (x2, y2))
-
     if length < min_length:
         return
 
@@ -466,20 +412,16 @@ def add_axis_segment(lines, entity, x1, y1, x2, y2, layer_name, min_length):
             "handle": get_entity_handle(entity),
         })
 
-
 def resolve_line_group(group):
     best = max(group, key=lambda x: x["length"])
     out = dict(best)
     out["coord"] = round(sum(g["coord"] for g in group) / len(group), 3)
     return out
 
-
 def deduplicate_axis_lines(lines, tol=5.0):
     if not lines:
         return []
-
     lines = sorted(lines, key=lambda x: (x["orientation"], x["coord"]))
-
     result = []
     current = [lines[0]]
 
@@ -498,11 +440,9 @@ def deduplicate_axis_lines(lines, tol=5.0):
     result.append(resolve_line_group(current))
     return result
 
-
 def extract_axis_lines(doc, layer_name, min_length=1000.0):
     lines = []
     msp = doc.modelspace()
-
     for e in msp:
         try:
             if e.dxf.layer != layer_name:
@@ -540,20 +480,16 @@ def extract_axis_lines(doc, layer_name, min_length=1000.0):
 
     return deduplicate_axis_lines(lines)
 
-
 # =========================================================
 # MARKER DETECTION
 # =========================================================
-
 def text_inside_circle(text_point, circle_center, circle_radius, extra_gap=180.0):
     return euclidean(text_point, circle_center) <= circle_radius + extra_gap
-
 
 def line_attached_to_circle(line, center, radius, attach_gap):
     cx, cy = center
     x1, y1 = line["start"]
     x2, y2 = line["end"]
-
     if line["orientation"] == "vertical":
         if abs(line["coord"] - cx) > attach_gap:
             return False
@@ -593,11 +529,9 @@ def line_attached_to_circle(line, center, radius, attach_gap):
 
     return min(d_seg, d1, d2) <= attach_gap
 
-
 def closest_grid_line_to_circle(center, lines, attach_gap):
     if not lines:
         return None, None
-
     cx, cy = center
     best = None
 
@@ -636,11 +570,9 @@ def closest_grid_line_to_circle(center, lines, attach_gap):
 
     return best["line"], best["perp"]
 
-
 def infer_orientation_from_same_label(bubble, bubbles, text_gap):
     label = bubble["label"]
     cx, cy = bubble["circle_center"]
-
     align_tol = max(text_gap * 4.0, 750.0)
     min_span = 1000.0
 
@@ -683,10 +615,8 @@ def infer_orientation_from_same_label(bubble, bubbles, text_gap):
 
     return None, None
 
-
 def make_virtual_axis(center, orientation, coord, line_layer):
     cx, cy = center
-
     if orientation == "vertical":
         return {
             "entity": None,
@@ -710,10 +640,8 @@ def make_virtual_axis(center, orientation, coord, line_layer):
         "virtual": True,
     }
 
-
 def is_marker_writable(marker, allow_block_text_write=False):
     src = marker.get("text_source", "")
-
     if src in ("modelspace", "insert_attrib"):
         return True
 
@@ -722,10 +650,8 @@ def is_marker_writable(marker, allow_block_text_write=False):
 
     return False
 
-
 def marker_confidence(mode, text_matches, writable):
     score = 35
-
     if text_matches == 1:
         score += 25
     elif text_matches > 1:
@@ -745,7 +671,6 @@ def marker_confidence(mode, text_matches, writable):
 
     return max(0, min(100, score))
 
-
 def build_trusted_markers(
     doc,
     line_layer,
@@ -759,7 +684,7 @@ def build_trusted_markers(
     texts = extract_texts(doc, text_layer)
     circles = extract_circles(doc, circle_layer)
     lines = extract_axis_lines(doc, line_layer, min_length=min_grid_length)
-
+    
     bubbles = []
     rejected = []
 
@@ -888,16 +813,12 @@ def build_trusted_markers(
         "rejected_markers": rejected,
     }
 
-
 # =========================================================
 # AXIS GROUPING / FAMILY INFERENCE
 # =========================================================
-
 def resolve_axis_group(group, orientation):
     coord = round(sum(m["coord"] for m in group) / len(group), 3)
-
     counts = {}
-
     for m in group:
         label = clean_text(m.get("label", ""))
 
@@ -942,13 +863,11 @@ def resolve_axis_group(group, orientation):
         "centroid": (sum(xs) / len(xs), sum(ys) / len(ys)),
     }
 
-
 def group_markers_by_axis(markers, tol=5.0):
     grouped = {
         "vertical": [],
         "horizontal": [],
     }
-
     for orientation in ["vertical", "horizontal"]:
         subset = sorted(
             [m for m in markers if m["orientation"] == orientation],
@@ -971,11 +890,9 @@ def group_markers_by_axis(markers, tol=5.0):
 
     return grouped
 
-
 def infer_families(axis_groups):
     vertical = axis_groups.get("vertical", [])
     horizontal = axis_groups.get("horizontal", [])
-
     v_num = len([g for g in vertical if is_numeric_label(g["label"])])
     v_alpha = len([g for g in vertical if is_alpha_label(g["label"])])
     h_num = len([g for g in horizontal if is_numeric_label(g["label"])])
@@ -1010,7 +927,6 @@ def infer_families(axis_groups):
         },
     }
 
-
 def sort_groups(groups, orientation, order_mode, family):
     if order_mode == "Ascending":
         reverse = False
@@ -1018,9 +934,7 @@ def sort_groups(groups, orientation, order_mode, family):
         reverse = True
     else:
         reverse = family == "numeric" and orientation == "horizontal"
-
     return sorted(groups, key=lambda x: x["coord"], reverse=reverse)
-
 
 def sort_axis_lines_for_family(lines, orientation, order_mode, family):
     if order_mode == "Ascending":
@@ -1029,16 +943,14 @@ def sort_axis_lines_for_family(lines, orientation, order_mode, family):
         reverse = True
     else:
         reverse = family == "numeric" and orientation == "horizontal"
-
     return sorted(lines, key=lambda x: x["coord"], reverse=reverse)
-
 
 def get_family_groups(region_or_axis_groups, numeric_orientation, alpha_orientation, numeric_order, alpha_order):
     if "axis_groups" in region_or_axis_groups:
         axis_groups = region_or_axis_groups["axis_groups"]
     else:
         axis_groups = region_or_axis_groups
-
+        
     numeric = sort_groups(
         axis_groups.get(numeric_orientation, []),
         numeric_orientation,
@@ -1051,18 +963,11 @@ def get_family_groups(region_or_axis_groups, numeric_orientation, alpha_orientat
         alpha_orientation,
         alpha_order,
         "alpha",
-    )
-
-    return numeric, alpha
-
-
-# =========================================================
+        # =========================================================
 # REGION SEGMENTATION / PERIMETER FILTER
 # =========================================================
-
 def marker_is_near_region_perimeter(marker, bbox, band_ratio=0.18, min_band=1500.0):
     x, y = marker["circle_center"]
-
     width = max(float(bbox.get("width", 0.0)), 1.0)
     height = max(float(bbox.get("height", 0.0)), 1.0)
 
@@ -1076,10 +981,8 @@ def marker_is_near_region_perimeter(marker, bbox, band_ratio=0.18, min_band=1500
 
     return near_left or near_right or near_bottom or near_top
 
-
 def filter_region_perimeter_markers(region, axis_tol, band_ratio=0.18, min_band=1500.0):
     bbox = region.get("bbox") or bbox_from_markers(region["markers"])
-
     perimeter_markers = [
         m for m in region["markers"]
         if marker_is_near_region_perimeter(
@@ -1098,18 +1001,14 @@ def filter_region_perimeter_markers(region, axis_tol, band_ratio=0.18, min_band=
 
     return filtered
 
-
 def marker_xy(marker):
     x, y = marker["circle_center"]
     return float(x), float(y)
 
-
 def kmeans_regions(markers, k, max_iter=80):
     if not markers or k < 1:
         return None
-
     points = [marker_xy(m) for m in markers]
-
     first = min(
         range(len(points)),
         key=lambda i: (points[i][0] + points[i][1], points[i][0]),
@@ -1153,10 +1052,8 @@ def kmeans_regions(markers, k, max_iter=80):
 
     return clusters
 
-
 def compute_major_gap_threshold(values):
     vals = sorted(set(round(v, 3) for v in values))
-
     if len(vals) < 2:
         return None
 
@@ -1169,10 +1066,8 @@ def compute_major_gap_threshold(values):
     typical = sorted(gaps)[len(gaps) // 2]
     return max(typical * 3.0, 6000.0)
 
-
 def value_groups(values, threshold):
     vals = sorted(set(round(v, 3) for v in values))
-
     if not vals:
         return []
 
@@ -1186,21 +1081,17 @@ def value_groups(values, threshold):
 
     return groups
 
-
 def assign_value(value, groups):
     v = round(value, 3)
-
     for i, g in enumerate(groups):
         if g[0] <= v <= g[-1]:
             return i
 
     return None
 
-
 def build_regions(markers, axis_tol, expected_markers_per_region=None, forced_region_count=0, min_region_markers=4):
     if not markers:
         return [], {}
-
     total = len(markers)
     k = None
     method_reason = ""
@@ -1301,13 +1192,12 @@ def build_regions(markers, axis_tol, expected_markers_per_region=None, forced_re
         "small_buckets_skipped": skipped,
         "region_marker_counts": [r["marker_count"] for r in regions],
     }
-    # =========================================================
+
+# =========================================================
 # CLEAN SYNC VALIDATION / PREVIEW / APPLY
 # =========================================================
-
 def validate_axis_group_purity(groups, family_name):
     blockers = []
-
     for idx, g in enumerate(groups, start=1):
         label_count = g.get("label_count", 1)
         mixed_labels = g.get("mixed_labels", [])
@@ -1321,7 +1211,6 @@ def validate_axis_group_purity(groups, family_name):
             )
 
     return blockers
-
 
 def get_region_sync_plan(
     region,
@@ -1342,9 +1231,7 @@ def get_region_sync_plan(
         numeric_order,
         alpha_order,
     )
-
     blockers = []
-
     expected_numeric = len(source_numeric)
     expected_alpha = len(source_alpha)
     expected_total = expected_numeric + expected_alpha
@@ -1388,7 +1275,6 @@ def get_region_sync_plan(
 
     return ready, blockers, numeric_groups, alpha_groups
 
-
 def build_region_report(
     regions,
     source_numeric,
@@ -1402,7 +1288,6 @@ def build_region_report(
     max_region_marker_ratio=1.5,
 ):
     rows = []
-
     expected_numeric = len(source_numeric)
     expected_alpha = len(source_alpha)
     expected_total = expected_numeric + expected_alpha
@@ -1464,10 +1349,8 @@ def build_region_report(
 
     return rows
 
-
 def build_preview_for_region(region, source_numeric, source_alpha, numeric_groups, alpha_groups):
     rows = []
-
     for i, (s, t) in enumerate(zip(source_numeric, numeric_groups), start=1):
         rows.append({
             "region": region["name"],
@@ -1498,12 +1381,10 @@ def build_preview_for_region(region, source_numeric, source_alpha, numeric_group
 
     return rows
 
-
 def apply_group_labels(source_groups, target_groups, allow_block_text_write=False):
     changed = 0
     skipped = 0
     audit = []
-
     if len(source_groups) != len(target_groups):
         return 0, len(target_groups), [{
             "region_axis_position": "",
@@ -1577,11 +1458,9 @@ def apply_group_labels(source_groups, target_groups, allow_block_text_write=Fals
 
     return changed, skipped, audit
 
-
 # =========================================================
 # ENDPOINT RECOVERY LOGIC
 # =========================================================
-
 def source_label_set(source_groups):
     return {
         clean_text(g.get("label", ""))
@@ -1589,10 +1468,8 @@ def source_label_set(source_groups):
         if clean_text(g.get("label", ""))
     }
 
-
 def label_matches_family(label, family_name):
     label = clean_text(label)
-
     if family_name == "numeric":
         return is_numeric_label(label)
 
@@ -1601,10 +1478,8 @@ def label_matches_family(label, family_name):
 
     return False
 
-
 def axis_distance_for_marker(marker, orientation, coord):
     x, y = marker["circle_center"]
-
     if orientation == "vertical":
         return abs(float(x) - float(coord))
 
@@ -1613,10 +1488,8 @@ def axis_distance_for_marker(marker, orientation, coord):
 
     return 999999999.0
 
-
 def median_value(values):
     values = sorted([float(v) for v in values if v is not None])
-
     if not values:
         return None
 
@@ -1627,10 +1500,8 @@ def median_value(values):
 
     return (values[n // 2 - 1] + values[n // 2]) / 2.0
 
-
 def source_grid_bubble_radius_range(source_numeric, source_alpha, min_ratio=0.55, max_ratio=1.80):
     radii = []
-
     for group in source_numeric + source_alpha:
         for marker in group.get("markers", []):
             r = marker.get("circle_radius")
@@ -1645,23 +1516,18 @@ def source_grid_bubble_radius_range(source_numeric, source_alpha, min_ratio=0.55
 
     return med * min_ratio, med * max_ratio, med
 
-
 def marker_radius_ok(marker, min_radius, max_radius):
     if min_radius is None or max_radius is None:
         return True
-
-    r = marker.get("circle_radius")
-
+    r = marker.get("circle_radius") 
     if r is None:
         return True
 
     return min_radius <= float(r) <= max_radius
 
-
 def build_grid_frame_from_target_groups(target_numeric_groups, target_alpha_groups, fallback_bbox):
     vertical_coords = []
     horizontal_coords = []
-
     for g in target_numeric_groups + target_alpha_groups:
         if g.get("orientation") == "vertical":
             vertical_coords.append(float(g["coord"]))
@@ -1684,10 +1550,8 @@ def build_grid_frame_from_target_groups(target_numeric_groups, target_alpha_grou
     frame["source"] = "region_bbox_fallback"
     return frame
 
-
 def endpoint_points_for_axis_group_using_frame(axis_group, frame):
     coord = float(axis_group["coord"])
-
     if axis_group["orientation"] == "vertical":
         return [
             (coord, frame["min_y"]),
@@ -1699,10 +1563,8 @@ def endpoint_points_for_axis_group_using_frame(axis_group, frame):
         (frame["max_x"], coord),
     ]
 
-
 def source_numeric_range(source_numeric, extra=5):
     vals = []
-
     for g in source_numeric:
         v = numeric_label_value(g.get("label", ""))
 
@@ -1714,15 +1576,12 @@ def source_numeric_range(source_numeric, extra=5):
 
     return max(1, min(vals) - extra), max(vals) + extra
 
-
 def is_zero_padded_detail_number(label):
     label = clean_text(label)
     return bool(re.fullmatch(r"0\d{1,3}", label))
 
-
 def plausible_recovery_label(label, family, source_numeric, source_alpha, numeric_extra=5):
     label = clean_text(label)
-
     if is_zero_padded_detail_number(label):
         return False
 
@@ -1744,7 +1603,6 @@ def plausible_recovery_label(label, family, source_numeric, source_alpha, numeri
 
     return False
 
-
 def strict_slab_recovery_label_ok(
     label,
     family_name,
@@ -1755,10 +1613,6 @@ def strict_slab_recovery_label_ok(
     allowed_old_labels=None,
 ):
     label = clean_text(label)
-
-    if not label_matches_family(label, family_name):
-        return False
-
     if is_zero_padded_detail_number(label):
         return False
 
@@ -1768,9 +1622,15 @@ def strict_slab_recovery_label_ok(
         if clean_text(x)
     }
 
+    # If strict mode is ON and this old label was already detected as part of
+    # the target axis group, allow it even if its family looks different.
+    # This fixes old target label "10" needing to become an alpha source label.
     if strict_source_labels:
         if allowed_old_labels:
             return label in allowed_old_labels
+
+        if not label_matches_family(label, family_name):
+            return False
 
         if family_name == "numeric":
             return label in source_label_set(source_numeric)
@@ -1778,6 +1638,10 @@ def strict_slab_recovery_label_ok(
         if family_name == "alphabetic":
             return label in source_label_set(source_alpha)
 
+        return False
+
+    # Non-strict mode still requires the label to look like the correct family.
+    if not label_matches_family(label, family_name):
         return False
 
     return plausible_recovery_label(
@@ -1788,10 +1652,8 @@ def strict_slab_recovery_label_ok(
         numeric_extra=numeric_extra,
     )
 
-
 def marker_endpoint_distance(marker, endpoints):
     p = marker["circle_center"]
-
     distances = [
         euclidean(p, ep)
         for ep in endpoints
@@ -1800,7 +1662,6 @@ def marker_endpoint_distance(marker, endpoints):
     best = min(distances)
 
     return best, distances.index(best)
-
 
 def build_endpoint_recovery_plan(
     region,
@@ -1821,9 +1682,8 @@ def build_endpoint_recovery_plan(
     blockers = []
     warnings = []
     plan_rows = []
-
+    
     candidate_markers = region.get("all_markers", region.get("markers", []))
-
     target_numeric_groups, target_alpha_groups = get_family_groups(
         region,
         numeric_orientation,
@@ -2046,10 +1906,8 @@ def build_endpoint_recovery_plan(
 
     return ready, blockers, warnings, plan_rows
 
-
 def recovery_preview_rows(plan_rows):
     rows = []
-
     for r in plan_rows:
         rows.append({
             "region": r["region"],
@@ -2072,12 +1930,10 @@ def recovery_preview_rows(plan_rows):
 
     return rows
 
-
 def apply_endpoint_recovery_plan(plan_rows):
     changed = 0
     skipped = 0
     audit = []
-
     for r in plan_rows:
         entity = r["entity"]
         old = get_text_value(entity)
@@ -2157,11 +2013,9 @@ def apply_endpoint_recovery_plan(plan_rows):
 
     return changed, skipped, audit
 
-
 # =========================================================
 # SESSION STATE
 # =========================================================
-
 def init_state():
     defaults = {
         "docs_loaded": False,
@@ -2186,11 +2040,9 @@ def init_state():
         "skipped": 0,
         "prepared": False,
     }
-
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
-
 
 def reset_state():
     for k in [
@@ -2217,26 +2069,18 @@ def reset_state():
         if k in st.session_state:
             del st.session_state[k]
 
-
 # =========================================================
 # MAIN UI
 # =========================================================
-
 init_state()
-
 st.markdown("### 1. Detection Settings")
-
 c1, c2, c3, c4 = st.columns(4)
-
 with c1:
     axis_tol = st.slider("Axis Group Tolerance", 0.0, 500.0, 10.0, 0.5, key="axis_tol")
-
 with c2:
     text_gap = st.slider("Text-in-Bubble Gap", 20.0, 2000.0, 180.0, 10.0, key="text_gap")
-
 with c3:
     attach_gap = st.slider("Gridline Attach Gap", 20.0, 3000.0, 180.0, 10.0, key="attach_gap")
-
 with c4:
     min_grid_length = st.number_input(
         "Min Grid Line Length",
@@ -2247,7 +2091,6 @@ with c4:
     )
 
 d1, d2, d3, d4 = st.columns(4)
-
 with d1:
     numeric_order = st.selectbox(
         "Numeric Axis Order",
@@ -2255,7 +2098,6 @@ with d1:
         index=0,
         key="numeric_order",
     )
-
 with d2:
     alpha_order = st.selectbox(
         "Alphabetic Axis Order",
@@ -2263,7 +2105,6 @@ with d2:
         index=0,
         key="alpha_order",
     )
-
 with d3:
     forced_region_count = st.number_input(
         "Target Region Count Override",
@@ -2273,7 +2114,6 @@ with d3:
         help="Use 0 for auto. If the target has 8 plans, enter 8.",
         key="forced_region_count",
     )
-
 with d4:
     min_region_markers = st.number_input(
         "Min Markers Per Region",
@@ -2284,7 +2124,6 @@ with d4:
     )
 
 e1, e2, e3 = st.columns(3)
-
 with e1:
     allow_block_text_write = st.checkbox(
         "Advanced: allow block TEXT/MTEXT write",
@@ -2292,7 +2131,6 @@ with e1:
         help="Use only on copied DXF files. Editing block definitions can affect repeated inserts.",
         key="allow_block_text_write",
     )
-
 with e2:
     min_confidence_required = st.slider(
         "Minimum Marker Confidence",
@@ -2302,7 +2140,6 @@ with e2:
         5,
         key="min_confidence_required",
     )
-
 with e3:
     max_region_marker_ratio = st.slider(
         "Max Sync Marker Ratio",
@@ -2315,7 +2152,6 @@ with e3:
     )
 
 f1, f2, f3 = st.columns(3)
-
 with f1:
     ignore_interior_detail_bubbles = st.checkbox(
         "Ignore interior/detail bubbles for clean sync",
@@ -2323,7 +2159,6 @@ with f1:
         help="Recommended. Clean sync keeps only perimeter markers so slab/detail bubbles are not touched.",
         key="ignore_interior_detail_bubbles",
     )
-
 with f2:
     perimeter_band_ratio = st.slider(
         "Perimeter Band Ratio",
@@ -2334,7 +2169,6 @@ with f2:
         help="Higher keeps more markers near the plan edge. Lower is stricter.",
         key="perimeter_band_ratio",
     )
-
 with f3:
     perimeter_min_band = st.number_input(
         "Minimum Perimeter Band",
@@ -2346,9 +2180,7 @@ with f3:
     )
 
 st.markdown("#### Slab/Grid Endpoint Recovery Settings")
-
 r1, r2, r3 = st.columns(3)
-
 with r1:
     recovery_endpoint_radius = st.slider(
         "Recovery Endpoint Search Radius",
@@ -2359,7 +2191,6 @@ with r1:
         help="Search distance around actual grid-frame endpoints. Lower values reject slab/detail bubbles.",
         key="recovery_endpoint_radius",
     )
-
 with r2:
     recovery_numeric_extra = st.slider(
         "Recovery Numeric Label Extra Range",
@@ -2370,7 +2201,6 @@ with r2:
         help="Used only when strict source labels is OFF.",
         key="recovery_numeric_extra",
     )
-
 with r3:
     recovery_axis_snap_tolerance = st.slider(
         "Recovery Axis Snap Tolerance",
@@ -2383,7 +2213,6 @@ with r3:
     )
 
 r4, r5 = st.columns(2)
-
 with r4:
     recovery_strict_source_labels = st.checkbox(
         "Recovery: use detected old target labels only",
@@ -2391,7 +2220,6 @@ with r4:
         help="Recommended ON. This uses labels already detected on target axes and rejects unrelated detail numbers.",
         key="recovery_strict_source_labels",
     )
-
 with r5:
     recovery_allow_virtual_axis = st.checkbox(
         "Recovery: allow virtual-axis markers",
@@ -2400,18 +2228,13 @@ with r5:
         key="recovery_allow_virtual_axis",
     )
 
-
 # =========================================================
 # FILE UPLOAD
 # =========================================================
-
 st.markdown("### 2. Upload Files")
-
 u1, u2 = st.columns(2)
-
 with u1:
     arch_file = st.file_uploader("Reference DXF", type=["dxf"], key="arch_file_upload")
-
 with u2:
     struc_file = st.file_uploader("Target DXF", type=["dxf"], key="struc_file_upload")
 
@@ -2428,7 +2251,6 @@ if arch_file and struc_file:
     if not st.session_state.docs_loaded:
         arch_tmp = None
         struc_tmp = None
-
         try:
             arch_tmp = save_uploaded_to_temp(arch_file)
             struc_tmp = save_uploaded_to_temp(struc_file)
@@ -2453,11 +2275,9 @@ else:
     st.info("Upload both the Reference DXF and Target DXF to continue.")
     st.stop()
 
-
 # =========================================================
 # LAYER SETUP
 # =========================================================
-
 arch_doc = st.session_state.arch_doc
 struc_doc = st.session_state.struc_doc
 
@@ -2465,7 +2285,6 @@ arch_layers = get_layer_names(arch_doc)
 struc_layers = get_layer_names(struc_doc)
 
 st.markdown("### 3. Layer Setup")
-
 arch_line_default = pick_default_layer(arch_layers, ["S-GRID", "GRID", "GRIDLINELAYER"])
 arch_text_default = pick_default_layer(arch_layers, ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"])
 arch_circle_default = pick_default_layer(arch_layers, ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"])
@@ -2475,7 +2294,6 @@ struc_text_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-STRS-I
 struc_circle_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-GRID-IDEN", "GRID-ID"])
 
 la, lb, lc = st.columns(3)
-
 with la:
     arch_line_layer = st.selectbox(
         "Reference Grid Line Layer",
@@ -2483,7 +2301,6 @@ with la:
         index=arch_layers.index(arch_line_default) if arch_line_default in arch_layers else 0,
         key="arch_line_layer_select",
     )
-
 with lb:
     arch_text_layer = st.selectbox(
         "Reference Grid Text Layer",
@@ -2491,7 +2308,6 @@ with lb:
         index=arch_layers.index(arch_text_default) if arch_text_default in arch_layers else 0,
         key="arch_text_layer_select",
     )
-
 with lc:
     arch_circle_layer = st.selectbox(
         "Reference Grid Bubble Layer",
@@ -2501,7 +2317,6 @@ with lc:
     )
 
 sa, sb, sc = st.columns(3)
-
 with sa:
     struc_line_layer = st.selectbox(
         "Target Grid Line Layer",
@@ -2509,7 +2324,6 @@ with sa:
         index=struc_layers.index(struc_line_default) if struc_line_default in struc_layers else 0,
         key="struc_line_layer_select",
     )
-
 with sb:
     struc_text_layer = st.selectbox(
         "Target Grid Text Layer",
@@ -2517,7 +2331,6 @@ with sb:
         index=struc_layers.index(struc_text_default) if struc_text_default in struc_layers else 0,
         key="struc_text_layer_select",
     )
-
 with sc:
     struc_circle_layer = st.selectbox(
         "Target Grid Bubble Layer",
@@ -2527,20 +2340,16 @@ with sc:
     )
 
 b1, b2 = st.columns(2)
-
 with b1:
     analyze = st.button("🔎 Analyze / Prepare Sync", type="primary", key="analyze_button")
-
 with b2:
     if st.button("🧹 Reset", key="reset_button"):
         reset_state()
         st.rerun()
 
-
 # =========================================================
 # ANALYZE
 # =========================================================
-
 if analyze:
     try:
         arch_det = build_trusted_markers(
@@ -2553,7 +2362,6 @@ if analyze:
             attach_gap,
             allow_block_text_write,
         )
-
         struc_det = build_trusted_markers(
             struc_doc,
             struc_line_layer,
@@ -2686,15 +2494,12 @@ if analyze:
     except Exception as e:
         st.error(f"Prepare failed: {e}")
 
-
 # =========================================================
 # RESULTS / CLEAN SYNC / RECOVERY
 # =========================================================
-
 if st.session_state.prepared:
     st.markdown("---")
     st.markdown("### 4. Detection Summary")
-
     arch_det = st.session_state.arch_detection
     struc_det = st.session_state.struc_detection
     family = st.session_state.family
@@ -3030,3 +2835,6 @@ if st.session_state.prepared:
         mime="application/dxf",
         key="download_relabelled_dxf",
     )
+    )
+
+    return numeric, alpha
