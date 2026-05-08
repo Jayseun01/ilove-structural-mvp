@@ -24,9 +24,9 @@ st.caption(
 "Workflow: Upload reference/target DXFs → detect grid labels → sync clean regions → use endpoint recovery for slab/detail regions."
 )
 
-=========================================================
-FILE HELPERS
-=========================================================
+# =========================================================
+# FILE HELPERS
+# =========================================================
 def save_uploaded_to_temp(uploaded_file):
 with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp:
 tmp.write(uploaded_file.getvalue())
