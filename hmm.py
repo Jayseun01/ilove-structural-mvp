@@ -2836,6 +2836,6 @@ if st.session_state.prepared:
         mime="application/dxf",
         key="download_relabelled_dxf",
     )
-    )
+    
 
-    return numeric, alpha
+
