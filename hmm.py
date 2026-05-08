@@ -448,9 +448,13 @@ def extract_axis_lines(doc, layer_name, min_length=1000.0):
             if e.dxf.layer != layer_name:
                 continue
 
-            if e.dxftype() == "LINE":
-                x1, y1, _ = e.dxf.start
-                x2, y2, _ = e.dxf.end
+        if e.dxftype() == "LINE":
+            start = getattr(e.dxf, "start", None)
+            end = getattr(e.dxf, "end", None)
+            if start is None or end is None:
+                continue
+            x1, y1 = float(start[0]), float(start[1])
+            x2, y2 = float(end[0]), float(end[1])
 
                 add_axis_segment(lines, e, x1, y1, x2, y2, e.dxf.layer, min_length)
 
