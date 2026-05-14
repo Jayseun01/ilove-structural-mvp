@@ -1,32 +1,39 @@
 import streamlit as st
 import ezdxf
-import tempfile
 import os
+import tempfile
 import math
-import datetime
-import pandas as pd
+import re
+import io
+import csv
 
 
 # =========================================================
-# STREAMLIT CONFIG
+# APP CONFIG
 # =========================================================
 
 st.set_page_config(
-    page_title="iLoveStructural - Architectural Wall Centerline Agent",
+    page_title="iLoveStructural - Grid Label Sync",
     page_icon="🏗️",
     layout="wide",
 )
 
 st.title("🏗️ iLoveStructural")
-st.subheader("Tool 4: Architectural Wall Centerline Agent (with Arc Support)")
+st.subheader("Tool 2: Grid Label Sync")
 st.caption(
-    "Architectural DXF → accurate wall centerlines → overlap cleanup → columns → graph slab panels."
+    "Workflow: Upload reference/target DXFs → detect grid labels → sync clean regions → use endpoint recovery for slab/detail regions."
 )
 
 
 # =========================================================
 # FILE HELPERS
 # =========================================================
+
+def save_uploaded_to_temp(uploaded_file):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp:
+        tmp.write(uploaded_file.getvalue())
+        return tmp.name
+
 
 def safe_remove_file(path):
     try:
@@ -36,22 +43,7 @@ def safe_remove_file(path):
         pass
 
 
-def save_uploaded_to_temp(uploaded_file):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp:
-        tmp.write(uploaded_file.getvalue())
-        return tmp.name
-
-
-def read_uploaded_dxf(uploaded_file):
-    tmp_path = None
-    try:
-        tmp_path = save_uploaded_to_temp(uploaded_file)
-        return ezdxf.readfile(tmp_path)
-    finally:
-        safe_remove_file(tmp_path)
-
-
-def write_doc_to_bytes(doc):
+def write_doc_to_temp_bytes(doc):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf")
     tmp_path = tmp.name
     tmp.close()
@@ -64,2379 +56,4358 @@ def write_doc_to_bytes(doc):
         safe_remove_file(tmp_path)
 
 
-def get_layer_names(doc):
-    try:
-        return sorted([layer.dxf.name for layer in doc.layers])
-    except Exception:
-        return []
+def uploaded_file_signature(uploaded_file):
+    if uploaded_file is None:
+        return None
+    return uploaded_file.name, len(uploaded_file.getvalue())
 
 
-def safe_layer(doc, name, color=7):
-    try:
-        existing = [layer.dxf.name for layer in doc.layers]
-        if name not in existing:
-            doc.layers.new(name=name, dxfattribs={"color": color})
-    except Exception:
-        pass
+def audit_to_csv_bytes(audit_rows):
+    if not audit_rows:
+        return b""
 
+    fieldnames = sorted(set().union(*[row.keys() for row in audit_rows]))
 
-def layer_color_for_thickness(thickness):
-    try:
-        t = int(thickness)
-    except Exception:
-        t = 0
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer.writeheader()
 
-    if t == 225:
-        return 1
-    if t == 150:
-        return 3
-    return 7
+    for row in audit_rows:
+        safe_row = {}
+        for k in fieldnames:
+            v = row.get(k, "")
+            if k in ("entity", "marker"):
+                v = ""
+            safe_row[k] = v
+        writer.writerow(safe_row)
+
+    return buffer.getvalue().encode("utf-8")
 
 
 # =========================================================
-# BASIC GEOMETRY
+# TEXT / LABEL HELPERS
 # =========================================================
 
-def is_allowed_layer(layer_name, selected_layers, use_all_layers):
-    if use_all_layers:
-        return True
-    return layer_name in selected_layers
+def clean_text(value):
+    if value is None:
+        return ""
+
+    txt = str(value)
+    txt = txt.replace("\\P", " ")
+    txt = txt.replace("\n", " ")
+    txt = txt.replace("′", "'")
+    txt = re.sub(r"\s+", " ", txt)
+    return txt.strip().upper()
 
 
-def is_horizontal_segment(x1, y1, x2, y2, ortho_tol):
-    return abs(y1 - y2) <= ortho_tol and abs(x2 - x1) > ortho_tol
+def probable_grid_label(text):
+    text = clean_text(text)
+
+    patterns = [
+        r"[A-Z]{1,3}",
+        r"[A-Z]{1,3}'",
+        r"\d{1,3}",
+        r"\d{1,3}[A-Z]?",
+        r"\d{1,3}[A-Z]?'?",
+    ]
+
+    return any(re.fullmatch(p, text) for p in patterns)
 
 
-def is_vertical_segment(x1, y1, x2, y2, ortho_tol):
-    return abs(x1 - x2) <= ortho_tol and abs(y2 - y1) > ortho_tol
+def is_numeric_label(text):
+    return bool(re.fullmatch(r"\d{1,3}[A-Z]?'?", clean_text(text)))
 
 
-def make_face_line(orientation, c, a, b, layer, source_type, handle):
-    return {
-        "orientation": orientation,
-        "c": float(c),
-        "a": float(min(a, b)),
-        "b": float(max(a, b)),
-        "layer": layer,
-        "source_type": source_type,
-        "handle": handle,
-    }
+def is_alpha_label(text):
+    return bool(re.fullmatch(r"[A-Z]{1,3}'?", clean_text(text)))
 
 
-def make_centerline_segment(
-    orientation,
-    c,
-    a,
-    b,
-    thickness,
-    actual_thickness=None,
-    thickness_error=None,
-    overlap_length=None,
-    source_count=1,
-    region_id=None,
-    cx=0.0,
-    cy=0.0,
-    radius=0.0
-):
-    if actual_thickness is None:
-        actual_thickness = thickness
+def numeric_label_value(text):
+    txt = clean_text(text)
+    m = re.fullmatch(r"(\d{1,3})([A-Z]?)(?:')?", txt)
 
-    if thickness_error is None:
-        thickness_error = abs(float(actual_thickness) - float(thickness))
+    if not m:
+        return None
 
-    if orientation == "C":
-        length = radius * math.radians(abs(float(b) - float(a)))
-    else:
-        length = abs(float(b) - float(a))
+    return int(m.group(1))
 
-    if overlap_length is None:
-        overlap_length = length
 
-    quality_score = (
-        float(overlap_length)
-        + length * 0.25
-        - float(thickness_error) * 100.0
+# =========================================================
+# GEOMETRY HELPERS
+# =========================================================
+
+def euclidean(p1, p2):
+    return math.dist((p1[0], p1[1]), (p2[0], p2[1]))
+
+
+def is_vertical(x1, y1, x2, y2, tol=2.0):
+    return abs(x1 - x2) <= tol and abs(y2 - y1) > tol
+
+
+def is_horizontal(x1, y1, x2, y2, tol=2.0):
+    return abs(y1 - y2) <= tol and abs(x2 - x1) > tol
+
+
+def point_projects_on_segment(px, py, x1, y1, x2, y2, pad=0.0):
+    return (
+        min(x1, x2) - pad <= px <= max(x1, x2) + pad
+        and min(y1, y2) - pad <= py <= max(y1, y2) + pad
     )
 
+
+def point_to_segment_distance(px, py, x1, y1, x2, y2):
+    dx = x2 - x1
+    dy = y2 - y1
+
+    if dx == 0 and dy == 0:
+        return math.dist((px, py), (x1, y1))
+
+    t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
+    t = max(0.0, min(1.0, t))
+
+    qx = x1 + t * dx
+    qy = y1 + t * dy
+
+    return math.dist((px, py), (qx, qy))
+
+
+def bbox_from_markers(markers):
+    xs = [m["circle_center"][0] for m in markers]
+    ys = [m["circle_center"][1] for m in markers]
+
     return {
-        "orientation": orientation,
-        "c": float(c),
-        "a": float(min(a, b)),
-        "b": float(max(a, b)),
-        "thickness": int(thickness),
-        "actual_thickness": float(actual_thickness),
-        "thickness_error": float(thickness_error),
-        "overlap_length": float(overlap_length),
-        "source_count": int(source_count),
-        "quality_score": float(quality_score),
-        "region_id": region_id,
-        "cx": float(cx),
-        "cy": float(cy),
-        "radius": float(radius)
+        "min_x": min(xs),
+        "max_x": max(xs),
+        "min_y": min(ys),
+        "max_y": max(ys),
+        "width": max(xs) - min(xs),
+        "height": max(ys) - min(ys),
+        "centroid": (sum(xs) / len(xs), sum(ys) / len(ys)),
     }
 
 
-def segment_length(seg):
-    if seg.get("orientation") == "C":
-        radius = seg.get("radius", 0.0)
-        angle_diff = abs(float(seg["b"]) - float(seg["a"]))
-        if angle_diff > 360: angle_diff = 360
-        return radius * math.radians(angle_diff)
-    return abs(float(seg["b"]) - float(seg["a"]))
+def squared_distance(p1, p2):
+    return (p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2
 
 
-def filter_short_segments(segments, min_length):
-    if min_length <= 0:
-        return list(segments)
-    return [s for s in segments if segment_length(s) >= min_length]
+# =========================================================
+# DXF HELPERS
+# =========================================================
+
+def get_layer_names(doc):
+    return sorted([layer.dxf.name for layer in doc.layers])
 
 
-def filter_segments_by_thickness(segments, allowed_thicknesses):
-    if not allowed_thicknesses:
-        return []
-    allowed = set(int(x) for x in allowed_thicknesses)
-    return [s for s in segments if int(s.get("thickness", 0)) in allowed]
+def pick_default_layer(layers, candidates):
+    upper = {x.upper(): x for x in layers}
+
+    for c in candidates:
+        if c.upper() in upper:
+            return upper[c.upper()]
+
+    return layers[0] if layers else None
 
 
-def overlap_range(a1, b1, a2, b2):
-    start = max(min(a1, b1), min(a2, b2))
-    end = min(max(a1, b1), max(a2, b2))
-    return start, end
-
-
-def interval_overlap_length(a1, b1, a2, b2):
-    start, end = overlap_range(a1, b1, a2, b2)
-    return max(0.0, end - start)
-
-
-def interval_gap(a1, b1, a2, b2):
-    a1, b1 = min(a1, b1), max(a1, b1)
-    a2, b2 = min(a2, b2), max(a2, b2)
-
-    if b1 < a2:
-        return a2 - b1
-    if b2 < a1:
-        return a1 - b2
-    return 0.0
-
-
-def point_distance(p1, p2):
-    return math.dist((float(p1[0]), float(p1[1])), (float(p2[0]), float(p2[1])))
-
-
-def copy_segment(seg):
-    return {
-        "orientation": seg["orientation"],
-        "c": float(seg["c"]),
-        "a": float(seg["a"]),
-        "b": float(seg["b"]),
-        "thickness": int(seg["thickness"]),
-        "actual_thickness": float(seg.get("actual_thickness", seg["thickness"])),
-        "thickness_error": float(seg.get("thickness_error", 0.0)),
-        "overlap_length": float(seg.get("overlap_length", segment_length(seg))),
-        "source_count": int(seg.get("source_count", 1)),
-        "quality_score": float(seg.get("quality_score", 0.0)),
-        "region_id": seg.get("region_id", None),
-        "cx": float(seg.get("cx", 0.0)),
-        "cy": float(seg.get("cy", 0.0)),
-        "radius": float(seg.get("radius", 0.0))
-    }
-
-
-def entity_handle(entity):
+def get_entity_handle(entity):
     try:
-        return str(entity.dxf.handle)
+        return entity.dxf.handle
     except Exception:
         return ""
 
 
 # =========================================================
-# DXF WALL FACE EXTRACTION
+# LAYER WHITELIST / WRITE MODE HELPERS
 # =========================================================
 
-def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_line_length):
+WRITE_MODE_SAFE = "Safe mode: modelspace TEXT/MTEXT only"
+WRITE_MODE_ATTRIB = "Attribute mode: modelspace TEXT/MTEXT + INSERT attributes"
+WRITE_MODE_DANGEROUS = "Advanced/Dangerous: also edit block definition TEXT/MTEXT"
+
+
+def norm_layer_name(value):
+    return clean_text(value)
+
+
+def layer_matches(entity_layer, selected_layer):
+    return norm_layer_name(entity_layer) == norm_layer_name(selected_layer)
+
+
+def nested_entity_layer_allowed(
+    nested_layer,
+    selected_layer,
+    parent_layer=None,
+    allow_layer0_from_selected_insert=True,
+    strict_nested_block_layer_match=False,
+):
+    nested = norm_layer_name(nested_layer)
+    selected = norm_layer_name(selected_layer)
+    parent = norm_layer_name(parent_layer)
+
+    if strict_nested_block_layer_match:
+        return nested == selected
+
+    if nested == selected:
+        return True
+
+    if allow_layer0_from_selected_insert and nested == "0" and parent == selected:
+        return True
+
+    return False
+
+
+def attrib_layer_allowed_for_text(
+    attrib_layer,
+    selected_text_layer,
+    parent_insert_layer=None,
+    allow_layer0_from_selected_insert=True,
+    strict_nested_block_layer_match=False,
+):
+    attrib = norm_layer_name(attrib_layer)
+    selected = norm_layer_name(selected_text_layer)
+    parent = norm_layer_name(parent_insert_layer)
+
+    if strict_nested_block_layer_match:
+        return attrib == selected
+
+    if attrib == selected:
+        return True
+
+    if parent == selected:
+        return True
+
+    if allow_layer0_from_selected_insert and attrib == "0" and parent == selected:
+        return True
+
+    return False
+
+
+def marker_write_profile(marker, write_mode=None, allow_block_text_write=False):
+    if write_mode is None:
+        write_mode = WRITE_MODE_DANGEROUS if allow_block_text_write else WRITE_MODE_ATTRIB
+
+    src = marker.get("text_source", "")
+    typ = marker.get("text_type", "")
+
+    if src == "modelspace" and typ in ("TEXT", "MTEXT"):
+        return {
+            "writable": True,
+            "write_source": src,
+            "write_risk": "low",
+            "write_mode": write_mode,
+            "write_reason": "modelspace_text",
+        }
+
+    if src == "modelspace" and typ == "ATTRIB":
+        if write_mode in (WRITE_MODE_ATTRIB, WRITE_MODE_DANGEROUS):
+            return {
+                "writable": True,
+                "write_source": src,
+                "write_risk": "medium",
+                "write_mode": write_mode,
+                "write_reason": "modelspace_attrib",
+            }
+
+        return {
+            "writable": False,
+            "write_source": src,
+            "write_risk": "blocked",
+            "write_mode": write_mode,
+            "write_reason": "attrib_blocked_in_safe_mode",
+        }
+
+    if src == "insert_attrib":
+        if write_mode in (WRITE_MODE_ATTRIB, WRITE_MODE_DANGEROUS):
+            return {
+                "writable": True,
+                "write_source": src,
+                "write_risk": "medium",
+                "write_mode": write_mode,
+                "write_reason": "insert_attribute_instance",
+            }
+
+        return {
+            "writable": False,
+            "write_source": src,
+            "write_risk": "blocked",
+            "write_mode": write_mode,
+            "write_reason": "insert_attrib_blocked_in_safe_mode",
+        }
+
+    if src == "block_text":
+        if write_mode == WRITE_MODE_DANGEROUS or allow_block_text_write:
+            return {
+                "writable": True,
+                "write_source": src,
+                "write_risk": "high",
+                "write_mode": write_mode,
+                "write_reason": "block_definition_text",
+            }
+
+        return {
+            "writable": False,
+            "write_source": src,
+            "write_risk": "blocked",
+            "write_mode": write_mode,
+            "write_reason": "block_definition_text_blocked",
+        }
+
+    return {
+        "writable": False,
+        "write_source": src,
+        "write_risk": "blocked",
+        "write_mode": write_mode,
+        "write_reason": "unknown_text_source",
+    }
+
+
+def is_marker_writable(marker, allow_block_text_write=False, write_mode=None):
+    return marker_write_profile(
+        marker,
+        write_mode=write_mode,
+        allow_block_text_write=allow_block_text_write,
+    )["writable"]
+
+
+def marker_layer(marker):
+    return marker.get("text_layer") or marker.get("layer") or ""
+
+
+def marker_entity_handle(marker):
+    entity = marker.get("text_entity")
+    return marker.get("text_handle") or get_entity_handle(entity)
+
+
+def get_insert_transform(insert_entity):
+    try:
+        ins = insert_entity.dxf.insert
+        sx = float(getattr(insert_entity.dxf, "xscale", 1.0) or 1.0)
+        sy = float(getattr(insert_entity.dxf, "yscale", 1.0) or 1.0)
+        rot = float(getattr(insert_entity.dxf, "rotation", 0.0) or 0.0)
+
+        return float(ins.x), float(ins.y), sx, sy, rot
+    except Exception:
+        return 0.0, 0.0, 1.0, 1.0, 0.0
+
+
+def transform_block_point(local_point, insert_entity):
+    x, y = local_point
+    ix, iy, sx, sy, rot = get_insert_transform(insert_entity)
+
+    x *= sx
+    y *= sy
+
+    a = math.radians(rot)
+    xr = x * math.cos(a) - y * math.sin(a)
+    yr = x * math.sin(a) + y * math.cos(a)
+
+    return xr + ix, yr + iy
+
+
+def transform_block_radius(radius, insert_entity):
+    _, _, sx, sy, _ = get_insert_transform(insert_entity)
+    return float(radius) * ((abs(sx) + abs(sy)) / 2.0)
+
+
+def get_text_point(entity):
+    try:
+        if entity.dxftype() == "TEXT":
+            try:
+                ap = entity.dxf.align_point
+                if ap is not None and (float(ap.x) != 0.0 or float(ap.y) != 0.0):
+                    return float(ap.x), float(ap.y)
+            except Exception:
+                pass
+
+            ins = entity.dxf.insert
+            return float(ins.x), float(ins.y)
+
+        if entity.dxftype() in ("MTEXT", "ATTRIB"):
+            ins = entity.dxf.insert
+            return float(ins.x), float(ins.y)
+
+    except Exception:
+        pass
+
+    return 0.0, 0.0
+
+
+def get_text_value(entity):
+    try:
+        if entity.dxftype() == "TEXT":
+            return clean_text(entity.dxf.text)
+
+        if entity.dxftype() == "MTEXT":
+            return clean_text(entity.text)
+
+        if entity.dxftype() == "ATTRIB":
+            return clean_text(entity.dxf.text)
+
+    except Exception:
+        pass
+
+    return ""
+
+
+def set_text_value(entity, new_value):
+    try:
+        if entity.dxftype() == "TEXT":
+            entity.dxf.text = new_value
+            return True
+
+        if entity.dxftype() == "MTEXT":
+            entity.text = new_value
+            return True
+
+        if entity.dxftype() == "ATTRIB":
+            entity.dxf.text = new_value
+            return True
+
+    except Exception:
+        pass
+
+    return False
+
+
+# =========================================================
+# ENTITY EXTRACTION
+# =========================================================
+
+def extract_texts(
+    doc,
+    layer_name,
+    allow_nested_layer0_from_selected_insert=True,
+    strict_nested_block_layer_match=False,
+):
+    texts = []
     msp = doc.modelspace()
-
-    horizontal = []
-    vertical = []
-    arcs = []
-    ignored = 0
-
-    def add_segment(x1, y1, x2, y2, layer, source_type, handle):
-        nonlocal ignored
-
-        length = math.hypot(x2 - x1, y2 - y1)
-
-        if length < min_line_length:
-            ignored += 1
-            return
-
-        if is_horizontal_segment(x1, y1, x2, y2, ortho_tol):
-            y = (y1 + y2) / 2.0
-            horizontal.append(
-                make_face_line("H", y, x1, x2, layer, source_type, handle)
-            )
-
-        elif is_vertical_segment(x1, y1, x2, y2, ortho_tol):
-            x = (x1 + x2) / 2.0
-            vertical.append(
-                make_face_line("V", x, y1, y2, layer, source_type, handle)
-            )
-        else:
-            ignored += 1
 
     for e in msp:
         try:
-            dxftype = e.dxftype()
-            layer = e.dxf.layer
+            if e.dxftype() in ("TEXT", "MTEXT", "ATTRIB"):
+                if not layer_matches(e.dxf.layer, layer_name):
+                    continue
 
-            if not is_allowed_layer(layer, selected_layers, use_all_layers):
-                continue
-
-            if dxftype == "LINE":
-                s = e.dxf.start
-                en = e.dxf.end
-                add_segment(
-                    float(s.x),
-                    float(s.y),
-                    float(en.x),
-                    float(en.y),
-                    layer,
-                    "LINE",
-                    entity_handle(e),
-                )
-
-            elif dxftype == "LWPOLYLINE":
-                pts = []
-
-                try:
-                    for p in e.get_points():
-                        pts.append((float(p[0]), float(p[1])))
-                except Exception:
-                    pts = []
-
-                for i in range(len(pts) - 1):
-                    x1, y1 = pts[i]
-                    x2, y2 = pts[i + 1]
-                    add_segment(
-                        x1,
-                        y1,
-                        x2,
-                        y2,
-                        layer,
-                        "LWPOLYLINE",
-                        entity_handle(e),
-                    )
-
-                try:
-                    if e.closed and len(pts) >= 2:
-                        x1, y1 = pts[-1]
-                        x2, y2 = pts[0]
-                        add_segment(
-                            x1,
-                            y1,
-                            x2,
-                            y2,
-                            layer,
-                            "LWPOLYLINE_CLOSED",
-                            entity_handle(e),
-                        )
-                except Exception:
-                    pass
-
-            elif dxftype == "POLYLINE":
-                pts = []
-
-                try:
-                    for v in e.vertices:
-                        loc = v.dxf.location
-                        pts.append((float(loc.x), float(loc.y)))
-                except Exception:
-                    pts = []
-
-                for i in range(len(pts) - 1):
-                    x1, y1 = pts[i]
-                    x2, y2 = pts[i + 1]
-                    add_segment(
-                        x1,
-                        y1,
-                        x2,
-                        y2,
-                        layer,
-                        "POLYLINE",
-                        entity_handle(e),
-                    )
-
-                try:
-                    if e.is_closed and len(pts) >= 2:
-                        x1, y1 = pts[-1]
-                        x2, y2 = pts[0]
-                        add_segment(
-                            x1,
-                            y1,
-                            x2,
-                            y2,
-                            layer,
-                            "POLYLINE_CLOSED",
-                            entity_handle(e),
-                        )
-                except Exception:
-                    pass
-
-            elif dxftype == "ARC":
-                arcs.append({
-                    "cx": float(e.dxf.center.x),
-                    "cy": float(e.dxf.center.y),
-                    "radius": float(e.dxf.radius),
-                    "start_angle": float(e.dxf.start_angle),
-                    "end_angle": float(e.dxf.end_angle),
-                    "layer": layer,
-                    "handle": entity_handle(e)
+                texts.append({
+                    "entity": e,
+                    "text": get_text_value(e),
+                    "point": get_text_point(e),
+                    "layer": e.dxf.layer,
+                    "type": e.dxftype(),
+                    "source": "modelspace",
+                    "parent_insert": None,
+                    "parent_layer": "",
+                    "handle": get_entity_handle(e),
                 })
 
+            elif e.dxftype() == "INSERT":
+                parent_layer = e.dxf.layer
+
+                try:
+                    for att in e.attribs:
+                        if not attrib_layer_allowed_for_text(
+                            att.dxf.layer,
+                            layer_name,
+                            parent_insert_layer=parent_layer,
+                            allow_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+                            strict_nested_block_layer_match=strict_nested_block_layer_match,
+                        ):
+                            continue
+
+                        texts.append({
+                            "entity": att,
+                            "text": get_text_value(att),
+                            "point": get_text_point(att),
+                            "layer": att.dxf.layer,
+                            "type": "ATTRIB",
+                            "source": "insert_attrib",
+                            "parent_insert": e,
+                            "parent_layer": parent_layer,
+                            "handle": get_entity_handle(att),
+                        })
+                except Exception:
+                    pass
+
+                try:
+                    if e.dxf.name in doc.blocks:
+                        block = doc.blocks[e.dxf.name]
+
+                        for be in block:
+                            if be.dxftype() not in ("TEXT", "MTEXT"):
+                                continue
+
+                            if not nested_entity_layer_allowed(
+                                be.dxf.layer,
+                                layer_name,
+                                parent_layer=parent_layer,
+                                allow_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+                                strict_nested_block_layer_match=strict_nested_block_layer_match,
+                            ):
+                                continue
+
+                            lp = get_text_point(be)
+                            wp = transform_block_point(lp, e)
+
+                            texts.append({
+                                "entity": be,
+                                "text": get_text_value(be),
+                                "point": wp,
+                                "layer": be.dxf.layer,
+                                "type": be.dxftype(),
+                                "source": "block_text",
+                                "parent_insert": e,
+                                "parent_layer": parent_layer,
+                                "handle": get_entity_handle(be),
+                            })
+                except Exception:
+                    pass
+
         except Exception:
-            ignored += 1
             continue
 
+    return texts
+
+
+def extract_circles(
+    doc,
+    layer_name,
+    allow_nested_layer0_from_selected_insert=True,
+    strict_nested_block_layer_match=False,
+):
+    circles = []
+    msp = doc.modelspace()
+
+    for e in msp:
+        try:
+            if e.dxftype() == "CIRCLE":
+                if not layer_matches(e.dxf.layer, layer_name):
+                    continue
+
+                c = e.dxf.center
+
+                circles.append({
+                    "entity": e,
+                    "center": (float(c.x), float(c.y)),
+                    "radius": float(e.dxf.radius),
+                    "layer": e.dxf.layer,
+                    "source": "modelspace",
+                    "parent_insert": None,
+                    "parent_layer": "",
+                    "handle": get_entity_handle(e),
+                })
+
+            elif e.dxftype() == "INSERT":
+                parent_layer = e.dxf.layer
+
+                try:
+                    if e.dxf.name in doc.blocks:
+                        block = doc.blocks[e.dxf.name]
+
+                        for be in block:
+                            if be.dxftype() != "CIRCLE":
+                                continue
+
+                            if not nested_entity_layer_allowed(
+                                be.dxf.layer,
+                                layer_name,
+                                parent_layer=parent_layer,
+                                allow_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+                                strict_nested_block_layer_match=strict_nested_block_layer_match,
+                            ):
+                                continue
+
+                            c = be.dxf.center
+
+                            circles.append({
+                                "entity": e,
+                                "nested_entity": be,
+                                "center": transform_block_point((float(c.x), float(c.y)), e),
+                                "radius": transform_block_radius(float(be.dxf.radius), e),
+                                "layer": be.dxf.layer,
+                                "source": "block_circle",
+                                "parent_insert": e,
+                                "parent_layer": parent_layer,
+                                "handle": get_entity_handle(e),
+                                "nested_handle": get_entity_handle(be),
+                            })
+                except Exception:
+                    pass
+
+        except Exception:
+            continue
+
+    return circles
+
+
+def add_axis_segment(
+    lines,
+    entity,
+    x1,
+    y1,
+    x2,
+    y2,
+    layer_name,
+    min_length,
+    source="modelspace",
+    parent_insert=None,
+):
+    length = math.dist((x1, y1), (x2, y2))
+
+    if length < min_length:
+        return
+
+    base = {
+        "entity": entity,
+        "length": round(float(length), 3),
+        "layer": layer_name,
+        "handle": get_entity_handle(entity),
+        "source": source,
+        "parent_insert": parent_insert,
+        "parent_insert_handle": get_entity_handle(parent_insert) if parent_insert is not None else "",
+    }
+
+    if is_vertical(x1, y1, x2, y2):
+        row = dict(base)
+        row.update({
+            "orientation": "vertical",
+            "coord": round(float((x1 + x2) / 2.0), 3),
+            "start": (float(x1), float(y1)),
+            "end": (float(x2), float(y2)),
+        })
+        lines.append(row)
+
+    elif is_horizontal(x1, y1, x2, y2):
+        row = dict(base)
+        row.update({
+            "orientation": "horizontal",
+            "coord": round(float((y1 + y2) / 2.0), 3),
+            "start": (float(x1), float(y1)),
+            "end": (float(x2), float(y2)),
+        })
+        lines.append(row)
+
+
+def resolve_line_group(group):
+    best = max(group, key=lambda x: x["length"])
+    out = dict(best)
+    out["coord"] = round(sum(g["coord"] for g in group) / len(group), 3)
+    return out
+
+
+def deduplicate_axis_lines(lines, tol=5.0):
+    if not lines:
+        return []
+
+    lines = sorted(lines, key=lambda x: (x["orientation"], x["coord"]))
+
+    result = []
+    current = [lines[0]]
+
+    for item in lines[1:]:
+        same = (
+            item["orientation"] == current[-1]["orientation"]
+            and abs(item["coord"] - current[-1]["coord"]) <= tol
+        )
+
+        if same:
+            current.append(item)
+        else:
+            result.append(resolve_line_group(current))
+            current = [item]
+
+    result.append(resolve_line_group(current))
+    return result
+
+
+def add_polyline_segments_from_points(lines, entity, pts, layer_name, min_length, source, parent_insert=None):
+    for i in range(len(pts) - 1):
+        x1, y1 = float(pts[i][0]), float(pts[i][1])
+        x2, y2 = float(pts[i + 1][0]), float(pts[i + 1][1])
+
+        add_axis_segment(
+            lines,
+            entity,
+            x1,
+            y1,
+            x2,
+            y2,
+            layer_name,
+            min_length,
+            source=source,
+            parent_insert=parent_insert,
+        )
+
+
+def extract_axis_lines(
+    doc,
+    layer_name,
+    min_length=1000.0,
+    allow_nested_layer0_from_selected_insert=True,
+    strict_nested_block_layer_match=False,
+):
+    lines = []
+    msp = doc.modelspace()
+
+    for e in msp:
+        try:
+            if e.dxftype() == "LINE":
+                if not layer_matches(e.dxf.layer, layer_name):
+                    continue
+
+                x1, y1, _ = e.dxf.start
+                x2, y2, _ = e.dxf.end
+
+                add_axis_segment(
+                    lines,
+                    e,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    e.dxf.layer,
+                    min_length,
+                    source="modelspace",
+                )
+
+            elif e.dxftype() == "LWPOLYLINE":
+                if not layer_matches(e.dxf.layer, layer_name):
+                    continue
+
+                pts = list(e.get_points())
+                add_polyline_segments_from_points(
+                    lines,
+                    e,
+                    pts,
+                    e.dxf.layer,
+                    min_length,
+                    source="modelspace",
+                )
+
+            elif e.dxftype() == "POLYLINE":
+                if not layer_matches(e.dxf.layer, layer_name):
+                    continue
+
+                pts = [
+                    (float(v.dxf.location.x), float(v.dxf.location.y))
+                    for v in e.vertices
+                ]
+                add_polyline_segments_from_points(
+                    lines,
+                    e,
+                    pts,
+                    e.dxf.layer,
+                    min_length,
+                    source="modelspace",
+                )
+
+            elif e.dxftype() == "INSERT":
+                parent_layer = e.dxf.layer
+
+                try:
+                    if e.dxf.name not in doc.blocks:
+                        continue
+
+                    block = doc.blocks[e.dxf.name]
+
+                    for be in block:
+                        if be.dxftype() not in ("LINE", "LWPOLYLINE", "POLYLINE"):
+                            continue
+
+                        if not nested_entity_layer_allowed(
+                            be.dxf.layer,
+                            layer_name,
+                            parent_layer=parent_layer,
+                            allow_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+                            strict_nested_block_layer_match=strict_nested_block_layer_match,
+                        ):
+                            continue
+
+                        if be.dxftype() == "LINE":
+                            x1, y1, _ = be.dxf.start
+                            x2, y2, _ = be.dxf.end
+
+                            p1 = transform_block_point((float(x1), float(y1)), e)
+                            p2 = transform_block_point((float(x2), float(y2)), e)
+
+                            add_axis_segment(
+                                lines,
+                                be,
+                                p1[0],
+                                p1[1],
+                                p2[0],
+                                p2[1],
+                                be.dxf.layer,
+                                min_length,
+                                source="block_line",
+                                parent_insert=e,
+                            )
+
+                        elif be.dxftype() == "LWPOLYLINE":
+                            raw_pts = list(be.get_points())
+                            pts = [
+                                transform_block_point((float(p[0]), float(p[1])), e)
+                                for p in raw_pts
+                            ]
+
+                            add_polyline_segments_from_points(
+                                lines,
+                                be,
+                                pts,
+                                be.dxf.layer,
+                                min_length,
+                                source="block_polyline",
+                                parent_insert=e,
+                            )
+
+                        elif be.dxftype() == "POLYLINE":
+                            raw_pts = [
+                                (float(v.dxf.location.x), float(v.dxf.location.y))
+                                for v in be.vertices
+                            ]
+                            pts = [
+                                transform_block_point(p, e)
+                                for p in raw_pts
+                            ]
+
+                            add_polyline_segments_from_points(
+                                lines,
+                                be,
+                                pts,
+                                be.dxf.layer,
+                                min_length,
+                                source="block_polyline",
+                                parent_insert=e,
+                            )
+
+                except Exception:
+                    pass
+
+        except Exception:
+            continue
+
+    return deduplicate_axis_lines(lines)
+
+
+# =========================================================
+# MARKER DETECTION
+# =========================================================
+
+def text_inside_circle(text_point, circle_center, circle_radius, extra_gap=180.0):
+    return euclidean(text_point, circle_center) <= circle_radius + extra_gap
+
+
+def line_attached_to_circle(line, center, radius, attach_gap):
+    cx, cy = center
+    x1, y1 = line["start"]
+    x2, y2 = line["end"]
+
+    if line["orientation"] == "vertical":
+        if abs(line["coord"] - cx) > attach_gap:
+            return False
+
+        if not point_projects_on_segment(
+            cx,
+            cy,
+            x1,
+            y1,
+            x2,
+            y2,
+            pad=radius + attach_gap,
+        ):
+            return False
+
+    elif line["orientation"] == "horizontal":
+        if abs(line["coord"] - cy) > attach_gap:
+            return False
+
+        if not point_projects_on_segment(
+            cx,
+            cy,
+            x1,
+            y1,
+            x2,
+            y2,
+            pad=radius + attach_gap,
+        ):
+            return False
+
+    else:
+        return False
+
+    d_seg = point_to_segment_distance(cx, cy, x1, y1, x2, y2)
+    d1 = abs(euclidean((x1, y1), center) - radius)
+    d2 = abs(euclidean((x2, y2), center) - radius)
+
+    return min(d_seg, d1, d2) <= attach_gap
+
+
+def closest_grid_line_to_circle(center, lines, attach_gap):
+    if not lines:
+        return None, None
+
+    cx, cy = center
+    best = None
+
+    for ln in lines:
+        x1, y1 = ln["start"]
+        x2, y2 = ln["end"]
+
+        if ln["orientation"] == "vertical":
+            perp = abs(ln["coord"] - cx)
+            span_min = min(y1, y2)
+            span_max = max(y1, y2)
+
+            if span_min - attach_gap * 8 <= cy <= span_max + attach_gap * 8:
+                span_penalty = 0.0
+            else:
+                span_penalty = min(abs(cy - span_min), abs(cy - span_max))
+
+        else:
+            perp = abs(ln["coord"] - cy)
+            span_min = min(x1, x2)
+            span_max = max(x1, x2)
+
+            if span_min - attach_gap * 8 <= cx <= span_max + attach_gap * 8:
+                span_penalty = 0.0
+            else:
+                span_penalty = min(abs(cx - span_min), abs(cx - span_max))
+
+        score = perp + 0.10 * span_penalty
+
+        if best is None or score < best["score"]:
+            best = {
+                "line": ln,
+                "score": score,
+                "perp": perp,
+            }
+
+    return best["line"], best["perp"]
+
+
+def infer_orientation_from_same_label(bubble, bubbles, text_gap):
+    label = bubble["label"]
+    cx, cy = bubble["circle_center"]
+
+    align_tol = max(text_gap * 4.0, 750.0)
+    min_span = 1000.0
+
+    v = []
+    h = []
+
+    for other in bubbles:
+        if other is bubble:
+            continue
+
+        if other["label"] != label:
+            continue
+
+        ox, oy = other["circle_center"]
+        dx = abs(cx - ox)
+        dy = abs(cy - oy)
+
+        if dx <= align_tol and dy >= min_span:
+            v.append((dx, dy, (cx + ox) / 2.0))
+
+        if dy <= align_tol and dx >= min_span:
+            h.append((dy, dx, (cy + oy) / 2.0))
+
+    if v and not h:
+        v.sort(key=lambda x: (x[0], -x[1]))
+        return "vertical", round(float(v[0][2]), 3)
+
+    if h and not v:
+        h.sort(key=lambda x: (x[0], -x[1]))
+        return "horizontal", round(float(h[0][2]), 3)
+
+    if v and h:
+        v.sort(key=lambda x: (x[0], -x[1]))
+        h.sort(key=lambda x: (x[0], -x[1]))
+
+        if v[0][0] <= h[0][0]:
+            return "vertical", round(float(v[0][2]), 3)
+
+        return "horizontal", round(float(h[0][2]), 3)
+
+    return None, None
+
+
+def make_virtual_axis(center, orientation, coord, line_layer):
+    cx, cy = center
+
+    if orientation == "vertical":
+        return {
+            "entity": None,
+            "orientation": "vertical",
+            "coord": round(float(coord), 3),
+            "start": (float(coord), cy - 1000.0),
+            "end": (float(coord), cy + 1000.0),
+            "length": 1000.0,
+            "layer": line_layer,
+            "virtual": True,
+        }
+
     return {
-        "horizontal": horizontal,
-        "vertical": vertical,
-        "arcs": arcs,
-        "ignored": ignored,
+        "entity": None,
+        "orientation": "horizontal",
+        "coord": round(float(coord), 3),
+        "start": (cx - 1000.0, float(coord)),
+        "end": (cx + 1000.0, float(coord)),
+        "length": 1000.0,
+        "layer": line_layer,
+        "virtual": True,
+    }
+
+
+def marker_confidence(mode, text_matches, writable):
+    score = 35
+
+    if text_matches == 1:
+        score += 25
+    elif text_matches > 1:
+        score += 15
+
+    if mode == "attached_gridline":
+        score += 35
+    elif mode == "closest_gridline":
+        score += 20
+    elif mode == "same_label_virtual_axis":
+        score += 12
+
+    if writable:
+        score += 5
+    else:
+        score -= 15
+
+    return max(0, min(100, score))
+
+
+def build_trusted_markers(
+    doc,
+    line_layer,
+    text_layer,
+    circle_layer,
+    min_grid_length,
+    text_gap,
+    attach_gap,
+    allow_block_text_write=False,
+    write_mode=None,
+    allow_nested_layer0_from_selected_insert=True,
+    strict_nested_block_layer_match=False,
+):
+    texts = extract_texts(
+        doc,
+        text_layer,
+        allow_nested_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+        strict_nested_block_layer_match=strict_nested_block_layer_match,
+    )
+
+    circles = extract_circles(
+        doc,
+        circle_layer,
+        allow_nested_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+        strict_nested_block_layer_match=strict_nested_block_layer_match,
+    )
+
+    lines = extract_axis_lines(
+        doc,
+        line_layer,
+        min_length=min_grid_length,
+        allow_nested_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+        strict_nested_block_layer_match=strict_nested_block_layer_match,
+    )
+
+    bubbles = []
+    rejected = []
+
+    for c in circles:
+        center = c["center"]
+        radius = c["radius"]
+
+        candidates = []
+
+        for t in texts:
+            if not probable_grid_label(t["text"]):
+                continue
+
+            if text_inside_circle(t["point"], center, radius, extra_gap=text_gap):
+                candidates.append(t)
+
+        if not candidates:
+            rejected.append({
+                "circle_center": center,
+                "circle_radius": radius,
+                "candidate_texts": [],
+                "text_matches": 0,
+                "reason": "No valid grid text inside marker",
+                "circle_layer": c.get("layer", ""),
+                "circle_source": c.get("source", ""),
+            })
+            continue
+
+        candidates = sorted(candidates, key=lambda t: euclidean(t["point"], center))
+        t = candidates[0]
+
+        bubbles.append({
+            "label": clean_text(t["text"]),
+            "text_entity": t["entity"],
+            "text_point": t["point"],
+            "text_source": t["source"],
+            "text_type": t.get("type", ""),
+            "text_layer": t.get("layer", ""),
+            "text_parent_layer": t.get("parent_layer", ""),
+            "text_handle": t.get("handle", ""),
+            "parent_insert": t.get("parent_insert"),
+            "circle_entity": c["entity"],
+            "circle_center": center,
+            "circle_radius": radius,
+            "circle_source": c["source"],
+            "circle_layer": c.get("layer", ""),
+            "circle_handle": c.get("handle", ""),
+            "candidate_texts": [x["text"] for x in candidates[:10]],
+            "text_matches": len(candidates),
+        })
+
+    trusted = []
+
+    for b in bubbles:
+        center = b["circle_center"]
+        radius = b["circle_radius"]
+
+        attached = [
+            ln for ln in lines
+            if line_attached_to_circle(ln, center, radius, attach_gap)
+        ]
+
+        selected = None
+        mode = ""
+
+        if attached:
+            selected = max(attached, key=lambda x: x["length"])
+            mode = "attached_gridline"
+
+        else:
+            close, perp = closest_grid_line_to_circle(center, lines, attach_gap)
+            relaxed_limit = max(attach_gap * 6.0, 1200.0)
+
+            if close is not None and perp is not None and perp <= relaxed_limit:
+                selected = close
+                mode = "closest_gridline"
+
+            else:
+                orient, coord = infer_orientation_from_same_label(b, bubbles, text_gap)
+
+                if orient:
+                    selected = make_virtual_axis(center, orient, coord, line_layer)
+                    mode = "same_label_virtual_axis"
+
+        if selected is None:
+            rejected.append({
+                "circle_center": center,
+                "circle_radius": radius,
+                "candidate_texts": b.get("candidate_texts", []),
+                "text_matches": b.get("text_matches", 1),
+                "reason": "Text found, but no gridline/axis could be inferred",
+                "text_layer": b.get("text_layer", ""),
+                "text_source": b.get("text_source", ""),
+                "circle_layer": b.get("circle_layer", ""),
+                "circle_source": b.get("circle_source", ""),
+            })
+            continue
+
+        marker = {
+            "label": b["label"],
+            "text_entity": b["text_entity"],
+            "text_point": b["text_point"],
+            "text_source": b["text_source"],
+            "text_type": b.get("text_type", ""),
+            "text_layer": b.get("text_layer", ""),
+            "text_parent_layer": b.get("text_parent_layer", ""),
+            "text_handle": b.get("text_handle", ""),
+            "parent_insert": b.get("parent_insert"),
+            "circle_entity": b["circle_entity"],
+            "circle_center": b["circle_center"],
+            "circle_radius": b["circle_radius"],
+            "circle_source": b["circle_source"],
+            "circle_layer": b.get("circle_layer", ""),
+            "circle_handle": b.get("circle_handle", ""),
+            "line_entity": selected.get("entity"),
+            "orientation": selected["orientation"],
+            "coord": selected["coord"],
+            "line_start": selected["start"],
+            "line_end": selected["end"],
+            "line_length": selected["length"],
+            "line_layer": selected.get("layer", ""),
+            "line_source": selected.get("source", ""),
+            "detection_mode": mode,
+            "candidate_texts": b.get("candidate_texts", []),
+            "text_matches": b.get("text_matches", 1),
+        }
+
+        profile = marker_write_profile(
+            marker,
+            write_mode=write_mode,
+            allow_block_text_write=allow_block_text_write,
+        )
+
+        marker["writable"] = profile["writable"]
+        marker["write_source"] = profile["write_source"]
+        marker["write_risk"] = profile["write_risk"]
+        marker["write_mode"] = profile["write_mode"]
+        marker["write_reason"] = profile["write_reason"]
+
+        marker["confidence"] = marker_confidence(
+            mode,
+            marker["text_matches"],
+            marker["writable"],
+        )
+
+        trusted.append(marker)
+
+    return {
+        "texts": texts,
+        "circles": circles,
+        "lines": lines,
+        "trusted_markers": trusted,
+        "rejected_markers": rejected,
     }
 
 
 # =========================================================
-# CENTERLINE DETECTION
+# AXIS GROUPING / FAMILY INFERENCE
 # =========================================================
 
-def parse_wall_thicknesses(text):
-    values = []
-    for part in str(text).replace(";", ",").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            values.append(int(float(part)))
-        except Exception:
-            pass
-
-    clean = []
-    for v in values:
-        if v not in clean:
-            clean.append(v)
-    return clean
-
-
-def detect_centerlines_from_face_pairs(
-    horizontal_faces,
-    vertical_faces,
-    wall_thicknesses,
-    thickness_tol,
-    min_overlap,
-):
-    raw_segments = []
-
-    for thickness in wall_thicknesses:
-        for i, l1 in enumerate(horizontal_faces):
-            for l2 in horizontal_faces[i + 1:]:
-                actual_thickness = abs(l1["c"] - l2["c"])
-                thickness_error = abs(actual_thickness - thickness)
-
-                if thickness_error > thickness_tol:
-                    continue
-
-                start, end = overlap_range(l1["a"], l1["b"], l2["a"], l2["b"])
-                face_overlap = end - start
-
-                if face_overlap < min_overlap:
-                    continue
-
-                center_y = (l1["c"] + l2["c"]) / 2.0
-
-                raw_segments.append(
-                    make_centerline_segment(
-                        "H",
-                        center_y,
-                        start,
-                        end,
-                        thickness,
-                        actual_thickness=actual_thickness,
-                        thickness_error=thickness_error,
-                        overlap_length=face_overlap,
-                    )
-                )
-
-    for thickness in wall_thicknesses:
-        for i, l1 in enumerate(vertical_faces):
-            for l2 in vertical_faces[i + 1:]:
-                actual_thickness = abs(l1["c"] - l2["c"])
-                thickness_error = abs(actual_thickness - thickness)
-
-                if thickness_error > thickness_tol:
-                    continue
-
-                start, end = overlap_range(l1["a"], l1["b"], l2["a"], l2["b"])
-                face_overlap = end - start
-
-                if face_overlap < min_overlap:
-                    continue
-
-                center_x = (l1["c"] + l2["c"]) / 2.0
-
-                raw_segments.append(
-                    make_centerline_segment(
-                        "V",
-                        center_x,
-                        start,
-                        end,
-                        thickness,
-                        actual_thickness=actual_thickness,
-                        thickness_error=thickness_error,
-                        overlap_length=face_overlap,
-                    )
-                )
-
-    return raw_segments
-
-
-def detect_arc_centerlines(arc_faces, wall_thicknesses, thickness_tol):
-    raw_arc_segments = []
-    for thickness in wall_thicknesses:
-        for i, a1 in enumerate(arc_faces):
-            for a2 in arc_faces[i + 1:]:
-                if math.dist((a1["cx"], a1["cy"]), (a2["cx"], a2["cy"])) <= 10.0:
-                    actual_thickness = abs(a1["radius"] - a2["radius"])
-                    thickness_error = abs(actual_thickness - thickness)
-
-                    if thickness_error <= thickness_tol:
-                        avg_radius = (a1["radius"] + a2["radius"]) / 2.0
-                        start_angle = max(a1["start_angle"], a2["start_angle"])
-                        end_angle = min(a1["end_angle"], a2["end_angle"])
-
-                        if end_angle > start_angle:
-                            raw_arc_segments.append(
-                                make_centerline_segment(
-                                    "C", 0, start_angle, end_angle, thickness,
-                                    actual_thickness=actual_thickness, thickness_error=thickness_error,
-                                    cx=a1["cx"], cy=a1["cy"], radius=avg_radius
-                                )
-                            )
-    return raw_arc_segments
-
-
-# =========================================================
-# CENTERLINE HEALING
-# =========================================================
-
-def group_segments_by_axis(segments, axis_tol):
-    groups = []
-
-    sorted_segments = sorted(
-        segments,
-        key=lambda s: (
-            s["orientation"],
-            s["thickness"],
-            s["c"],
-            s["a"],
-            s["b"],
-        ),
-    )
-
-    for seg in sorted_segments:
-        placed = False
-
-        for group in groups:
-            g0 = group[0]
-
-            if seg["orientation"] != g0["orientation"]:
-                continue
-            if seg["thickness"] != g0["thickness"]:
-                continue
-
-            group_c = sum(x["c"] for x in group) / len(group)
-
-            if abs(seg["c"] - group_c) <= axis_tol:
-                group.append(seg)
-                placed = True
-                break
-
-        if not placed:
-            groups.append([seg])
-
-    return groups
-
-
-def merge_collinear_segments(segments, axis_tol, bridge_gap):
-    if not segments:
-        return []
-
-    groups = group_segments_by_axis(segments, axis_tol)
-    merged = []
-
-    for group in groups:
-        if not group:
-            continue
-
-        orientation = group[0]["orientation"]
-        thickness = group[0]["thickness"]
-        avg_c = sum(s["c"] for s in group) / len(group)
-
-        intervals = sorted(
-            [(s["a"], s["b"], s) for s in group],
-            key=lambda x: x[0],
-        )
-
-        cur_a, cur_b, cur_seg = intervals[0]
-        cur_members = [cur_seg]
-
-        def flush_current():
-            best_error = min(float(s.get("thickness_error", 0.0)) for s in cur_members)
-
-            best_actual = sorted(
-                cur_members,
-                key=lambda s: float(s.get("thickness_error", 0.0)),
-            )[0].get("actual_thickness", thickness)
-
-            total_overlap = sum(
-                float(s.get("overlap_length", segment_length(s)))
-                for s in cur_members
-            )
-
-            source_count = sum(int(s.get("source_count", 1)) for s in cur_members)
-
-            return make_centerline_segment(
-                orientation,
-                avg_c,
-                cur_a,
-                cur_b,
-                thickness,
-                actual_thickness=best_actual,
-                thickness_error=best_error,
-                overlap_length=total_overlap,
-                source_count=source_count,
-            )
-
-        for a, b, seg in intervals[1:]:
-            if a <= cur_b + bridge_gap:
-                cur_b = max(cur_b, b)
-                cur_members.append(seg)
-            else:
-                merged.append(flush_current())
-                cur_a, cur_b = a, b
-                cur_members = [seg]
-
-        merged.append(flush_current())
-
-    return merged
-
-
-def split_hv_segments(segments):
-    h = [s for s in segments if s["orientation"] == "H"]
-    v = [s for s in segments if s["orientation"] == "V"]
-    return h, v
-
-
-def extend_to_nearby_intersections(segments, axis_tol, extend_tol, iterations=3):
-    if extend_tol <= 0:
-        return [copy_segment(s) for s in segments]
-
-    working = [copy_segment(s) for s in segments]
-
-    for _ in range(iterations):
-        h_segments, v_segments = split_hv_segments(working)
-
-        for h in h_segments:
-            hy = h["c"]
-
-            for v in v_segments:
-                vx = v["c"]
-
-                vx_near_h = (h["a"] - extend_tol) <= vx <= (h["b"] + extend_tol)
-                hy_near_v = (v["a"] - extend_tol) <= hy <= (v["b"] + extend_tol)
-
-                if not (vx_near_h and hy_near_v):
-                    continue
-
-                if vx < h["a"]:
-                    h["a"] = vx
-                if vx > h["b"]:
-                    h["b"] = vx
-                if hy < v["a"]:
-                    v["a"] = hy
-                if hy > v["b"]:
-                    v["b"] = hy
-
-        working = merge_collinear_segments(
-            working,
-            axis_tol=axis_tol,
-            bridge_gap=axis_tol,
-        )
-
-    return working
-
-
-# =========================================================
-# OVERLAP CLEANUP
-# =========================================================
-
-def segment_priority(seg):
-    thickness_error = float(seg.get("thickness_error", 0.0))
-    face_overlap = float(seg.get("overlap_length", segment_length(seg)))
-    length = segment_length(seg)
-    thickness = int(seg.get("thickness", 0))
-    prefer_225 = 1 if thickness == 225 else 0
-
-    return (
-        -thickness_error,
-        face_overlap,
-        length,
-        prefer_225,
-        float(seg.get("quality_score", 0.0)),
-    )
-
-
-def resolve_overlapping_centerlines(
-    segments,
-    axis_tol,
-    min_overlap_length=100.0,
-    min_overlap_ratio=0.60,
-):
-    if not segments:
-        return [], []
-
-    sorted_segments = sorted(
-        [copy_segment(s) for s in segments],
-        key=segment_priority,
-        reverse=True,
-    )
-
-    kept = []
-    removed = []
-
-    for candidate in sorted_segments:
-        cand_len = segment_length(candidate)
-
-        if cand_len <= 0:
-            removed.append({
-                **candidate,
-                "removed_reason": "zero_length",
-                "overlap_with_thickness": "",
-                "overlap_amount": 0.0,
-                "overlap_ratio": 0.0,
-            })
-            continue
-
-        duplicate_found = False
-        duplicate_info = None
-
-        for existing in kept:
-            if candidate["orientation"] != existing["orientation"]:
-                continue
-            if abs(candidate["c"] - existing["c"]) > axis_tol:
-                continue
-
-            overlap = interval_overlap_length(
-                candidate["a"],
-                candidate["b"],
-                existing["a"],
-                existing["b"],
-            )
-
-            if overlap < min_overlap_length:
-                continue
-
-            overlap_ratio = overlap / max(cand_len, 1e-9)
-
-            if overlap_ratio >= min_overlap_ratio:
-                duplicate_found = True
-                duplicate_info = {
-                    "removed_reason": "overlapped_by_better_centerline",
-                    "overlap_with_thickness": existing.get("thickness", ""),
-                    "overlap_amount": round(overlap, 3),
-                    "overlap_ratio": round(overlap_ratio, 3),
-                }
-                break
-
-        if duplicate_found:
-            removed.append({**candidate, **duplicate_info})
-        else:
-            kept.append(candidate)
-
-    kept = sorted(
-        kept,
-        key=lambda s: (
-            s["orientation"],
-            s["thickness"],
-            s["c"],
-            s["a"],
-            s["b"],
-        ),
-    )
-
-    return kept, removed
-
-
-# =========================================================
-# MULTIPLE PLAN REGION SEPARATION
-# =========================================================
-
-class DSU:
-    def __init__(self, n):
-        self.parent = list(range(n))
-
-    def find(self, x):
-        while self.parent[x] != x:
-            self.parent[x] = self.parent[self.parent[x]]
-            x = self.parent[x]
-        return x
-
-    def union(self, a, b):
-        ra = self.find(a)
-        rb = self.find(b)
-        if ra != rb:
-            self.parent[rb] = ra
-
-
-def segments_connected_for_region(s1, s2, axis_tol, region_gap):
-    if s1["orientation"] == s2["orientation"]:
-        if abs(s1["c"] - s2["c"]) > axis_tol:
-            return False
-
-        gap = interval_gap(s1["a"], s1["b"], s2["a"], s2["b"])
-        return gap <= region_gap
-
-    # perpendicular
-    if s1["orientation"] == "H":
-        h = s1
-        v = s2
-    else:
-        h = s2
-        v = s1
-
-    x = v["c"]
-    y = h["c"]
-
-    x_near_h = (h["a"] - region_gap) <= x <= (h["b"] + region_gap)
-    y_near_v = (v["a"] - region_gap) <= y <= (v["b"] + region_gap)
-
-    return x_near_h and y_near_v
-
-
-def split_segments_into_regions(segments, axis_tol, region_gap):
-    if not segments:
-        return [], []
-
-    n = len(segments)
-    dsu = DSU(n)
-
-    for i in range(n):
-        for j in range(i + 1, n):
-            if segments_connected_for_region(
-                segments[i],
-                segments[j],
-                axis_tol=axis_tol,
-                region_gap=region_gap,
-            ):
-                dsu.union(i, j)
-
-    groups = {}
-
-    for i, s in enumerate(segments):
-        root = dsu.find(i)
-        groups.setdefault(root, []).append(copy_segment(s))
-
-    regions = []
-
-    for idx, group in enumerate(groups.values(), start=1):
-        xs = []
-        ys = []
-
-        for s in group:
-            if s["orientation"] == "H":
-                xs.extend([s["a"], s["b"]])
-                ys.append(s["c"])
-            else:
-                xs.append(s["c"])
-                ys.extend([s["a"], s["b"]])
-
-        if not xs or not ys:
-            continue
-
-        for s in group:
-            s["region_id"] = idx
-
-        regions.append({
-            "region_id": idx,
-            "segments": group,
+def resolve_axis_group(group, orientation):
+    coord = round(sum(m["coord"] for m in group) / len(group), 3)
+
+    counts = {}
+
+    for m in group:
+        label = clean_text(m.get("label", ""))
+
+        if label:
+            counts[label] = counts.get(label, 0) + 1
+
+    sorted_counts = sorted(counts.items(), key=lambda x: (-x[1], x[0]))
+    label = sorted_counts[0][0] if sorted_counts else ""
+
+    xs = [m["circle_center"][0] for m in group]
+    ys = [m["circle_center"][1] for m in group]
+
+    label_count = len(counts)
+    majority_count = sorted_counts[0][1] if sorted_counts else 0
+    majority_ratio = majority_count / len(group) if group else 0.0
+
+    return {
+        "orientation": orientation,
+        "coord": coord,
+        "label": label,
+        "markers": group,
+        "marker_count": len(group),
+        "writable_marker_count": len([m for m in group if m.get("writable")]),
+        "min_confidence": min([m.get("confidence", 0) for m in group]) if group else 0,
+        "avg_confidence": round(
+            sum([m.get("confidence", 0) for m in group]) / len(group),
+            1,
+        ) if group else 0,
+        "label_count": label_count,
+        "label_counts": counts,
+        "mixed_labels": sorted(counts.keys()),
+        "majority_label_count": majority_count,
+        "majority_label_ratio": round(majority_ratio, 3),
+        "bbox": {
             "min_x": min(xs),
             "max_x": max(xs),
             "min_y": min(ys),
             "max_y": max(ys),
             "width": max(xs) - min(xs),
             "height": max(ys) - min(ys),
-            "segment_count": len(group),
+        },
+        "centroid": (sum(xs) / len(xs), sum(ys) / len(ys)),
+    }
+
+
+def group_markers_by_axis(markers, tol=5.0):
+    grouped = {
+        "vertical": [],
+        "horizontal": [],
+    }
+
+    for orientation in ["vertical", "horizontal"]:
+        subset = sorted(
+            [m for m in markers if m["orientation"] == orientation],
+            key=lambda x: x["coord"],
+        )
+
+        if not subset:
+            continue
+
+        current = [subset[0]]
+
+        for item in subset[1:]:
+            if abs(item["coord"] - current[-1]["coord"]) <= tol:
+                current.append(item)
+            else:
+                grouped[orientation].append(resolve_axis_group(current, orientation))
+                current = [item]
+
+        grouped[orientation].append(resolve_axis_group(current, orientation))
+
+    return grouped
+
+
+def infer_families(axis_groups):
+    vertical = axis_groups.get("vertical", [])
+    horizontal = axis_groups.get("horizontal", [])
+
+    v_num = len([g for g in vertical if is_numeric_label(g["label"])])
+    v_alpha = len([g for g in vertical if is_alpha_label(g["label"])])
+    h_num = len([g for g in horizontal if is_numeric_label(g["label"])])
+    h_alpha = len([g for g in horizontal if is_alpha_label(g["label"])])
+
+    if v_num >= h_num and h_alpha >= v_alpha:
+        numeric_orientation = "vertical"
+        alpha_orientation = "horizontal"
+
+    elif h_num >= v_num and v_alpha >= h_alpha:
+        numeric_orientation = "horizontal"
+        alpha_orientation = "vertical"
+
+    else:
+        if (v_num - v_alpha) >= (h_num - h_alpha):
+            numeric_orientation = "vertical"
+            alpha_orientation = "horizontal"
+        else:
+            numeric_orientation = "horizontal"
+            alpha_orientation = "vertical"
+
+    return {
+        "numeric_orientation": numeric_orientation,
+        "alpha_orientation": alpha_orientation,
+        "vertical_counts": {
+            "numeric": v_num,
+            "alpha": v_alpha,
+        },
+        "horizontal_counts": {
+            "numeric": h_num,
+            "alpha": h_alpha,
+        },
+    }
+
+
+def sort_groups(groups, orientation, order_mode, family):
+    if order_mode == "Ascending":
+        reverse = False
+    elif order_mode == "Descending":
+        reverse = True
+    else:
+        reverse = family == "numeric" and orientation == "horizontal"
+
+    return sorted(groups, key=lambda x: x["coord"], reverse=reverse)
+
+
+def get_family_groups(region_or_axis_groups, numeric_orientation, alpha_orientation, numeric_order, alpha_order):
+    if "axis_groups" in region_or_axis_groups:
+        axis_groups = region_or_axis_groups["axis_groups"]
+    else:
+        axis_groups = region_or_axis_groups
+
+    numeric = sort_groups(
+        axis_groups.get(numeric_orientation, []),
+        numeric_orientation,
+        numeric_order,
+        "numeric",
+    )
+
+    alpha = sort_groups(
+        axis_groups.get(alpha_orientation, []),
+        alpha_orientation,
+        alpha_order,
+        "alpha",
+    )
+
+    return numeric, alpha
+
+
+# =========================================================
+# EXTRA GROUP SELECTION
+# =========================================================
+
+def axis_group_recovery_quality(group):
+    markers = group.get("markers", []) or []
+
+    marker_count = len(markers)
+    avg_conf = float(group.get("avg_confidence", 0) or 0)
+
+    attached_count = len([
+        m for m in markers
+        if m.get("detection_mode") == "attached_gridline"
+    ])
+
+    closest_count = len([
+        m for m in markers
+        if m.get("detection_mode") == "closest_gridline"
+    ])
+
+    virtual_count = len([
+        m for m in markers
+        if m.get("detection_mode") == "same_label_virtual_axis"
+    ])
+
+    writable_count = len([
+        m for m in markers
+        if m.get("writable")
+    ])
+
+    label_count = int(group.get("label_count", 1) or 1)
+
+    return (
+        marker_count * 1000.0
+        + attached_count * 350.0
+        + closest_count * 175.0
+        + writable_count * 75.0
+        + avg_conf * 5.0
+        - virtual_count * 500.0
+        - max(0, label_count - 1) * 50.0
+    )
+
+
+def axis_group_label_summary(group):
+    labels = []
+
+    main = clean_text(group.get("label", ""))
+
+    if main:
+        labels.append(main)
+
+    for lab in group.get("mixed_labels", []):
+        lab = clean_text(lab)
+
+        if lab and lab not in labels:
+            labels.append(lab)
+
+    for lab in (group.get("label_counts", {}) or {}).keys():
+        lab = clean_text(lab)
+
+        if lab and lab not in labels:
+            labels.append(lab)
+
+    return ", ".join(labels)
+
+
+def select_axis_groups_for_sync(source_groups, target_groups, family_name, allow_extra_groups=True):
+    expected = len(source_groups)
+    found = len(target_groups)
+
+    blockers = []
+    warnings = []
+
+    if expected == 0:
+        blockers.append(f"No source {family_name} axes were detected.")
+        return [], blockers, warnings
+
+    if found == expected:
+        return target_groups, blockers, warnings
+
+    if found < expected:
+        blockers.append(
+            f"{family_name.title()} axis-group count mismatch: found {found}, expected {expected}. "
+            f"Missing target axis groups cannot be safely inferred automatically."
+        )
+        return [], blockers, warnings
+
+    if not allow_extra_groups:
+        blockers.append(
+            f"{family_name.title()} axis count mismatch: found {found}, expected {expected}."
+        )
+        return [], blockers, warnings
+
+    scored = []
+
+    for idx, group in enumerate(target_groups):
+        scored.append({
+            "idx": idx,
+            "group": group,
+            "score": axis_group_recovery_quality(group),
         })
 
-    regions = sorted(regions, key=lambda r: (r["min_x"], r["min_y"]))
+    scored.sort(key=lambda x: x["score"], reverse=True)
 
-    # Renumber after sorting.
-    all_region_segments = []
-    for new_id, r in enumerate(regions, start=1):
-        r["region_id"] = new_id
-        for s in r["segments"]:
-            s["region_id"] = new_id
-        all_region_segments.extend(r["segments"])
+    chosen_items = scored[:expected]
+    dropped_items = scored[expected:]
 
-    return regions, all_region_segments
+    chosen_items.sort(key=lambda x: x["idx"])
+    dropped_items.sort(key=lambda x: x["idx"])
+
+    chosen_groups = [x["group"] for x in chosen_items]
+
+    dropped_desc = []
+
+    for item in dropped_items:
+        g = item["group"]
+        dropped_desc.append(
+            f"coord={g.get('coord')}, labels=[{axis_group_label_summary(g)}], "
+            f"markers={g.get('marker_count')}, score={round(item['score'], 1)}"
+        )
+
+    warnings.append(
+        f"{family_name.title()} axis count mismatch: found {found}, expected {expected}. "
+        f"Auto-selected the best {expected} group(s) and ignored {found - expected} extra group(s): "
+        + " | ".join(dropped_desc)
+    )
+
+    return chosen_groups, blockers, warnings
+
+
+# Keep this name for the recovery code. It now trims any number of extra groups instead of hard-blocking at +2.
+def select_axis_groups_for_recovery(
+    source_groups,
+    target_groups,
+    family_name,
+    max_extra_groups=None,
+):
+    return select_axis_groups_for_sync(
+        source_groups,
+        target_groups,
+        family_name,
+        allow_extra_groups=True,
+    )
 
 
 # =========================================================
-# GRAPH-BASED SLAB PANEL DETECTION
+# REGION SEGMENTATION / PERIMETER FILTER
 # =========================================================
 
-def cluster_values(values, tol):
-    if not values:
-        return []
+def marker_is_near_region_perimeter(marker, bbox, band_ratio=0.18, min_band=1500.0):
+    x, y = marker["circle_center"]
 
-    values = sorted(values)
-    clusters = []
-    cur = [values[0]]
+    width = max(float(bbox.get("width", 0.0)), 1.0)
+    height = max(float(bbox.get("height", 0.0)), 1.0)
 
-    for v in values[1:]:
-        avg = sum(cur) / len(cur)
+    band_x = max(width * band_ratio, min_band)
+    band_y = max(height * band_ratio, min_band)
 
-        if abs(v - avg) <= tol:
-            cur.append(v)
-        else:
-            clusters.append(sum(cur) / len(cur))
-            cur = [v]
+    near_left = abs(x - bbox["min_x"]) <= band_x
+    near_right = abs(x - bbox["max_x"]) <= band_x
+    near_bottom = abs(y - bbox["min_y"]) <= band_y
+    near_top = abs(y - bbox["max_y"]) <= band_y
 
-    clusters.append(sum(cur) / len(cur))
+    return near_left or near_right or near_bottom or near_top
+
+
+def filter_region_perimeter_markers(region, axis_tol, band_ratio=0.18, min_band=1500.0):
+    bbox = region.get("bbox") or bbox_from_markers(region["markers"])
+
+    perimeter_markers = [
+        m for m in region["markers"]
+        if marker_is_near_region_perimeter(
+            m,
+            bbox,
+            band_ratio=band_ratio,
+            min_band=min_band,
+        )
+    ]
+
+    filtered = dict(region)
+    filtered["all_markers"] = region["markers"]
+    filtered["markers"] = perimeter_markers
+    filtered["interior_marker_count"] = len(region["markers"]) - len(perimeter_markers)
+    filtered["axis_groups"] = group_markers_by_axis(perimeter_markers, tol=axis_tol)
+
+    return filtered
+
+
+def region_for_endpoint_recovery(
+    region,
+    axis_tol,
+    source_numeric=None,
+    source_alpha=None,
+    numeric_orientation=None,
+    alpha_orientation=None,
+    numeric_order="Auto",
+    alpha_order="Auto",
+):
+    filtered_region = dict(region)
+
+    all_markers = region.get("all_markers", region.get("markers", []))
+
+    all_region = dict(region)
+    all_region["markers"] = all_markers
+    all_region["axis_groups"] = group_markers_by_axis(all_markers, tol=axis_tol)
+    all_region["recovery_uses_all_markers"] = True
+
+    filtered_region["recovery_uses_all_markers"] = False
+
+    if (
+        source_numeric is None
+        or source_alpha is None
+        or numeric_orientation is None
+        or alpha_orientation is None
+    ):
+        return filtered_region
+
+    expected_numeric = len(source_numeric)
+    expected_alpha = len(source_alpha)
+
+    def count_score(candidate_region):
+        numeric_groups, alpha_groups = get_family_groups(
+            candidate_region,
+            numeric_orientation,
+            alpha_orientation,
+            numeric_order,
+            alpha_order,
+        )
+
+        found_numeric = len(numeric_groups)
+        found_alpha = len(alpha_groups)
+
+        score = 0
+
+        for found, expected in [
+            (found_numeric, expected_numeric),
+            (found_alpha, expected_alpha),
+        ]:
+            if expected == 0:
+                score += 1000
+            elif found == expected:
+                score += 0
+            elif found > expected:
+                score += found - expected
+            else:
+                missing = expected - found
+                score += 500 + missing * 50
+
+        return score, found_numeric, found_alpha
+
+    filtered_score, filtered_num, filtered_alpha = count_score(filtered_region)
+    all_score, all_num, all_alpha = count_score(all_region)
+
+    filtered_region["recovery_axis_selection_score"] = filtered_score
+    filtered_region["recovery_numeric_groups_found"] = filtered_num
+    filtered_region["recovery_alpha_groups_found"] = filtered_alpha
+    filtered_region["recovery_axis_selection"] = "filtered_markers"
+
+    all_region["recovery_axis_selection_score"] = all_score
+    all_region["recovery_numeric_groups_found"] = all_num
+    all_region["recovery_alpha_groups_found"] = all_alpha
+    all_region["recovery_axis_selection"] = "all_detected_markers"
+
+    if all_score < filtered_score:
+        return all_region
+
+    return filtered_region
+
+
+def marker_xy(marker):
+    x, y = marker["circle_center"]
+    return float(x), float(y)
+
+
+def kmeans_regions(markers, k, max_iter=80):
+    if not markers or k < 1:
+        return None
+
+    points = [marker_xy(m) for m in markers]
+
+    first = min(
+        range(len(points)),
+        key=lambda i: (points[i][0] + points[i][1], points[i][0]),
+    )
+
+    centers = [points[first]]
+
+    while len(centers) < k:
+        farthest = max(
+            range(len(points)),
+            key=lambda i: min(squared_distance(points[i], c) for c in centers),
+        )
+        centers.append(points[farthest])
+
+    clusters = [[] for _ in range(k)]
+
+    for _ in range(max_iter):
+        new_clusters = [[] for _ in range(k)]
+
+        for marker, point in zip(markers, points):
+            idx = min(range(k), key=lambda i: squared_distance(point, centers[i]))
+            new_clusters[idx].append(marker)
+
+        if any(len(c) == 0 for c in new_clusters):
+            return None
+
+        new_centers = []
+
+        for c in new_clusters:
+            xs = [marker_xy(m)[0] for m in c]
+            ys = [marker_xy(m)[1] for m in c]
+            new_centers.append((sum(xs) / len(xs), sum(ys) / len(ys)))
+
+        movement = sum(squared_distance(a, b) for a, b in zip(centers, new_centers))
+
+        centers = new_centers
+        clusters = new_clusters
+
+        if movement < 1e-6:
+            break
+
     return clusters
 
 
-def nearest_axis(value, axes, tol):
-    if not axes:
-        return value
+def compute_major_gap_threshold(values):
+    vals = sorted(set(round(v, 3) for v in values))
 
-    best = min(axes, key=lambda a: abs(a - value))
+    if len(vals) < 2:
+        return None
 
-    if abs(best - value) <= tol:
-        return best
+    gaps = [vals[i + 1] - vals[i] for i in range(len(vals) - 1)]
+    gaps = [g for g in gaps if g > 0]
 
-    return value
+    if not gaps:
+        return None
 
+    typical = sorted(gaps)[len(gaps) // 2]
+    return max(typical * 3.0, 6000.0)
 
-def intervals_cover_range(intervals, start, end, closure_tol):
-    """
-    True if merged intervals cover start-end allowing small gaps.
-    """
 
-    if end < start:
-        start, end = end, start
+def value_groups(values, threshold):
+    vals = sorted(set(round(v, 3) for v in values))
 
-    if end - start <= 0:
-        return False
-
-    relevant = []
-
-    for a, b in intervals:
-        a, b = min(a, b), max(a, b)
-
-        # Keep intervals that overlap or nearly overlap target range.
-        if b < start - closure_tol:
-            continue
-        if a > end + closure_tol:
-            continue
-
-        relevant.append((max(a, start), min(b, end)))
-
-    if not relevant:
-        return False
-
-    relevant = sorted(relevant, key=lambda x: x[0])
-
-    current_end = start
-
-    for a, b in relevant:
-        if a > current_end + closure_tol:
-            return False
-        current_end = max(current_end, b)
-
-        if current_end >= end - closure_tol:
-            return True
-
-    return current_end >= end - closure_tol
-
-
-def build_axis_interval_maps(segments, axis_tol):
-    h_segments, v_segments = split_hv_segments(segments)
-
-    xs = cluster_values([v["c"] for v in v_segments], axis_tol)
-    ys = cluster_values([h["c"] for h in h_segments], axis_tol)
-
-    h_map = {}
-    v_map = {}
-
-    for h in h_segments:
-        y = nearest_axis(h["c"], ys, axis_tol)
-        h_map.setdefault(y, []).append((h["a"], h["b"]))
-
-    for v in v_segments:
-        x = nearest_axis(v["c"], xs, axis_tol)
-        v_map.setdefault(x, []).append((v["a"], v["b"]))
-
-    return xs, ys, h_map, v_map
-
-
-def horizontal_edge_exists(h_map, y, x1, x2, axis_tol, closure_tol):
-    best_y = None
-    best_d = None
-
-    for yy in h_map.keys():
-        d = abs(yy - y)
-        if d <= axis_tol and (best_d is None or d < best_d):
-            best_y = yy
-            best_d = d
-
-    if best_y is None:
-        return False
-
-    return intervals_cover_range(
-        h_map.get(best_y, []),
-        x1,
-        x2,
-        closure_tol,
-    )
-
-
-def vertical_edge_exists(v_map, x, y1, y2, axis_tol, closure_tol):
-    best_x = None
-    best_d = None
-
-    for xx in v_map.keys():
-        d = abs(xx - x)
-        if d <= axis_tol and (best_d is None or d < best_d):
-            best_x = xx
-            best_d = d
-
-    if best_x is None:
-        return False
-
-    return intervals_cover_range(
-        v_map.get(best_x, []),
-        y1,
-        y2,
-        closure_tol,
-    )
-
-
-def detect_graph_slab_panels(
-    segments,
-    axis_tol,
-    closure_tol,
-    min_panel_width,
-    min_panel_height,
-    max_panel_width,
-    max_panel_height,
-    region_id=None,
-):
-    """
-    Region-based graph slab panel detector.
-
-    It checks adjacent snapped X/Y axes and only creates a panel if
-    all four boundary edges are actually covered by wall centerline intervals.
-    """
-
-    xs, ys, h_map, v_map = build_axis_interval_maps(segments, axis_tol)
-
-    panels = []
-
-    if len(xs) < 2 or len(ys) < 2:
-        return panels
-
-    for i in range(len(xs) - 1):
-        x1 = xs[i]
-        x2 = xs[i + 1]
-        width = abs(x2 - x1)
-
-        if width < min_panel_width:
-            continue
-        if max_panel_width > 0 and width > max_panel_width:
-            continue
-
-        for j in range(len(ys) - 1):
-            y1 = ys[j]
-            y2 = ys[j + 1]
-            height = abs(y2 - y1)
-
-            if height < min_panel_height:
-                continue
-            if max_panel_height > 0 and height > max_panel_height:
-                continue
-
-            bottom = horizontal_edge_exists(h_map, y1, x1, x2, axis_tol, closure_tol)
-            top = horizontal_edge_exists(h_map, y2, x1, x2, axis_tol, closure_tol)
-            left = vertical_edge_exists(v_map, x1, y1, y2, axis_tol, closure_tol)
-            right = vertical_edge_exists(v_map, x2, y1, y2, axis_tol, closure_tol)
-
-            if bottom and top and left and right:
-                panels.append({
-                    "region_id": region_id,
-                    "x1": x1,
-                    "y1": y1,
-                    "x2": x2,
-                    "y2": y2,
-                    "width": width,
-                    "height": height,
-                    "area": width * height,
-                    "method": "graph_cell",
-                })
-
-    return panels
-
-
-# =========================================================
-# COLUMN MODULE
-# =========================================================
-
-def segment_contains_axis_value(seg, value, tol):
-    return (seg["a"] - tol) <= value <= (seg["b"] + tol)
-
-
-def segment_side_lengths_at_point(seg, point_coord):
-    left_or_down = max(0.0, float(point_coord) - float(seg["a"]))
-    right_or_up = max(0.0, float(seg["b"]) - float(point_coord))
-    return left_or_down, right_or_up
-
-
-def classify_column_junction(h_seg, v_seg, x, y, min_leg_length):
-    h_left, h_right = segment_side_lengths_at_point(h_seg, x)
-    v_down, v_up = segment_side_lengths_at_point(v_seg, y)
-
-    directions = {
-        "left": h_left >= min_leg_length,
-        "right": h_right >= min_leg_length,
-        "down": v_down >= min_leg_length,
-        "up": v_up >= min_leg_length,
-    }
-
-    direction_count = sum(1 for v in directions.values() if v)
-
-    if direction_count >= 4:
-        junction_type = "cross"
-    elif direction_count == 3:
-        junction_type = "tee"
-    elif direction_count == 2:
-        junction_type = "corner"
-    else:
-        junction_type = "weak"
-
-    return junction_type, direction_count, directions
-
-
-def column_candidate_score(h_seg, v_seg, junction_type, direction_count):
-    h_t = int(h_seg.get("thickness", 0))
-    v_t = int(v_seg.get("thickness", 0))
-
-    thickness_pair = tuple(sorted([h_t, v_t], reverse=True))
-
-    if h_t == 225 and v_t == 225:
-        thickness_score = 1000
-    elif h_t == 225 or v_t == 225:
-        thickness_score = 700
-    elif h_t == 150 and v_t == 150:
-        thickness_score = 300
-    else:
-        thickness_score = 100
-
-    if junction_type == "cross":
-        junction_score = 400
-    elif junction_type == "tee":
-        junction_score = 300
-    elif junction_type == "corner":
-        junction_score = 200
-    else:
-        junction_score = 50
-
-    length_score = min(segment_length(h_seg), segment_length(v_seg)) * 0.05
-    total_length_score = (segment_length(h_seg) + segment_length(v_seg)) * 0.01
-
-    thickness_error_penalty = (
-        float(h_seg.get("thickness_error", 0.0))
-        + float(v_seg.get("thickness_error", 0.0))
-    ) * 50.0
-
-    score = (
-        thickness_score
-        + junction_score
-        + direction_count * 50
-        + length_score
-        + total_length_score
-        - thickness_error_penalty
-    )
-
-    return score, thickness_pair
-
-
-def dedupe_column_candidates(candidates, point_tol):
-    if not candidates:
+    if not vals:
         return []
 
-    sorted_candidates = sorted(
-        candidates,
-        key=lambda c: c["score"],
-        reverse=True,
-    )
+    groups = [[vals[0]]]
 
-    kept = []
+    for v in vals[1:]:
+        if abs(v - groups[-1][-1]) > threshold:
+            groups.append([v])
+        else:
+            groups[-1].append(v)
 
-    for cand in sorted_candidates:
-        exists = False
-
-        for existing in kept:
-            if point_distance((cand["x"], cand["y"]), (existing["x"], existing["y"])) <= point_tol:
-                exists = True
-                break
-
-        if not exists:
-            kept.append(cand)
-
-    return sorted(kept, key=lambda c: (c.get("region_id", 0), c["x"], c["y"]))
+    return groups
 
 
-def detect_column_candidates(
-    segments,
-    axis_tol,
-    column_candidate_thicknesses,
-    allow_150_150=False,
-    allow_mixed_225_150=True,
-    min_leg_length=450.0,
-    region_id=None,
-):
-    allowed = set(int(x) for x in column_candidate_thicknesses or [])
+def assign_value(value, groups):
+    v = round(value, 3)
 
-    h_segments, v_segments = split_hv_segments(segments)
-    candidates = []
+    for i, g in enumerate(groups):
+        if g[0] <= v <= g[-1]:
+            return i
 
-    for h in h_segments:
-        if allowed and int(h.get("thickness", 0)) not in allowed:
+    return None
+
+
+def build_regions(markers, axis_tol, expected_markers_per_region=None, forced_region_count=0, min_region_markers=4):
+    if not markers:
+        return [], {}
+
+    total = len(markers)
+    k = None
+    method_reason = ""
+
+    if forced_region_count and forced_region_count > 0:
+        k = int(forced_region_count)
+        method_reason = "forced_region_count"
+
+    elif expected_markers_per_region and expected_markers_per_region > 0:
+        raw = total / expected_markers_per_region
+        rounded = int(round(raw))
+
+        if rounded >= 2 and abs(raw - rounded) <= 0.25:
+            k = rounded
+            method_reason = "marker_count_ratio"
+
+    if k and k >= 1:
+        clusters = kmeans_regions(markers, k)
+
+        if clusters:
+            sortable = []
+
+            for c in clusters:
+                bbox = bbox_from_markers(c)
+                cx, cy = bbox["centroid"]
+                sortable.append((-cy, cx, c, bbox))
+
+            sortable.sort()
+
+            regions = []
+
+            for i, (_, _, c, bbox) in enumerate(sortable, start=1):
+                if len(c) < min_region_markers:
+                    continue
+
+                regions.append({
+                    "name": f"Region {i}",
+                    "markers": c,
+                    "axis_groups": group_markers_by_axis(c, tol=axis_tol),
+                    "bbox": bbox,
+                    "marker_count": len(c),
+                    "segmentation_key": method_reason,
+                })
+
+            return regions, {
+                "segmentation_method": "kmeans_spatial_clustering",
+                "method_reason": method_reason,
+                "total_markers": total,
+                "expected_markers_per_region": expected_markers_per_region,
+                "forced_region_count": forced_region_count,
+                "regions_found": len(regions),
+                "region_marker_counts": [r["marker_count"] for r in regions],
+            }
+
+    xs = [m["circle_center"][0] for m in markers]
+    ys = [m["circle_center"][1] for m in markers]
+
+    x_threshold = compute_major_gap_threshold(xs) or 6000.0
+    y_threshold = compute_major_gap_threshold(ys) or 6000.0
+
+    x_groups = value_groups(xs, x_threshold)
+    y_groups = value_groups(ys, y_threshold)
+
+    buckets = {}
+
+    for m in markers:
+        xi = assign_value(m["circle_center"][0], x_groups)
+        yi = assign_value(m["circle_center"][1], y_groups)
+        buckets.setdefault((xi, yi), []).append(m)
+
+    regions = []
+    n = 1
+    skipped = 0
+
+    for key, bucket in sorted(buckets.items(), key=lambda item: (item[0][1], item[0][0])):
+        if len(bucket) < min_region_markers:
+            skipped += 1
             continue
 
-        hy = h["c"]
-
-        for v in v_segments:
-            if allowed and int(v.get("thickness", 0)) not in allowed:
-                continue
-
-            vx = v["c"]
-
-            if not segment_contains_axis_value(h, vx, axis_tol):
-                continue
-            if not segment_contains_axis_value(v, hy, axis_tol):
-                continue
-
-            h_t = int(h.get("thickness", 0))
-            v_t = int(v.get("thickness", 0))
-
-            if h_t == 150 and v_t == 150 and not allow_150_150:
-                continue
-
-            if {h_t, v_t} == {225, 150} and not allow_mixed_225_150:
-                continue
-
-            junction_type, direction_count, directions = classify_column_junction(
-                h,
-                v,
-                vx,
-                hy,
-                min_leg_length=min_leg_length,
-            )
-
-            if junction_type == "weak":
-                continue
-
-            score, thickness_pair = column_candidate_score(
-                h,
-                v,
-                junction_type,
-                direction_count,
-            )
-
-            candidates.append({
-                "region_id": region_id,
-                "x": float(vx),
-                "y": float(hy),
-                "score": float(score),
-                "junction_type": junction_type,
-                "direction_count": int(direction_count),
-                "h_thickness": h_t,
-                "v_thickness": v_t,
-                "thickness_pair": f"{thickness_pair[0]}/{thickness_pair[1]}",
-                "h_length": segment_length(h),
-                "v_length": segment_length(v),
-                "left": directions["left"],
-                "right": directions["right"],
-                "down": directions["down"],
-                "up": directions["up"],
-            })
-
-    return dedupe_column_candidates(candidates, point_tol=axis_tol)
-
-
-def apply_column_proximity_filter(candidates, min_column_spacing):
-    if not candidates:
-        return [], []
-
-    sorted_candidates = sorted(
-        candidates,
-        key=lambda c: c["score"],
-        reverse=True,
-    )
-
-    accepted = []
-    rejected = []
-
-    for cand in sorted_candidates:
-        too_close_to = None
-        too_close_distance = None
-
-        for acc in accepted:
-            d = point_distance(
-                (cand["x"], cand["y"]),
-                (acc["x"], acc["y"]),
-            )
-
-            if d < min_column_spacing:
-                too_close_to = acc
-                too_close_distance = d
-                break
-
-        if too_close_to is None:
-            accepted.append({
-                **cand,
-                "accepted": True,
-                "reject_reason": "",
-                "nearest_accepted_x": "",
-                "nearest_accepted_y": "",
-                "nearest_accepted_distance": "",
-            })
-        else:
-            rejected.append({
-                **cand,
-                "accepted": False,
-                "reject_reason": "too_close_to_stronger_column_candidate",
-                "nearest_accepted_x": round(too_close_to["x"], 3),
-                "nearest_accepted_y": round(too_close_to["y"], 3),
-                "nearest_accepted_distance": round(too_close_distance, 3),
-            })
-
-    accepted = sorted(accepted, key=lambda c: (c.get("region_id", 0), c["x"], c["y"]))
-    rejected = sorted(rejected, key=lambda c: (c.get("region_id", 0), c["x"], c["y"]))
-
-    return accepted, rejected
-
-
-# =========================================================
-# JUNCTION NODES
-# =========================================================
-
-def collect_junction_nodes(segments, axis_tol):
-    h_segments, v_segments = split_hv_segments(segments)
-    nodes = []
-
-    for h in h_segments:
-        hy = h["c"]
-
-        for v in v_segments:
-            vx = v["c"]
-
-            on_h = h["a"] - axis_tol <= vx <= h["b"] + axis_tol
-            on_v = v["a"] - axis_tol <= hy <= v["b"] + axis_tol
-
-            if on_h and on_v:
-                nodes.append((vx, hy))
-
-    deduped = []
-
-    for x, y in nodes:
-        exists = False
-
-        for dx, dy in deduped:
-            if math.dist((x, y), (dx, dy)) <= axis_tol:
-                exists = True
-                break
-
-        if not exists:
-            deduped.append((x, y))
-
-    return deduped
-
-
-# =========================================================
-# DXF OUTPUT
-# =========================================================
-
-def draw_segment(msp, seg, layer):
-    if seg["orientation"] == "H":
-        y = seg["c"]
-        msp.add_line(
-            (seg["a"], y),
-            (seg["b"], y),
-            dxfattribs={"layer": layer},
-        )
-
-    elif seg["orientation"] == "V":
-        x = seg["c"]
-        msp.add_line(
-            (x, seg["a"]),
-            (x, seg["b"]),
-            dxfattribs={"layer": layer},
-        )
-    elif seg["orientation"] == "C":
-        msp.add_arc(
-            center=(seg["cx"], seg["cy"]),
-            radius=seg["radius"],
-            start_angle=seg["a"],
-            end_angle=seg["b"],
-            dxfattribs={"layer": layer}
-        )
-
-
-def draw_segments_by_thickness(msp, segments, prefix):
-    for seg in segments:
-        layer = f"{prefix}_{seg['thickness']}"
-        draw_segment(msp, seg, layer)
-
-
-def draw_panels(msp, panels, layer):
-    for p in panels:
-        x1 = p["x1"]
-        y1 = p["y1"]
-        x2 = p["x2"]
-        y2 = p["y2"]
-
-        points = [
-            (x1, y1),
-            (x2, y1),
-            (x2, y2),
-            (x1, y2),
-            (x1, y1),
-        ]
-
-        msp.add_lwpolyline(
-            points,
-            close=True,
-            dxfattribs={"layer": layer},
-        )
-
-
-def draw_nodes(msp, nodes, radius, layer):
-    for x, y in nodes:
-        msp.add_circle(
-            center=(x, y),
-            radius=radius,
-            dxfattribs={"layer": layer},
-        )
-
-
-def draw_column_square(msp, x, y, size, layer):
-    half = float(size) / 2.0
-
-    points = [
-        (x - half, y - half),
-        (x + half, y - half),
-        (x + half, y + half),
-        (x - half, y + half),
-        (x - half, y - half),
-    ]
-
-    msp.add_lwpolyline(
-        points,
-        close=True,
-        dxfattribs={"layer": layer},
-    )
-
-    cross = min(float(size) * 0.35, 100.0)
-
-    msp.add_line(
-        (x - cross, y),
-        (x + cross, y),
-        dxfattribs={"layer": layer},
-    )
-
-    msp.add_line(
-        (x, y - cross),
-        (x, y + cross),
-        dxfattribs={"layer": layer},
-    )
-
-
-def draw_columns(msp, columns, column_size, layer):
-    for c in columns:
-        draw_column_square(
-            msp,
-            float(c["x"]),
-            float(c["y"]),
-            float(column_size),
-            layer,
-        )
-
-
-def build_output_dxf(
-    raw_segments,
-    final_segments,
-    panels,
-    nodes,
-    columns,
-    column_size,
-    draw_raw=True,
-    draw_wall_centerlines=True,
-    draw_panels_enabled=False,
-    draw_nodes_enabled=False,
-    draw_columns_enabled=True,
-    min_output_centerline_length=0,
-    export_thicknesses=None,
-):
-    new_doc = ezdxf.new()
-    new_msp = new_doc.modelspace()
-
-    export_thicknesses = export_thicknesses or []
-
-    raw_for_output = filter_segments_by_thickness(raw_segments, export_thicknesses)
-    final_for_output = filter_segments_by_thickness(final_segments, export_thicknesses)
-
-    clean_final_segments = filter_short_segments(
-        final_for_output,
-        min_output_centerline_length,
-    )
-
-    all_thicknesses = sorted(
-        set(
-            [int(s["thickness"]) for s in raw_for_output]
-            + [int(s["thickness"]) for s in clean_final_segments]
-        )
-    )
-
-    for thickness in all_thicknesses:
-        safe_layer(new_doc, f"ILS_RAW_CENTERLINE_{thickness}", color=8)
-        safe_layer(
-            new_doc,
-            f"ILS_WALL_CENTERLINE_{thickness}",
-            color=layer_color_for_thickness(thickness),
-        )
-
-    safe_layer(new_doc, "ILS_SLAB_PANEL_REVIEW", color=5)
-    safe_layer(new_doc, "ILS_JUNCTION_NODE_REVIEW", color=2)
-    safe_layer(new_doc, f"ILS_COLUMN_{int(column_size)}X{int(column_size)}_REVIEW", color=6)
-
-    if draw_raw:
-        draw_segments_by_thickness(
-            new_msp,
-            raw_for_output,
-            prefix="ILS_RAW_CENTERLINE",
-        )
-
-    if draw_wall_centerlines:
-        draw_segments_by_thickness(
-            new_msp,
-            clean_final_segments,
-            prefix="ILS_WALL_CENTERLINE",
-        )
-
-    if draw_panels_enabled:
-        draw_panels(
-            new_msp,
-            panels,
-            layer="ILS_SLAB_PANEL_REVIEW",
-        )
-
-    if draw_nodes_enabled:
-        draw_nodes(
-            new_msp,
-            nodes,
-            radius=50,
-            layer="ILS_JUNCTION_NODE_REVIEW",
-        )
-
-    if draw_columns_enabled:
-        draw_columns(
-            new_msp,
-            columns,
-            column_size=column_size,
-            layer=f"ILS_COLUMN_{int(column_size)}X{int(column_size)}_REVIEW",
-        )
-
-    return new_doc
-
-
-# =========================================================
-# DATAFRAMES
-# =========================================================
-
-def segments_to_dataframe(segments):
-    rows = []
-
-    for idx, s in enumerate(segments, start=1):
-        if s["orientation"] == "H":
-            x1 = s["a"]
-            y1 = s["c"]
-            x2 = s["b"]
-            y2 = s["c"]
-        elif s["orientation"] == "V":
-            x1 = s["c"]
-            y1 = s["a"]
-            x2 = s["c"]
-            y2 = s["b"]
-        else: # Safe mapping for Arcs
-            x1 = s.get("cx", 0.0)
-            y1 = s.get("cy", 0.0)
-            x2 = s.get("radius", 0.0)
-            y2 = 0.0
-
-        rows.append({
-            "id": idx,
-            "region_id": s.get("region_id", ""),
-            "orientation": s["orientation"],
-            "thickness": s["thickness"],
-            "actual_thickness": round(float(s.get("actual_thickness", s["thickness"])), 3),
-            "thickness_error": round(float(s.get("thickness_error", 0.0)), 3),
-            "overlap_length": round(float(s.get("overlap_length", segment_length(s))), 3),
-            "source_count": int(s.get("source_count", 1)),
-            "quality_score": round(float(s.get("quality_score", 0.0)), 3),
-            "x1": round(x1, 3),
-            "y1": round(y1, 3),
-            "x2": round(x2, 3),
-            "y2": round(y2, 3),
-            "length": round(segment_length(s), 3),
+        regions.append({
+            "name": f"Region {n}",
+            "markers": bucket,
+            "axis_groups": group_markers_by_axis(bucket, tol=axis_tol),
+            "bbox": bbox_from_markers(bucket),
+            "marker_count": len(bucket),
+            "segmentation_key": key,
         })
 
-    return pd.DataFrame(rows)
+        n += 1
 
-
-def removed_segments_to_dataframe(segments):
-    df = segments_to_dataframe(segments)
-
-    if df.empty:
-        return df
-
-    for col in ["removed_reason", "overlap_with_thickness", "overlap_amount", "overlap_ratio"]:
-        df[col] = [s.get(col, "") for s in segments]
-
-    return df
-
-
-def panels_to_dataframe(panels):
-    rows = []
-
-    for idx, p in enumerate(panels, start=1):
-        rows.append({
-            "panel_id": idx,
-            "region_id": p.get("region_id", ""),
-            "method": p.get("method", ""),
-            "x1": round(p["x1"], 3),
-            "y1": round(p["y1"], 3),
-            "x2": round(p["x2"], 3),
-            "y2": round(p["y2"], 3),
-            "width": round(p["width"], 3),
-            "height": round(p["height"], 3),
-            "area": round(p["area"], 3),
-        })
-
-    return pd.DataFrame(rows)
-
-
-def columns_to_dataframe(columns):
-    rows = []
-
-    for idx, c in enumerate(columns, start=1):
-        rows.append({
-            "column_id": idx,
-            "region_id": c.get("region_id", ""),
-            "x": round(float(c["x"]), 3),
-            "y": round(float(c["y"]), 3),
-            "score": round(float(c["score"]), 3),
-            "junction_type": c.get("junction_type", ""),
-            "direction_count": c.get("direction_count", ""),
-            "h_thickness": c.get("h_thickness", ""),
-            "v_thickness": c.get("v_thickness", ""),
-            "thickness_pair": c.get("thickness_pair", ""),
-            "h_length": round(float(c.get("h_length", 0.0)), 3),
-            "v_length": round(float(c.get("v_length", 0.0)), 3),
-            "left": c.get("left", ""),
-            "right": c.get("right", ""),
-            "down": c.get("down", ""),
-            "up": c.get("up", ""),
-            "accepted": c.get("accepted", ""),
-            "reject_reason": c.get("reject_reason", ""),
-            "nearest_accepted_x": c.get("nearest_accepted_x", ""),
-            "nearest_accepted_y": c.get("nearest_accepted_y", ""),
-            "nearest_accepted_distance": c.get("nearest_accepted_distance", ""),
-        })
-
-    return pd.DataFrame(rows)
-
-
-def regions_to_dataframe(regions):
-    rows = []
-
-    for r in regions:
-        rows.append({
-            "region_id": r["region_id"],
-            "segment_count": r["segment_count"],
-            "min_x": round(r["min_x"], 3),
-            "max_x": round(r["max_x"], 3),
-            "min_y": round(r["min_y"], 3),
-            "max_y": round(r["max_y"], 3),
-            "width": round(r["width"], 3),
-            "height": round(r["height"], 3),
-        })
-
-    return pd.DataFrame(rows)
-
-
-def centerline_accuracy_summary(raw_segments):
-    if not raw_segments:
-        return {
-            "raw_count": 0,
-            "avg_thickness_error": 0.0,
-            "max_thickness_error": 0.0,
-            "perfect_or_near_perfect": 0,
-        }
-
-    errors = [abs(float(s.get("thickness_error", 0.0))) for s in raw_segments]
-
-    near_perfect = len([e for e in errors if e <= 1.0])
-
-    return {
-        "raw_count": len(raw_segments),
-        "avg_thickness_error": sum(errors) / len(errors),
-        "max_thickness_error": max(errors),
-        "perfect_or_near_perfect": near_perfect,
+    return regions, {
+        "segmentation_method": "empty_space_fallback",
+        "total_markers": total,
+        "x_gap_threshold": x_threshold,
+        "y_gap_threshold": y_threshold,
+        "raw_bucket_count": len(buckets),
+        "regions_found": len(regions),
+        "small_buckets_skipped": skipped,
+        "region_marker_counts": [r["marker_count"] for r in regions],
     }
 
 
 # =========================================================
-# STREAMLIT UI
+# CLEAN SYNC VALIDATION / PREVIEW / APPLY
 # =========================================================
 
-st.info(
-    "This MVP works best when architectural walls are drawn as LINE, LWPOLYLINE, or POLYLINE wall faces. "
-    "It currently focuses on orthogonal walls, and now supports concentric ARCS."
-)
+def validate_axis_group_purity(groups, family_name):
+    blockers = []
 
-st.warning(
-    "Columns and slab panels are review geometry. Final structural design must be reviewed by an engineer."
-)
+    for idx, g in enumerate(groups, start=1):
+        label_count = g.get("label_count", 1)
+        mixed_labels = g.get("mixed_labels", [])
+        label_counts = g.get("label_counts", {})
+        marker_count = g.get("marker_count", 0)
 
-st.markdown("### 1. Upload Architectural DXF")
+        if label_count > 1:
+            blockers.append(
+                f"{family_name} axis position {idx} at coord {g.get('coord')} has mixed labels "
+                f"{mixed_labels}. Counts={label_counts}. Marker count={marker_count}."
+            )
 
-uploaded_dxf = st.file_uploader(
-    "Upload architectural plan DXF",
-    type=["dxf"],
-    key="arch_centerline_upload",
-)
-
-if uploaded_dxf is None:
-    st.stop()
-
-try:
-    doc = read_uploaded_dxf(uploaded_dxf)
-    layers = get_layer_names(doc)
-    st.success("DXF loaded successfully.")
-except Exception as e:
-    st.error(f"Could not read DXF: {e}")
-    st.stop()
+    return blockers
 
 
-st.markdown("### 2. Detection Settings")
-
-with st.expander("Wall source layers", expanded=True):
-    use_all_layers = st.checkbox(
-        "Use all layers",
-        value=True,
-        help="If checked, all LINE/LWPOLYLINE/POLYLINE/ARC entities are scanned.",
+def get_region_sync_plan(
+    region,
+    source_numeric,
+    source_alpha,
+    numeric_orientation,
+    alpha_orientation,
+    numeric_order,
+    alpha_order,
+    allow_block_text_write,
+    expected_reference_marker_count=None,
+    max_region_marker_ratio=1.5,
+    write_mode=None,
+    allow_extra_axis_groups=True,
+):
+    raw_numeric_groups, raw_alpha_groups = get_family_groups(
+        region,
+        numeric_orientation,
+        alpha_orientation,
+        numeric_order,
+        alpha_order,
     )
 
-    if use_all_layers:
-        selected_layers = []
-    else:
-        selected_layers = st.multiselect(
-            "Select wall face layers",
-            options=layers,
-            default=layers,
+    blockers = []
+    warnings = []
+
+    expected_numeric = len(source_numeric)
+    expected_alpha = len(source_alpha)
+    expected_total = expected_numeric + expected_alpha
+
+    if expected_total == 0:
+        blockers.append("No source axes were detected from the reference drawing")
+
+    numeric_groups, num_blockers, num_warnings = select_axis_groups_for_sync(
+        source_numeric,
+        raw_numeric_groups,
+        "numeric",
+        allow_extra_groups=allow_extra_axis_groups,
+    )
+
+    alpha_groups, alpha_blockers, alpha_warnings = select_axis_groups_for_sync(
+        source_alpha,
+        raw_alpha_groups,
+        "alphabetic",
+        allow_extra_groups=allow_extra_axis_groups,
+    )
+
+    blockers.extend(num_blockers)
+    blockers.extend(alpha_blockers)
+    warnings.extend(num_warnings)
+    warnings.extend(alpha_warnings)
+
+    if expected_reference_marker_count and expected_reference_marker_count > 0:
+        max_allowed = int(math.ceil(expected_reference_marker_count * max_region_marker_ratio))
+
+        if len(region["markers"]) > max_allowed:
+            warnings.append(
+                f"Region has many sync markers: found {len(region['markers'])}, "
+                f"recommended maximum {max_allowed}. Extra axis groups will be ignored if detected."
+            )
+
+    blockers.extend(validate_axis_group_purity(numeric_groups, "Numeric"))
+    blockers.extend(validate_axis_group_purity(alpha_groups, "Alphabetic"))
+
+    selected_markers = []
+    for group in numeric_groups + alpha_groups:
+        selected_markers.extend(group.get("markers", []))
+
+    non_writable_markers = [
+        m for m in selected_markers
+        if not is_marker_writable(m, allow_block_text_write, write_mode=write_mode)
+    ]
+
+    if non_writable_markers:
+        blockers.append(
+            f"{len(non_writable_markers)} selected marker text entities are not writable in the selected write mode"
         )
 
+    ready = len(blockers) == 0
 
-with st.expander("Geometry tolerances", expanded=True):
-    c1, c2, c3 = st.columns(3)
-
-    wall_thickness_text = c1.text_input(
-        "Wall thicknesses to detect",
-        value="225,150",
-    )
-
-    thickness_tol = c2.number_input(
-        "Wall thickness tolerance",
-        min_value=0.0,
-        value=10.0,
-        step=1.0,
-    )
-
-    ortho_tol = c3.number_input(
-        "Orthogonal tolerance",
-        min_value=0.0,
-        value=1.0,
-        step=0.5,
-    )
-
-    c4, c5, c6 = st.columns(3)
-
-    min_line_length = c4.number_input(
-        "Minimum wall face line length",
-        min_value=0.0,
-        value=100.0,
-        step=50.0,
-    )
-
-    min_overlap = c5.number_input(
-        "Minimum wall face overlap",
-        min_value=0.0,
-        value=100.0,
-        step=50.0,
-    )
-
-    axis_tol = c6.number_input(
-        "Axis merge tolerance",
-        min_value=0.0,
-        value=20.0,
-        step=5.0,
-    )
-
-    c7, c8, c9 = st.columns(3)
-
-    bridge_gap = c7.number_input(
-        "Door/window bridge gap",
-        min_value=0.0,
-        value=1200.0,
-        step=100.0,
-    )
-
-    intersection_extend_tol = c8.number_input(
-        "Intersection extension tolerance",
-        min_value=0.0,
-        value=300.0,
-        step=50.0,
-    )
-
-    extension_mode = c9.selectbox(
-        "Intersection extension mode",
-        ["Off", "Conservative", "Normal", "Aggressive"],
-        index=1,
-    )
+    return ready, blockers, numeric_groups, alpha_groups, warnings
 
 
-with st.expander("Output mode and cleanup", expanded=True):
-    o1, o2, o3 = st.columns(3)
+def build_segmentation_diagnostics_rows(
+    regions,
+    source_numeric,
+    source_alpha,
+    numeric_orientation,
+    alpha_orientation,
+    numeric_order,
+    alpha_order,
+    axis_tol,
+):
+    rows = []
 
-    output_mode = o1.selectbox(
-        "Output mode",
-        ["Review mode", "Clean structural mode"],
-        index=1,
-    )
+    expected_numeric = len(source_numeric)
+    expected_alpha = len(source_alpha)
 
-    min_output_centerline_length = o2.number_input(
-        "Minimum output centerline length",
-        min_value=0.0,
-        value=750.0,
-        step=50.0,
-    )
+    for r in regions:
+        all_markers = r.get("all_markers", r.get("markers", []))
+        sync_markers = r.get("markers", [])
 
-    overlap_cleanup_enabled = o3.checkbox(
-        "Remove overlapping duplicate centerlines",
-        value=True,
-    )
+        raw_axis_groups = group_markers_by_axis(all_markers, tol=axis_tol)
 
-    o4, o5, o6 = st.columns(3)
+        sync_axis_groups = r.get(
+            "axis_groups",
+            group_markers_by_axis(sync_markers, tol=axis_tol),
+        )
 
-    overlap_cleanup_ratio = o4.number_input(
-        "Overlap cleanup ratio",
-        min_value=0.10,
-        max_value=1.00,
-        value=0.60,
-        step=0.05,
-    )
+        raw_numeric, raw_alpha = get_family_groups(
+            raw_axis_groups,
+            numeric_orientation,
+            alpha_orientation,
+            numeric_order,
+            alpha_order,
+        )
 
-    overlap_cleanup_min_length = o5.number_input(
-        "Minimum duplicate overlap length",
-        min_value=0.0,
-        value=100.0,
-        step=50.0,
-    )
+        sync_numeric, sync_alpha = get_family_groups(
+            {"axis_groups": sync_axis_groups},
+            numeric_orientation,
+            alpha_orientation,
+            numeric_order,
+            alpha_order,
+        )
 
-    export_junction_nodes = o6.checkbox(
-        "Export junction nodes",
-        value=False,
-    )
+        selected_numeric, _, numeric_warnings = select_axis_groups_for_sync(
+            source_numeric,
+            sync_numeric,
+            "numeric",
+            allow_extra_groups=True,
+        )
+        selected_alpha, _, alpha_warnings = select_axis_groups_for_sync(
+            source_alpha,
+            sync_alpha,
+            "alphabetic",
+            allow_extra_groups=True,
+        )
 
+        raw_numeric_labels = [g["label"] for g in raw_numeric]
+        sync_numeric_labels = [g["label"] for g in sync_numeric]
+        selected_numeric_labels = [g["label"] for g in selected_numeric]
 
-wall_thicknesses = parse_wall_thicknesses(wall_thickness_text)
+        raw_alpha_labels = [g["label"] for g in raw_alpha]
+        sync_alpha_labels = [g["label"] for g in sync_alpha]
+        selected_alpha_labels = [g["label"] for g in selected_alpha]
 
-if not wall_thicknesses:
-    st.error("Enter at least one wall thickness, for example: 225,150")
-    st.stop()
+        rows.append({
+            "region": r.get("name", ""),
+            "all_detected_markers": len(all_markers),
+            "clean_sync_markers_after_filter": len(sync_markers),
+            "interior_markers_removed": r.get("interior_marker_count", 0),
+            "raw_numeric_axes_before_filter": len(raw_numeric),
+            "sync_numeric_axes_after_filter": len(sync_numeric),
+            "selected_numeric_axes_for_sync": len(selected_numeric),
+            "expected_numeric_axes": expected_numeric,
+            "raw_numeric_labels_before_filter": ", ".join(raw_numeric_labels),
+            "sync_numeric_labels_after_filter": ", ".join(sync_numeric_labels),
+            "selected_numeric_labels_for_sync": ", ".join(selected_numeric_labels),
+            "raw_alpha_axes_before_filter": len(raw_alpha),
+            "sync_alpha_axes_after_filter": len(sync_alpha),
+            "selected_alpha_axes_for_sync": len(selected_alpha),
+            "expected_alpha_axes": expected_alpha,
+            "raw_alpha_labels_before_filter": ", ".join(raw_alpha_labels),
+            "sync_alpha_labels_after_filter": ", ".join(sync_alpha_labels),
+            "selected_alpha_labels_for_sync": ", ".join(selected_alpha_labels),
+            "auto_trim_warnings": " ".join(numeric_warnings + alpha_warnings),
+            "clean_sync_uses": "perimeter_filtered_markers",
+            "endpoint_recovery_uses": "all_detected_markers",
+        })
 
-
-with st.expander("Wall thickness export", expanded=True):
-    export_wall_thicknesses = st.multiselect(
-        "Export wall thicknesses",
-        options=wall_thicknesses,
-        default=wall_thicknesses,
-    )
-
-if not export_wall_thicknesses:
-    st.warning("Select at least one wall thickness to export.")
-    st.stop()
-
-
-with st.expander("Multiple plan / region settings", expanded=True):
-    r1, r2 = st.columns(2)
-
-    auto_separate_regions = r1.checkbox(
-        "Auto separate disconnected plans",
-        value=True,
-        help="Recommended when a DXF contains more than one plan/drawing.",
-    )
-
-    region_gap = r2.number_input(
-        "Plan separation / region connection gap",
-        min_value=0.0,
-        value=3000.0,
-        step=250.0,
-        help="Geometry farther apart than this is treated as separate regions.",
-    )
-
-
-with st.expander("Column suggestion settings", expanded=True):
-    col1, col2, col3 = st.columns(3)
-
-    generate_columns = col1.checkbox(
-        "Generate column suggestions",
-        value=True,
-    )
-
-    column_size = col2.number_input(
-        "Column size",
-        min_value=100.0,
-        value=225.0,
-        step=25.0,
-    )
-
-    min_column_spacing = col3.number_input(
-        "Minimum column spacing",
-        min_value=0.0,
-        value=1800.0,
-        step=100.0,
-    )
-
-    col4, col5, col6 = st.columns(3)
-
-    default_column_thicknesses = [225] if 225 in wall_thicknesses else wall_thicknesses
-
-    column_candidate_thicknesses = col4.multiselect(
-        "Use wall thicknesses for column candidates",
-        options=wall_thicknesses,
-        default=default_column_thicknesses,
-    )
-
-    allow_mixed_225_150 = col5.checkbox(
-        "Allow 225/150 mixed junctions",
-        value=True,
-    )
-
-    allow_150_150_columns = col6.checkbox(
-        "Allow 150/150 junctions",
-        value=False,
-    )
-
-    col7, col8 = st.columns(2)
-
-    min_column_leg_length = col7.number_input(
-        "Minimum connected wall leg length",
-        min_value=0.0,
-        value=450.0,
-        step=50.0,
-    )
-
-    export_columns = col8.checkbox(
-        "Export columns",
-        value=True,
-    )
+    return rows
 
 
-with st.expander("Graph slab panel settings", expanded=True):
-    p1, p2, p3 = st.columns(3)
+def build_region_report(
+    regions,
+    source_numeric,
+    source_alpha,
+    numeric_orientation,
+    alpha_orientation,
+    numeric_order,
+    alpha_order,
+    allow_block_text_write,
+    expected_reference_marker_count=None,
+    max_region_marker_ratio=1.5,
+    write_mode=None,
+):
+    rows = []
 
-    run_graph_slab_detection = p1.checkbox(
-        "Run graph-based slab panel detection",
-        value=True,
-        help="Uses final wall centerline graph per region.",
-    )
+    expected_numeric = len(source_numeric)
+    expected_alpha = len(source_alpha)
+    expected_total = expected_numeric + expected_alpha
 
-    export_slab_panels = p2.checkbox(
-        "Export slab panels",
-        value=True,
-        help="Exports graph slab panels to ILS_SLAB_PANEL_REVIEW.",
-    )
+    for r in regions:
+        ready, blockers, num, alp, warnings = get_region_sync_plan(
+            r,
+            source_numeric,
+            source_alpha,
+            numeric_orientation,
+            alpha_orientation,
+            numeric_order,
+            alpha_order,
+            allow_block_text_write,
+            expected_reference_marker_count=expected_reference_marker_count,
+            max_region_marker_ratio=max_region_marker_ratio,
+            write_mode=write_mode,
+        )
 
-    panel_closure_tol = p3.number_input(
-        "Panel closure tolerance",
-        min_value=0.0,
-        value=150.0,
-        step=25.0,
-        help="Allows small gaps during slab panel recognition only.",
-    )
+        selected_markers = []
+        for group in num + alp:
+            selected_markers.extend(group.get("markers", []))
 
-    p4, p5, p6, p7 = st.columns(4)
+        writable = len([
+            m for m in selected_markers
+            if is_marker_writable(m, allow_block_text_write, write_mode=write_mode)
+        ])
+        non_writable = len(selected_markers) - writable
 
-    min_panel_width = p4.number_input(
-        "Minimum panel width",
-        min_value=0.0,
-        value=1200.0,
-        step=100.0,
-    )
+        risk_counts = {}
 
-    min_panel_height = p5.number_input(
-        "Minimum panel height",
-        min_value=0.0,
-        value=1200.0,
-        step=100.0,
-    )
+        for m in selected_markers:
+            prof = marker_write_profile(
+                m,
+                write_mode=write_mode,
+                allow_block_text_write=allow_block_text_write,
+            )
+            risk = prof.get("write_risk", "unknown")
+            risk_counts[risk] = risk_counts.get(risk, 0) + 1
 
-    max_panel_width = p6.number_input(
-        "Maximum panel width",
-        min_value=0.0,
-        value=9000.0,
-        step=500.0,
-        help="0 means no maximum.",
-    )
+        min_conf = min([m.get("confidence", 0) for m in selected_markers]) if selected_markers else 0
+        avg_conf = round(
+            sum([m.get("confidence", 0) for m in selected_markers]) / len(selected_markers),
+            1,
+        ) if selected_markers else 0
 
-    max_panel_height = p7.number_input(
-        "Maximum panel height",
-        min_value=0.0,
-        value=9000.0,
-        step=500.0,
-        help="0 means no maximum.",
-    )
+        complete = len(num) == expected_numeric and len(alp) == expected_alpha and expected_total > 0
+
+        if ready:
+            status = "Ready"
+        elif len(num) != expected_numeric or len(alp) != expected_alpha or expected_total == 0:
+            status = "Incomplete"
+        elif non_writable > 0:
+            status = "Blocked"
+        else:
+            status = "Review"
+
+        rows.append({
+            "region": r["name"],
+            "status": status,
+            "ready_to_sync": ready,
+            "complete": complete,
+            "trusted_markers": len(r["markers"]),
+            "selected_markers_for_sync": len(selected_markers),
+            "all_detected_markers": len(r.get("all_markers", r["markers"])),
+            "interior_markers_ignored": r.get("interior_marker_count", 0),
+            "writable_markers": writable,
+            "non_writable_markers": non_writable,
+            "low_risk_writes": risk_counts.get("low", 0),
+            "medium_risk_writes": risk_counts.get("medium", 0),
+            "high_risk_writes": risk_counts.get("high", 0),
+            "blocked_writes": risk_counts.get("blocked", 0),
+            "numeric_axes_found": len(num),
+            "numeric_axes_expected": expected_numeric,
+            "alpha_axes_found": len(alp),
+            "alpha_axes_expected": expected_alpha,
+            "numeric_labels_found": ", ".join([g["label"] for g in num]),
+            "alpha_labels_found": ", ".join([g["label"] for g in alp]),
+            "min_confidence": min_conf,
+            "avg_confidence": avg_conf,
+            "sync_warnings": "; ".join(warnings),
+            "sync_blockers": "; ".join(blockers),
+        })
+
+    return rows
 
 
-analyze = st.button("🔎 Analyze Architectural Walls", type="primary")
+def make_clean_approval_id(region_name, family_name, position, group):
+    return f"{region_name}|clean_sync|{family_name}|{position}|{group.get('orientation')}|{group.get('coord')}"
 
-if not analyze:
-    st.stop()
+
+def build_clean_plan_for_region(region, source_numeric, source_alpha, numeric_groups, alpha_groups):
+    rows = []
+
+    for family_name, source_groups, target_groups in [
+        ("numeric", source_numeric, numeric_groups),
+        ("alphabetic", source_alpha, alpha_groups),
+    ]:
+        for i, (s, t) in enumerate(zip(source_groups, target_groups), start=1):
+            new_label = clean_text(s["label"])
+
+            rows.append({
+                "approval_id": make_clean_approval_id(region["name"], family_name, i, t),
+                "apply": True,
+                "region": region["name"],
+                "sync_mode": "clean_sync",
+                "family": family_name,
+                "axis_position": i,
+                "source_label": new_label,
+                "target_old_label": t["label"],
+                "proposed_new_label": new_label,
+                "new_label": new_label,
+                "target_axis_coord": t["coord"],
+                "target_markers": t["marker_count"],
+                "target_writable_markers": t["writable_marker_count"],
+                "target_avg_confidence": t["avg_confidence"],
+                "target_mixed_labels": ", ".join(t.get("mixed_labels", [])),
+                "write_risks": ", ".join(sorted(set(m.get("write_risk", "") for m in t.get("markers", [])))),
+                "group": t,
+            })
+
+    return rows
+
+
+def clean_preview_rows(plan_rows):
+    rows = []
+
+    for r in plan_rows:
+        row = dict(r)
+        row.pop("group", None)
+        rows.append(row)
+
+    return rows
+
+
+def editor_result_to_rows(editor_result):
+    if editor_result is None:
+        return []
+
+    if isinstance(editor_result, list):
+        return editor_result
+
+    try:
+        return editor_result.to_dict("records")
+    except Exception:
+        pass
+
+    try:
+        return list(editor_result)
+    except Exception:
+        return []
+
+
+def checkbox_truthy(value):
+    if value is True:
+        return True
+
+    if value is False or value is None:
+        return False
+
+    return str(value).strip().lower() in ("true", "1", "yes", "y", "checked")
+
+
+def clean_plan_from_editor(plan_rows, editor_result):
+    editor_rows = editor_result_to_rows(editor_result)
+    editor_by_id = {}
+
+    for row in editor_rows:
+        approval_id = row.get("approval_id", "")
+
+        if approval_id:
+            editor_by_id[approval_id] = row
+
+    approved = []
+    unapproved = []
+    invalid = []
+
+    for original in plan_rows:
+        approval_id = original.get("approval_id", "")
+        edited = editor_by_id.get(approval_id, {})
+
+        apply_row = checkbox_truthy(edited.get("apply", False))
+        row_copy = dict(original)
+
+        edited_new_label = clean_text(edited.get("new_label", original.get("new_label", "")))
+
+        if not apply_row:
+            unapproved.append(row_copy)
+            continue
+
+        if not edited_new_label:
+            bad = dict(row_copy)
+            bad["invalid_reason"] = "Edited new_label is blank"
+            invalid.append(bad)
+            continue
+
+        if not probable_grid_label(edited_new_label):
+            bad = dict(row_copy)
+            bad["invalid_reason"] = f"Edited new_label '{edited_new_label}' is not a probable grid label"
+            invalid.append(bad)
+            continue
+
+        row_copy["user_edited_new_label"] = edited_new_label
+        row_copy["original_proposed_new_label"] = row_copy.get("new_label", "")
+        row_copy["new_label"] = edited_new_label
+
+        approved.append(row_copy)
+
+    return approved, unapproved, invalid
+
+
+def clean_plan_apply_counts(plan_rows):
+    approved_count = len(plan_rows)
+    will_change_count = 0
+    already_match_count = 0
+    risky_count = 0
+    unwritable_count = 0
+
+    for r in plan_rows:
+        new = clean_text(r.get("new_label", ""))
+        group = r.get("group", {})
+
+        for marker in group.get("markers", []):
+            old = get_text_value(marker["text_entity"])
+
+            if old != new:
+                will_change_count += 1
+            else:
+                already_match_count += 1
+
+            if marker.get("write_risk") == "high":
+                risky_count += 1
+
+            if not marker.get("writable"):
+                unwritable_count += 1
+
+    return {
+        "approved_axis_rows": approved_count,
+        "will_change_text_entities": will_change_count,
+        "already_match_text_entities": already_match_count,
+        "high_risk_text_entities": risky_count,
+        "unwritable_text_entities": unwritable_count,
+    }
+
+
+def apply_clean_plan_rows(plan_rows, allow_block_text_write=False, write_mode=None):
+    changed = 0
+    skipped = 0
+    audit = []
+
+    for plan in plan_rows:
+        group = plan.get("group") or {}
+        new_label = clean_text(plan.get("new_label", ""))
+
+        for marker in group.get("markers", []):
+            entity = marker["text_entity"]
+            old = get_text_value(entity)
+
+            profile = marker_write_profile(
+                marker,
+                write_mode=write_mode,
+                allow_block_text_write=allow_block_text_write,
+            )
+            writable = profile["writable"]
+
+            base = {
+                "region": plan.get("region", ""),
+                "sync_mode": "clean_sync",
+                "approved_by_user": True,
+                "family": plan.get("family", ""),
+                "axis_position": plan.get("axis_position", ""),
+                "region_axis_position": plan.get("axis_position", ""),
+                "axis_position_coord": group.get("coord", ""),
+                "old_label": old,
+                "new_label": new_label,
+                "original_proposed_new_label": plan.get("original_proposed_new_label", plan.get("proposed_new_label", "")),
+                "user_edited_new_label": plan.get("user_edited_new_label", new_label),
+                "text_source": marker.get("text_source"),
+                "write_source": profile.get("write_source", ""),
+                "write_risk": profile.get("write_risk", ""),
+                "write_reason": profile.get("write_reason", ""),
+                "detection_mode": marker.get("detection_mode"),
+                "confidence": marker.get("confidence"),
+                "entity_handle": marker_entity_handle(marker),
+                "layer": marker_layer(marker),
+            }
+
+            if not writable:
+                skipped += 1
+                row = dict(base)
+                row.update({
+                    "changed": False,
+                    "skipped": True,
+                    "reason": f"Not writable source={marker.get('text_source')}",
+                })
+                audit.append(row)
+                continue
+
+            if old != new_label:
+                ok = set_text_value(entity, new_label)
+
+                if ok:
+                    changed += 1
+
+                row = dict(base)
+                row.update({
+                    "changed": ok,
+                    "skipped": False,
+                    "reason": "updated" if ok else "write_failed",
+                })
+                audit.append(row)
+
+            else:
+                row = dict(base)
+                row.update({
+                    "changed": False,
+                    "skipped": False,
+                    "reason": "already_matches",
+                })
+                audit.append(row)
+
+    return changed, skipped, audit
+
+
+def build_unapproved_clean_audit_rows(plan_rows):
+    audit = []
+
+    for r in plan_rows:
+        audit.append({
+            "region": r.get("region", ""),
+            "sync_mode": "clean_sync",
+            "approved_by_user": False,
+            "family": r.get("family", ""),
+            "axis_position": r.get("axis_position", ""),
+            "region_axis_position": r.get("axis_position", ""),
+            "old_label": r.get("target_old_label", ""),
+            "new_label": r.get("new_label", ""),
+            "changed": False,
+            "skipped": True,
+            "reason": "user_unchecked_in_manual_clean_sync_table",
+            "axis_position_coord": r.get("target_axis_coord", ""),
+        })
+
+    return audit
 
 
 # =========================================================
-# ANALYSIS RUN
+# ENDPOINT RECOVERY LOGIC
 # =========================================================
 
-with st.spinner("Extracting wall face lines and arcs..."):
-    extracted = extract_line_entities(
-        doc=doc,
-        selected_layers=selected_layers,
-        use_all_layers=use_all_layers,
-        ortho_tol=ortho_tol,
-        min_line_length=min_line_length,
+def source_label_set(source_groups):
+    return {
+        clean_text(g.get("label", ""))
+        for g in source_groups
+        if clean_text(g.get("label", ""))
+    }
+
+
+def label_matches_family(label, family_name):
+    label = clean_text(label)
+
+    if family_name == "numeric":
+        return is_numeric_label(label)
+
+    if family_name == "alphabetic":
+        return is_alpha_label(label)
+
+    return False
+
+
+def axis_distance_for_marker(marker, orientation, coord):
+    x, y = marker["circle_center"]
+
+    if orientation == "vertical":
+        return abs(float(x) - float(coord))
+
+    if orientation == "horizontal":
+        return abs(float(y) - float(coord))
+
+    return 999999999.0
+
+
+def median_value(values):
+    values = sorted([float(v) for v in values if v is not None])
+
+    if not values:
+        return None
+
+    n = len(values)
+
+    if n % 2 == 1:
+        return values[n // 2]
+
+    return (values[n // 2 - 1] + values[n // 2]) / 2.0
+
+
+def source_grid_bubble_radius_range(source_numeric, source_alpha, min_ratio=0.55, max_ratio=1.80):
+    radii = []
+
+    for group in source_numeric + source_alpha:
+        for marker in group.get("markers", []):
+            r = marker.get("circle_radius")
+
+            if r and r > 0:
+                radii.append(float(r))
+
+    med = median_value(radii)
+
+    if med is None:
+        return None, None, None
+
+    return med * min_ratio, med * max_ratio, med
+
+
+def marker_radius_ok(marker, min_radius, max_radius):
+    if min_radius is None or max_radius is None:
+        return True
+
+    r = marker.get("circle_radius")
+
+    if r is None:
+        return True
+
+    return min_radius <= float(r) <= max_radius
+
+
+def build_grid_frame_from_target_groups(target_numeric_groups, target_alpha_groups, fallback_bbox):
+    vertical_coords = []
+    horizontal_coords = []
+
+    for g in target_numeric_groups + target_alpha_groups:
+        if g.get("orientation") == "vertical":
+            vertical_coords.append(float(g["coord"]))
+
+        elif g.get("orientation") == "horizontal":
+            horizontal_coords.append(float(g["coord"]))
+
+    if len(vertical_coords) >= 2 and len(horizontal_coords) >= 2:
+        return {
+            "min_x": min(vertical_coords),
+            "max_x": max(vertical_coords),
+            "min_y": min(horizontal_coords),
+            "max_y": max(horizontal_coords),
+            "width": max(vertical_coords) - min(vertical_coords),
+            "height": max(horizontal_coords) - min(horizontal_coords),
+            "source": "target_axis_groups",
+        }
+
+    frame = dict(fallback_bbox)
+    frame["source"] = "region_bbox_fallback"
+    return frame
+
+
+def endpoint_points_for_axis_group_using_frame(axis_group, frame):
+    coord = float(axis_group["coord"])
+
+    if axis_group["orientation"] == "vertical":
+        return [
+            (coord, frame["min_y"]),
+            (coord, frame["max_y"]),
+        ]
+
+    return [
+        (frame["min_x"], coord),
+        (frame["max_x"], coord),
+    ]
+
+
+def source_numeric_range(source_numeric, extra=5):
+    vals = []
+
+    for g in source_numeric:
+        v = numeric_label_value(g.get("label", ""))
+
+        if v is not None:
+            vals.append(v)
+
+    if not vals:
+        return 1, 999
+
+    return max(1, min(vals) - extra), max(vals) + extra
+
+
+def is_zero_padded_detail_number(label):
+    label = clean_text(label)
+    return bool(re.fullmatch(r"0\d{1,3}", label))
+
+
+def plausible_recovery_label(label, family, source_numeric, source_alpha, numeric_extra=5):
+    label = clean_text(label)
+
+    if is_zero_padded_detail_number(label):
+        return False
+
+    if family == "numeric":
+        v = numeric_label_value(label)
+
+        if v is None:
+            return False
+
+        lo, hi = source_numeric_range(source_numeric, extra=numeric_extra)
+
+        return lo <= v <= hi
+
+    if family == "alphabetic":
+        if not is_alpha_label(label):
+            return False
+
+        return bool(re.fullmatch(r"[A-Z]{1,2}'?", label))
+
+    return False
+
+
+def strict_slab_recovery_label_ok(
+    label,
+    family_name,
+    source_numeric,
+    source_alpha,
+    numeric_extra=5,
+    strict_source_labels=True,
+    allowed_old_labels=None,
+):
+    label = clean_text(label)
+
+    if is_zero_padded_detail_number(label):
+        return False
+
+    allowed_old_labels = {
+        clean_text(x)
+        for x in (allowed_old_labels or [])
+        if clean_text(x)
+    }
+
+    if strict_source_labels:
+        if allowed_old_labels:
+            return label in allowed_old_labels
+
+        if not label_matches_family(label, family_name):
+            return False
+
+        if family_name == "numeric":
+            return label in source_label_set(source_numeric)
+
+        if family_name == "alphabetic":
+            return label in source_label_set(source_alpha)
+
+        return False
+
+    if not label_matches_family(label, family_name):
+        return False
+
+    return plausible_recovery_label(
+        label,
+        family_name,
+        source_numeric,
+        source_alpha,
+        numeric_extra=numeric_extra,
     )
 
-horizontal_faces = extracted["horizontal"]
-vertical_faces = extracted["vertical"]
-arc_faces = extracted.get("arcs", [])
 
-st.markdown("### 3. Extraction Summary")
+def build_recovery_axis_diagnostics(
+    region,
+    source_numeric,
+    source_alpha,
+    numeric_orientation,
+    alpha_orientation,
+    numeric_order,
+    alpha_order,
+):
+    rows = []
+
+    raw_numeric, raw_alpha = get_family_groups(
+        region,
+        numeric_orientation,
+        alpha_orientation,
+        numeric_order,
+        alpha_order,
+    )
+
+    families = [
+        ("numeric", source_numeric, raw_numeric),
+        ("alphabetic", source_alpha, raw_alpha),
+    ]
+
+    for family_name, source_groups, target_groups in families:
+        expected = len(source_groups)
+        found = len(target_groups)
+
+        if found == expected:
+            status = "exact_count"
+        elif found > expected:
+            status = "extra_target_groups_auto_trimmed"
+        else:
+            status = "missing_target_groups"
+
+        selected_groups, blockers, warnings = select_axis_groups_for_recovery(
+            source_groups,
+            target_groups,
+            family_name,
+        )
+
+        selected_ids = {id(g) for g in selected_groups}
+
+        if target_groups:
+            for idx, g in enumerate(target_groups, start=1):
+                mode_counts = {}
+
+                for m in g.get("markers", []):
+                    mode = m.get("detection_mode", "unknown")
+                    mode_counts[mode] = mode_counts.get(mode, 0) + 1
+
+                rows.append({
+                    "region": region.get("name", ""),
+                    "family": family_name,
+                    "status": status,
+                    "source_expected_count": expected,
+                    "target_found_count": found,
+                    "group_index": idx,
+                    "selected_for_recovery": id(g) in selected_ids,
+                    "coord": g.get("coord", ""),
+                    "label": g.get("label", ""),
+                    "mixed_labels": ", ".join(g.get("mixed_labels", [])),
+                    "marker_count": g.get("marker_count", ""),
+                    "writable_marker_count": g.get("writable_marker_count", ""),
+                    "avg_confidence": g.get("avg_confidence", ""),
+                    "min_confidence": g.get("min_confidence", ""),
+                    "detection_modes": mode_counts,
+                    "blockers": "; ".join(blockers),
+                    "warnings": "; ".join(warnings),
+                })
+        else:
+            rows.append({
+                "region": region.get("name", ""),
+                "family": family_name,
+                "status": status,
+                "source_expected_count": expected,
+                "target_found_count": found,
+                "group_index": "",
+                "selected_for_recovery": False,
+                "coord": "",
+                "label": "",
+                "mixed_labels": "",
+                "marker_count": "",
+                "writable_marker_count": "",
+                "avg_confidence": "",
+                "min_confidence": "",
+                "detection_modes": "",
+                "blockers": "; ".join(blockers),
+                "warnings": "; ".join(warnings),
+            })
+
+    return rows
+
+
+def marker_endpoint_distance(marker, endpoints):
+    p = marker["circle_center"]
+
+    distances = [
+        euclidean(p, ep)
+        for ep in endpoints
+    ]
+
+    best = min(distances)
+
+    return best, distances.index(best)
+
+
+def build_endpoint_recovery_plan(
+    region,
+    source_numeric,
+    source_alpha,
+    numeric_orientation,
+    alpha_orientation,
+    numeric_order,
+    alpha_order,
+    all_lines,
+    endpoint_radius,
+    allow_block_text_write,
+    numeric_extra=5,
+    axis_snap_tolerance=250.0,
+    strict_source_labels=True,
+    allow_virtual_axis_recovery=False,
+    write_mode=None,
+):
+    blockers = []
+    warnings = []
+    plan_rows = []
+
+    candidate_markers = region.get("all_markers", region.get("markers", []))
+
+    raw_target_numeric_groups, raw_target_alpha_groups = get_family_groups(
+        region,
+        numeric_orientation,
+        alpha_orientation,
+        numeric_order,
+        alpha_order,
+    )
+
+    target_numeric_groups, num_blockers, num_warnings = select_axis_groups_for_recovery(
+        source_numeric,
+        raw_target_numeric_groups,
+        "numeric",
+    )
+
+    target_alpha_groups, alpha_blockers, alpha_warnings = select_axis_groups_for_recovery(
+        source_alpha,
+        raw_target_alpha_groups,
+        "alphabetic",
+    )
+
+    blockers.extend(num_blockers)
+    blockers.extend(alpha_blockers)
+    warnings.extend(num_warnings)
+    warnings.extend(alpha_warnings)
+
+    if blockers:
+        return False, blockers, warnings, plan_rows
+
+    frame = build_grid_frame_from_target_groups(
+        target_numeric_groups,
+        target_alpha_groups,
+        region["bbox"],
+    )
+
+    min_radius, max_radius, source_median_radius = source_grid_bubble_radius_range(
+        source_numeric,
+        source_alpha,
+    )
+
+    families = [
+        ("numeric", source_numeric, target_numeric_groups),
+        ("alphabetic", source_alpha, target_alpha_groups),
+    ]
+
+    seen_handles = set()
+
+    for family_name, source_groups, target_groups in families:
+        for pos, (source_group, target_group) in enumerate(zip(source_groups, target_groups), start=1):
+            new_label = clean_text(source_group.get("label", ""))
+
+            orientation = target_group["orientation"]
+            coord = float(target_group["coord"])
+
+            allowed_old_labels = set()
+            group_labels = []
+
+            main_old_label = clean_text(target_group.get("label", ""))
+
+            if main_old_label:
+                group_labels.append(main_old_label)
+
+            for lab in target_group.get("mixed_labels", []):
+                lab = clean_text(lab)
+
+                if lab:
+                    group_labels.append(lab)
+
+            for lab in (target_group.get("label_counts", {}) or {}).keys():
+                lab = clean_text(lab)
+
+                if lab:
+                    group_labels.append(lab)
+
+            for lab in group_labels:
+                lab = clean_text(lab)
+
+                if not lab:
+                    continue
+
+                if is_zero_padded_detail_number(lab):
+                    continue
+
+                if not probable_grid_label(lab):
+                    continue
+
+                allowed_old_labels.add(lab)
+
+            endpoints = endpoint_points_for_axis_group_using_frame(target_group, frame)
+
+            endpoint_candidates = {
+                0: [],
+                1: [],
+            }
+
+            for marker in candidate_markers:
+                old_label = clean_text(marker.get("label", ""))
+
+                if not strict_slab_recovery_label_ok(
+                    old_label,
+                    family_name,
+                    source_numeric,
+                    source_alpha,
+                    numeric_extra=numeric_extra,
+                    strict_source_labels=strict_source_labels,
+                    allowed_old_labels=allowed_old_labels,
+                ):
+                    continue
+
+                if marker.get("orientation") != orientation:
+                    continue
+
+                detection_mode = marker.get("detection_mode", "")
+
+                if not allow_virtual_axis_recovery and detection_mode == "same_label_virtual_axis":
+                    continue
+
+                profile = marker_write_profile(
+                    marker,
+                    write_mode=write_mode,
+                    allow_block_text_write=allow_block_text_write,
+                )
+
+                if not profile.get("writable"):
+                    continue
+
+                if not marker_radius_ok(marker, min_radius, max_radius):
+                    continue
+
+                axis_distance = axis_distance_for_marker(marker, orientation, coord)
+
+                if axis_distance > axis_snap_tolerance:
+                    continue
+
+                endpoint_distance, endpoint_index = marker_endpoint_distance(marker, endpoints)
+
+                if endpoint_distance > endpoint_radius:
+                    continue
+
+                confidence = float(marker.get("confidence", 0) or 0)
+
+                if detection_mode == "attached_gridline":
+                    mode_penalty = 0.0
+                elif detection_mode == "closest_gridline":
+                    mode_penalty = 250.0
+                elif detection_mode == "same_label_virtual_axis":
+                    mode_penalty = 1000.0
+                else:
+                    mode_penalty = 500.0
+
+                score = (
+                    endpoint_distance
+                    + axis_distance * 5.0
+                    + mode_penalty
+                    - confidence * 2.0
+                )
+
+                endpoint_candidates[endpoint_index].append({
+                    "score": score,
+                    "endpoint_distance": endpoint_distance,
+                    "axis_distance": axis_distance,
+                    "marker": marker,
+                    "detection_mode": detection_mode,
+                    "confidence": confidence,
+                    "write_profile": profile,
+                })
+
+            selected = []
+
+            for endpoint_index in [0, 1]:
+                cands = endpoint_candidates[endpoint_index]
+
+                if not cands:
+                    warnings.append(
+                        f"No safe endpoint candidate found for {family_name} axis position {pos}, "
+                        f"source label {new_label}, endpoint {'A' if endpoint_index == 0 else 'B'}."
+                    )
+                    continue
+
+                cands.sort(key=lambda x: x["score"])
+                best = cands[0]
+
+                if len(cands) > 1:
+                    second = cands[1]
+
+                    if second["score"] <= best["score"] + 300.0:
+                        warnings.append(
+                            f"Ambiguous candidates for {family_name} axis position {pos}, "
+                            f"source label {new_label}, endpoint {'A' if endpoint_index == 0 else 'B'}. "
+                            f"Best score={round(best['score'], 1)}, second={round(second['score'], 1)}."
+                        )
+
+                selected.append((endpoint_index, best))
+
+            for endpoint_index, best in selected:
+                marker = best["marker"]
+                entity = marker["text_entity"]
+
+                handle = marker_entity_handle(marker)
+                handle_key = handle or f"entity_{id(entity)}"
+
+                if handle_key in seen_handles:
+                    continue
+
+                seen_handles.add(handle_key)
+
+                old_label = get_text_value(entity)
+                endpoint_name = "A" if endpoint_index == 0 else "B"
+                approval_id = f"{region['name']}|{family_name}|{pos}|{endpoint_name}|{handle_key}"
+
+                profile = best.get("write_profile") or marker_write_profile(
+                    marker,
+                    write_mode=write_mode,
+                    allow_block_text_write=allow_block_text_write,
+                )
+
+                plan_rows.append({
+                    "approval_id": approval_id,
+                    "region": region["name"],
+                    "sync_mode": "endpoint_recovery",
+                    "family": family_name,
+                    "axis_position": pos,
+                    "region_axis_position": pos,
+                    "source_label": new_label,
+                    "old_label": old_label,
+                    "new_label": new_label,
+                    "endpoint": endpoint_name,
+                    "distance_to_endpoint": round(best["endpoint_distance"], 3),
+                    "axis_distance": round(best["axis_distance"], 3),
+                    "axis_coord": coord,
+                    "grid_frame_source": frame.get("source", ""),
+                    "source_median_radius": source_median_radius,
+                    "text_handle": handle,
+                    "entity_handle": handle,
+                    "text_source": marker.get("text_source"),
+                    "write_source": profile.get("write_source", ""),
+                    "write_risk": profile.get("write_risk", ""),
+                    "write_reason": profile.get("write_reason", ""),
+                    "text_type": marker.get("text_type", ""),
+                    "layer": marker_layer(marker),
+                    "detection_mode": marker.get("detection_mode"),
+                    "confidence": marker.get("confidence"),
+                    "recovery_score": round(best["score"], 3),
+                    "writable": profile.get("writable", False),
+                    "entity": entity,
+                    "marker": marker,
+                })
+
+    if not plan_rows:
+        blockers.append(
+            "Recovery found no safe endpoint candidates. Try increasing Endpoint Search Radius "
+            "or Axis Snap Tolerance slightly."
+        )
+
+    ready = len(blockers) == 0
+
+    return ready, blockers, warnings, plan_rows
+
+
+def recovery_preview_rows(plan_rows):
+    rows = []
+
+    for r in plan_rows:
+        rows.append({
+            "apply": True,
+            "approval_id": r.get("approval_id", ""),
+            "region": r["region"],
+            "family": r["family"],
+            "axis_position": r["axis_position"],
+            "old_label": r["old_label"],
+            "proposed_new_label": r["new_label"],
+            "new_label": r["new_label"],
+            "endpoint": r["endpoint"],
+            "distance_to_endpoint": r["distance_to_endpoint"],
+            "axis_distance": r.get("axis_distance", ""),
+            "axis_coord": r["axis_coord"],
+            "grid_frame_source": r.get("grid_frame_source", ""),
+            "recovery_score": r.get("recovery_score", ""),
+            "detection_mode": r.get("detection_mode", ""),
+            "text_handle": r["text_handle"],
+            "text_source": r["text_source"],
+            "write_source": r.get("write_source", ""),
+            "write_risk": r.get("write_risk", ""),
+            "write_reason": r.get("write_reason", ""),
+            "layer": r.get("layer", ""),
+            "confidence": r["confidence"],
+            "writable": r["writable"],
+        })
+
+    return rows
+
+
+def recovery_plan_from_editor(plan_rows, editor_result):
+    editor_rows = editor_result_to_rows(editor_result)
+
+    editor_by_id = {}
+
+    for row in editor_rows:
+        approval_id = row.get("approval_id", "")
+
+        if approval_id:
+            editor_by_id[approval_id] = row
+
+    approved = []
+    unapproved = []
+    invalid = []
+
+    for original in plan_rows:
+        approval_id = original.get("approval_id", "")
+        edited = editor_by_id.get(approval_id, {})
+
+        apply_row = checkbox_truthy(edited.get("apply", False))
+
+        row_copy = dict(original)
+
+        edited_new_label = clean_text(edited.get("new_label", original.get("new_label", "")))
+
+        if not apply_row:
+            unapproved.append(row_copy)
+            continue
+
+        if not edited_new_label:
+            bad = dict(row_copy)
+            bad["invalid_reason"] = "Edited new_label is blank"
+            invalid.append(bad)
+            continue
+
+        if not probable_grid_label(edited_new_label):
+            bad = dict(row_copy)
+            bad["invalid_reason"] = f"Edited new_label '{edited_new_label}' is not a probable grid label"
+            invalid.append(bad)
+            continue
+
+        row_copy["user_edited_new_label"] = edited_new_label
+        row_copy["original_proposed_new_label"] = row_copy.get("new_label", "")
+        row_copy["new_label"] = edited_new_label
+
+        approved.append(row_copy)
+
+    return approved, unapproved, invalid
+
+
+def recovery_plan_apply_counts(plan_rows):
+    approved_count = len(plan_rows)
+    will_change_count = 0
+    already_match_count = 0
+    risky_count = 0
+    unwritable_count = 0
+
+    for r in plan_rows:
+        old = clean_text(r.get("old_label", ""))
+        new = clean_text(r.get("new_label", ""))
+
+        if old != new:
+            will_change_count += 1
+        else:
+            already_match_count += 1
+
+        if r.get("write_risk") == "high":
+            risky_count += 1
+
+        if not r.get("writable"):
+            unwritable_count += 1
+
+    return {
+        "approved_rows": approved_count,
+        "will_change": will_change_count,
+        "already_match": already_match_count,
+        "high_risk": risky_count,
+        "unwritable": unwritable_count,
+    }
+
+
+def build_unapproved_recovery_audit_rows(plan_rows):
+    audit = []
+
+    for r in plan_rows:
+        audit.append({
+            "region": r.get("region", ""),
+            "sync_mode": "endpoint_recovery",
+            "approved_by_user": False,
+            "family": r.get("family", ""),
+            "axis_position": r.get("axis_position", ""),
+            "region_axis_position": r.get("region_axis_position", r.get("axis_position", "")),
+            "old_label": r.get("old_label", ""),
+            "new_label": r.get("new_label", ""),
+            "changed": False,
+            "skipped": True,
+            "reason": "user_unchecked_in_manual_approval_table",
+            "endpoint": r.get("endpoint", ""),
+            "distance_to_endpoint": r.get("distance_to_endpoint", ""),
+            "axis_distance": r.get("axis_distance", ""),
+            "axis_coord": r.get("axis_coord", ""),
+            "detection_mode": r.get("detection_mode", ""),
+            "confidence": r.get("confidence", ""),
+            "recovery_score": r.get("recovery_score", ""),
+            "text_source": r.get("text_source", ""),
+            "write_source": r.get("write_source", ""),
+            "write_risk": r.get("write_risk", ""),
+            "write_reason": r.get("write_reason", ""),
+            "entity_handle": r.get("entity_handle", r.get("text_handle", "")),
+            "layer": r.get("layer", ""),
+            "writable": r.get("writable", ""),
+        })
+
+    return audit
+
+
+def apply_endpoint_recovery_plan(plan_rows, approved_by_user=True):
+    changed = 0
+    skipped = 0
+    audit = []
+
+    for r in plan_rows:
+        entity = r["entity"]
+        old = get_text_value(entity)
+        new = clean_text(r["new_label"])
+
+        base = {
+            "region": r.get("region", ""),
+            "sync_mode": "endpoint_recovery",
+            "approved_by_user": approved_by_user,
+            "family": r.get("family", ""),
+            "axis_position": r.get("axis_position", ""),
+            "region_axis_position": r.get("region_axis_position", r.get("axis_position", "")),
+            "old_label": old,
+            "new_label": new,
+            "endpoint": r.get("endpoint", ""),
+            "distance_to_endpoint": r.get("distance_to_endpoint", ""),
+            "axis_distance": r.get("axis_distance", ""),
+            "axis_coord": r.get("axis_coord", ""),
+            "detection_mode": r.get("detection_mode", ""),
+            "confidence": r.get("confidence", ""),
+            "recovery_score": r.get("recovery_score", ""),
+            "text_source": r.get("text_source", ""),
+            "write_source": r.get("write_source", ""),
+            "write_risk": r.get("write_risk", ""),
+            "write_reason": r.get("write_reason", ""),
+            "entity_handle": r.get("entity_handle", r.get("text_handle", "")),
+            "layer": r.get("layer", ""),
+            "writable": r.get("writable", ""),
+        }
+
+        if not r.get("writable"):
+            skipped += 1
+
+            row = dict(base)
+            row.update({
+                "changed": False,
+                "skipped": True,
+                "reason": "recovery_not_writable",
+            })
+            audit.append(row)
+            continue
+
+        if old != new:
+            ok = set_text_value(entity, new)
+
+            if ok:
+                changed += 1
+
+            row = dict(base)
+            row.update({
+                "changed": ok,
+                "skipped": False,
+                "reason": "endpoint_recovery_updated" if ok else "endpoint_recovery_write_failed",
+            })
+            audit.append(row)
+
+        else:
+            row = dict(base)
+            row.update({
+                "changed": False,
+                "skipped": False,
+                "reason": "already_matches",
+            })
+            audit.append(row)
+
+    return changed, skipped, audit
+
+
+# =========================================================
+# SESSION STATE
+# =========================================================
+
+def init_state():
+    defaults = {
+        "docs_loaded": False,
+        "arch_doc": None,
+        "struc_doc": None,
+        "arch_name": "",
+        "struc_name": "",
+        "arch_sig": None,
+        "struc_sig": None,
+        "arch_detection": {},
+        "struc_detection": {},
+        "arch_axis_groups": {},
+        "family": {},
+        "source_numeric": [],
+        "source_alpha": [],
+        "regions": [],
+        "segmentation": {},
+        "region_report": [],
+        "clean_plan": [],
+        "audit": [],
+        "changed": 0,
+        "skipped": 0,
+        "prepared": False,
+    }
+
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+def reset_state():
+    for k in [
+        "docs_loaded",
+        "arch_doc",
+        "struc_doc",
+        "arch_name",
+        "struc_name",
+        "arch_detection",
+        "struc_detection",
+        "arch_axis_groups",
+        "family",
+        "source_numeric",
+        "source_alpha",
+        "regions",
+        "segmentation",
+        "region_report",
+        "clean_plan",
+        "audit",
+        "changed",
+        "skipped",
+        "prepared",
+    ]:
+        if k in st.session_state:
+            del st.session_state[k]
+
+
+# =========================================================
+# MAIN UI
+# =========================================================
+
+init_state()
+
+st.markdown("### 1. Detection Settings")
+c1, c2, c3, c4 = st.columns(4)
+
+with c1:
+    axis_tol = st.slider("Axis Group Tolerance", 0.0, 500.0, 10.0, 0.5, key="axis_tol")
+
+with c2:
+    text_gap = st.slider("Text-in-Bubble Gap", 20.0, 2000.0, 180.0, 10.0, key="text_gap")
+
+with c3:
+    attach_gap = st.slider("Gridline Attach Gap", 20.0, 3000.0, 180.0, 10.0, key="attach_gap")
+
+with c4:
+    min_grid_length = st.number_input(
+        "Min Grid Line Length",
+        min_value=1.0,
+        value=1000.0,
+        step=100.0,
+        key="min_grid_length",
+    )
+
+d1, d2, d3, d4 = st.columns(4)
+
+with d1:
+    numeric_order = st.selectbox(
+        "Numeric Axis Order",
+        ["Auto", "Ascending", "Descending"],
+        index=0,
+        key="numeric_order",
+    )
+
+with d2:
+    alpha_order = st.selectbox(
+        "Alphabetic Axis Order",
+        ["Auto", "Ascending", "Descending"],
+        index=0,
+        key="alpha_order",
+    )
+
+with d3:
+    forced_region_count = st.number_input(
+        "Target Region Count Override",
+        min_value=0,
+        value=0,
+        step=1,
+        help="Use 0 for auto. If the target has 8 plans, enter 8.",
+        key="forced_region_count",
+    )
+
+with d4:
+    min_region_markers = st.number_input(
+        "Min Markers Per Region",
+        min_value=1,
+        value=4,
+        step=1,
+        key="min_region_markers",
+    )
 
 e1, e2, e3 = st.columns(3)
 
-e1.metric("Horizontal wall-face lines", len(horizontal_faces))
-e2.metric("Vertical wall-face lines", len(vertical_faces))
-e3.metric("Ignored / non-orthogonal", extracted["ignored"])
-
-if len(horizontal_faces) + len(vertical_faces) + len(arc_faces) == 0:
-    st.error(
-        "No horizontal/vertical wall face lines found. Check layer selection or entity types."
+with e1:
+    write_mode = st.selectbox(
+        "Write Mode",
+        [
+            WRITE_MODE_SAFE,
+            WRITE_MODE_ATTRIB,
+            WRITE_MODE_DANGEROUS,
+        ],
+        index=1,
+        help=(
+            "Safe mode writes only modelspace TEXT/MTEXT. "
+            "Attribute mode also writes INSERT attributes. "
+            "Dangerous mode allows block definition TEXT/MTEXT edits and may affect repeated symbols."
+        ),
+        key="write_mode_select",
     )
+
+    allow_block_text_write = write_mode == WRITE_MODE_DANGEROUS
+
+with e2:
+    min_confidence_required = st.slider(
+        "Minimum Marker Confidence",
+        0,
+        100,
+        50,
+        5,
+        key="min_confidence_required",
+    )
+
+with e3:
+    max_region_marker_ratio = st.slider(
+        "Max Sync Marker Ratio Warning",
+        1.0,
+        5.0,
+        1.5,
+        0.1,
+        help="Shows a warning when a region has far more markers than the reference. Extra axis groups can still be auto-trimmed.",
+        key="max_region_marker_ratio",
+    )
+
+if write_mode == WRITE_MODE_DANGEROUS:
+    st.warning(
+        "Dangerous write mode is enabled. Block definition TEXT/MTEXT edits can affect every repeated instance of that block."
+    )
+
+with st.expander("Advanced nested block layer handling", expanded=False):
+    allow_nested_layer0_from_selected_insert = st.checkbox(
+        "Allow nested block entities on layer 0 when parent INSERT is on selected grid layer",
+        value=True,
+        help="Recommended ON. Common CAD convention: block geometry/text is drawn on layer 0 and inherits the INSERT layer.",
+        key="allow_nested_layer0_from_selected_insert",
+    )
+
+    strict_nested_block_layer_match = st.checkbox(
+        "Strict nested block layer match only",
+        value=False,
+        help="If ON, nested entities must be directly on the selected grid layer. Layer 0 inheritance is not allowed.",
+        key="strict_nested_block_layer_match",
+    )
+
+f1, f2, f3 = st.columns(3)
+
+with f1:
+    ignore_interior_detail_bubbles = st.checkbox(
+        "Ignore interior/detail bubbles for clean sync",
+        value=True,
+        help="Recommended. Clean sync keeps only perimeter markers so slab/detail bubbles are not touched.",
+        key="ignore_interior_detail_bubbles",
+    )
+
+with f2:
+    perimeter_band_ratio = st.slider(
+        "Perimeter Band Ratio",
+        0.05,
+        0.40,
+        0.18,
+        0.01,
+        help="Higher keeps more markers near the plan edge. Lower is stricter.",
+        key="perimeter_band_ratio",
+    )
+
+with f3:
+    perimeter_min_band = st.number_input(
+        "Minimum Perimeter Band",
+        min_value=100.0,
+        value=1500.0,
+        step=100.0,
+        help="Minimum drawing-unit distance from region edge to treat a bubble as perimeter.",
+        key="perimeter_min_band",
+    )
+
+st.markdown("#### Slab/Grid Endpoint Recovery Settings")
+
+r1, r2, r3 = st.columns(3)
+
+with r1:
+    recovery_endpoint_radius = st.slider(
+        "Recovery Endpoint Search Radius",
+        500.0,
+        10000.0,
+        2500.0,
+        100.0,
+        help="Search distance around actual grid-frame endpoints. Lower values reject slab/detail bubbles.",
+        key="recovery_endpoint_radius",
+    )
+
+with r2:
+    recovery_numeric_extra = st.slider(
+        "Recovery Numeric Label Extra Range",
+        0,
+        20,
+        5,
+        1,
+        help="Used only when strict source labels is OFF.",
+        key="recovery_numeric_extra",
+    )
+
+with r3:
+    recovery_axis_snap_tolerance = st.slider(
+        "Recovery Axis Snap Tolerance",
+        25.0,
+        1000.0,
+        250.0,
+        25.0,
+        help="Candidate bubble must be close to the actual grid axis.",
+        key="recovery_axis_snap_tolerance",
+    )
+
+r4, r5 = st.columns(2)
+
+with r4:
+    recovery_strict_source_labels = st.checkbox(
+        "Recovery: use detected old target labels only",
+        value=True,
+        help="Recommended ON. This uses labels already detected on target axes and rejects unrelated detail numbers.",
+        key="recovery_strict_source_labels",
+    )
+
+with r5:
+    recovery_allow_virtual_axis = st.checkbox(
+        "Recovery: allow virtual-axis markers",
+        value=False,
+        help="Recommended OFF for slab/detail regions.",
+        key="recovery_allow_virtual_axis",
+    )
+
+
+# =========================================================
+# FILE UPLOAD
+# =========================================================
+
+st.markdown("### 2. Upload Files")
+
+u1, u2 = st.columns(2)
+
+with u1:
+    arch_file = st.file_uploader("Reference DXF", type=["dxf"], key="arch_file_upload")
+
+with u2:
+    struc_file = st.file_uploader("Target DXF", type=["dxf"], key="struc_file_upload")
+
+arch_sig = uploaded_file_signature(arch_file)
+struc_sig = uploaded_file_signature(struc_file)
+
+if arch_sig != st.session_state.arch_sig or struc_sig != st.session_state.struc_sig:
+    reset_state()
+    init_state()
+    st.session_state.arch_sig = arch_sig
+    st.session_state.struc_sig = struc_sig
+
+if arch_file and struc_file:
+    if not st.session_state.docs_loaded:
+        arch_tmp = None
+        struc_tmp = None
+
+        try:
+            arch_tmp = save_uploaded_to_temp(arch_file)
+            struc_tmp = save_uploaded_to_temp(struc_file)
+
+            st.session_state.arch_doc = ezdxf.readfile(arch_tmp)
+            st.session_state.struc_doc = ezdxf.readfile(struc_tmp)
+
+            st.session_state.arch_name = arch_file.name
+            st.session_state.struc_name = struc_file.name
+            st.session_state.docs_loaded = True
+
+            st.success("DXF files loaded successfully.")
+
+        except Exception as e:
+            st.error(f"Failed to load DXF files: {e}")
+            st.stop()
+
+        finally:
+            safe_remove_file(arch_tmp)
+            safe_remove_file(struc_tmp)
+else:
+    st.info("Upload both the Reference DXF and Target DXF to continue.")
     st.stop()
 
 
-with st.spinner("Detecting accurate midpoint wall centerlines..."):
-    # Detect orthogonal centerlines
-    raw_segments = detect_centerlines_from_face_pairs(
-        horizontal_faces=horizontal_faces,
-        vertical_faces=vertical_faces,
-        wall_thicknesses=wall_thicknesses,
-        thickness_tol=thickness_tol,
-        min_overlap=min_overlap,
-    )
-    
-    # Detect arc centerlines
-    raw_arc_segments = detect_arc_centerlines(
-        arc_faces=arc_faces,
-        wall_thicknesses=wall_thicknesses,
-        thickness_tol=thickness_tol
-    )
+# =========================================================
+# LAYER SETUP
+# =========================================================
 
-accuracy = centerline_accuracy_summary(raw_segments + raw_arc_segments)
+arch_doc = st.session_state.arch_doc
+struc_doc = st.session_state.struc_doc
 
+arch_layers = get_layer_names(arch_doc)
+struc_layers = get_layer_names(struc_doc)
 
-with st.spinner("Healing orthogonal centerlines..."):
-    # Only pass the H/V segments to the healing pipeline so math doesn't break
-    merged_segments = merge_collinear_segments(
-        raw_segments,
-        axis_tol=axis_tol,
-        bridge_gap=bridge_gap,
-    )
+st.markdown("### 3. Layer Setup")
 
-    if extension_mode == "Off":
-        effective_extend_tol = 0.0
-    elif extension_mode == "Conservative":
-        effective_extend_tol = intersection_extend_tol * 0.5
-    elif extension_mode == "Normal":
-        effective_extend_tol = intersection_extend_tol
-    else:
-        effective_extend_tol = intersection_extend_tol * 1.5
+arch_line_default = pick_default_layer(arch_layers, ["S-GRID", "GRID", "GRIDLINELAYER"])
+arch_text_default = pick_default_layer(arch_layers, ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"])
+arch_circle_default = pick_default_layer(arch_layers, ["S-GRID-IDEN", "GRID-ID", "DEFAULTLAYER"])
 
-    extended_segments = extend_to_nearby_intersections(
-        merged_segments,
-        axis_tol=axis_tol,
-        extend_tol=effective_extend_tol,
-        iterations=3,
+struc_line_default = pick_default_layer(struc_layers, ["GRIDLINELAYER", "S-GRID", "GRID"])
+struc_text_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-STRS-IDEN", "S-GRID-IDEN", "GRID-ID"])
+struc_circle_default = pick_default_layer(struc_layers, ["DEFAULTLAYER", "S-GRID-IDEN", "GRID-ID"])
+
+la, lb, lc = st.columns(3)
+
+with la:
+    arch_line_layer = st.selectbox(
+        "Reference Grid Line Layer",
+        arch_layers,
+        index=arch_layers.index(arch_line_default) if arch_line_default in arch_layers else 0,
+        key="arch_line_layer_select",
     )
 
-    extended_segments = merge_collinear_segments(
-        extended_segments,
-        axis_tol=axis_tol,
-        bridge_gap=axis_tol,
+with lb:
+    arch_text_layer = st.selectbox(
+        "Reference Grid Text Layer",
+        arch_layers,
+        index=arch_layers.index(arch_text_default) if arch_text_default in arch_layers else 0,
+        key="arch_text_layer_select",
     )
 
+with lc:
+    arch_circle_layer = st.selectbox(
+        "Reference Grid Bubble Layer",
+        arch_layers,
+        index=arch_layers.index(arch_circle_default) if arch_circle_default in arch_layers else 0,
+        key="arch_circle_layer_select",
+    )
 
-with st.spinner("Cleaning duplicate centerlines..."):
-    if overlap_cleanup_enabled:
-        final_segments, removed_overlap_segments = resolve_overlapping_centerlines(
-            extended_segments,
-            axis_tol=axis_tol,
-            min_overlap_length=overlap_cleanup_min_length,
-            min_overlap_ratio=overlap_cleanup_ratio,
+sa, sb, sc = st.columns(3)
+
+with sa:
+    struc_line_layer = st.selectbox(
+        "Target Grid Line Layer",
+        struc_layers,
+        index=struc_layers.index(struc_line_default) if struc_line_default in struc_layers else 0,
+        key="struc_line_layer_select",
+    )
+
+with sb:
+    struc_text_layer = st.selectbox(
+        "Target Grid Text Layer",
+        struc_layers,
+        index=struc_layers.index(struc_text_default) if struc_text_default in struc_layers else 0,
+        key="struc_text_layer_select",
+    )
+
+with sc:
+    struc_circle_layer = st.selectbox(
+        "Target Grid Bubble Layer",
+        struc_layers,
+        index=struc_layers.index(struc_circle_default) if struc_circle_default in struc_layers else 0,
+        key="struc_circle_layer_select",
+    )
+
+b1, b2 = st.columns(2)
+
+with b1:
+    analyze = st.button("🔎 Analyze / Prepare Sync", type="primary", key="analyze_button")
+
+with b2:
+    if st.button("🧹 Reset", key="reset_button"):
+        reset_state()
+        st.rerun()
+
+
+# =========================================================
+# ANALYZE
+# =========================================================
+
+if analyze:
+    try:
+        arch_det = build_trusted_markers(
+            arch_doc,
+            arch_line_layer,
+            arch_text_layer,
+            arch_circle_layer,
+            min_grid_length,
+            text_gap,
+            attach_gap,
+            allow_block_text_write=allow_block_text_write,
+            write_mode=write_mode,
+            allow_nested_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+            strict_nested_block_layer_match=strict_nested_block_layer_match,
         )
-    else:
-        final_segments = extended_segments
-        removed_overlap_segments = []
 
-# SAFELY INJECT ARCS BACK INTO THE PIPELINE
-final_segments.extend(raw_arc_segments)
-
-selected_final_segments = filter_segments_by_thickness(
-    final_segments,
-    export_wall_thicknesses,
-)
-
-if output_mode == "Clean structural mode":
-    clean_export_segments = filter_short_segments(
-        selected_final_segments,
-        min_output_centerline_length,
-    )
-else:
-    clean_export_segments = filter_short_segments(
-        selected_final_segments,
-        0.0,
-    )
-
-
-with st.spinner("Separating plan regions..."):
-    if auto_separate_regions:
-        # Filter out arcs for the DSU, it expects H/V only
-        hv_only_for_dsu = [s for s in clean_export_segments if s["orientation"] in ["H", "V"]]
-        arcs_only = [s for s in clean_export_segments if s["orientation"] == "C"]
-        
-        regions, region_segments = split_segments_into_regions(
-            hv_only_for_dsu,
-            axis_tol=axis_tol,
-            region_gap=region_gap,
+        struc_det = build_trusted_markers(
+            struc_doc,
+            struc_line_layer,
+            struc_text_layer,
+            struc_circle_layer,
+            min_grid_length,
+            text_gap,
+            attach_gap,
+            allow_block_text_write=allow_block_text_write,
+            write_mode=write_mode,
+            allow_nested_layer0_from_selected_insert=allow_nested_layer0_from_selected_insert,
+            strict_nested_block_layer_match=strict_nested_block_layer_match,
         )
-        
-        # Add arcs back to Region 1 to ensure they render
-        for arc in arcs_only:
-            arc_copy = copy_segment(arc)
-            arc_copy["region_id"] = 1
-            region_segments.append(arc_copy)
-            if regions:
-                regions[0]["segments"].append(arc_copy)
-                regions[0]["segment_count"] += 1
-                
-    else:
-        region_segments = []
-        for s in clean_export_segments:
-            ss = copy_segment(s)
-            ss["region_id"] = 1
-            region_segments.append(ss)
 
-        regions = [{
-            "region_id": 1,
-            "segments": region_segments,
-            "min_x": min([s["a"] if s["orientation"] == "H" else s["c"] for s in region_segments if s["orientation"] in ["H","V"]]) if region_segments else 0,
-            "max_x": max([s["b"] if s["orientation"] == "H" else s["c"] for s in region_segments if s["orientation"] in ["H","V"]]) if region_segments else 0,
-            "min_y": min([s["c"] if s["orientation"] == "H" else s["a"] for s in region_segments if s["orientation"] in ["H","V"]]) if region_segments else 0,
-            "max_y": max([s["c"] if s["orientation"] == "H" else s["b"] for s in region_segments if s["orientation"] in ["H","V"]]) if region_segments else 0,
-            "width": 0,
-            "height": 0,
-            "segment_count": len(region_segments),
-        }]
+        arch_trusted = [
+            m for m in arch_det["trusted_markers"]
+            if m.get("confidence", 0) >= min_confidence_required
+        ]
 
+        struc_trusted = [
+            m for m in struc_det["trusted_markers"]
+            if m.get("confidence", 0) >= min_confidence_required
+        ]
 
-with st.spinner("Generating region-aware columns..."):
-    raw_column_candidates = []
-    accepted_columns = []
-    rejected_columns = []
+        arch_det["trusted_markers"] = arch_trusted
+        struc_det["trusted_markers"] = struc_trusted
 
-    if generate_columns and column_candidate_thicknesses:
-        for region in regions:
-            candidates = detect_column_candidates(
-                region["segments"],
-                axis_tol=axis_tol,
-                column_candidate_thicknesses=column_candidate_thicknesses,
-                allow_150_150=allow_150_150_columns,
-                allow_mixed_225_150=allow_mixed_225_150,
-                min_leg_length=min_column_leg_length,
-                region_id=region["region_id"],
+        arch_groups = group_markers_by_axis(arch_trusted, tol=axis_tol)
+        family = infer_families(arch_groups)
+
+        source_numeric, source_alpha = get_family_groups(
+            arch_groups,
+            family["numeric_orientation"],
+            family["alpha_orientation"],
+            numeric_order,
+            alpha_order,
+        )
+
+        expected_markers = len(arch_trusted)
+
+        regions, seg = build_regions(
+            struc_trusted,
+            axis_tol=axis_tol,
+            expected_markers_per_region=expected_markers,
+            forced_region_count=forced_region_count,
+            min_region_markers=min_region_markers,
+        )
+
+        if ignore_interior_detail_bubbles:
+            regions = [
+                filter_region_perimeter_markers(
+                    r,
+                    axis_tol=axis_tol,
+                    band_ratio=perimeter_band_ratio,
+                    min_band=perimeter_min_band,
+                )
+                for r in regions
+            ]
+
+            seg["interior_detail_filter"] = "enabled"
+            seg["perimeter_band_ratio"] = perimeter_band_ratio
+            seg["perimeter_min_band"] = perimeter_min_band
+            seg["interior_markers_removed_by_region"] = {
+                r["name"]: r.get("interior_marker_count", 0)
+                for r in regions
+            }
+            seg["sync_marker_counts_after_filter"] = {
+                r["name"]: len(r["markers"])
+                for r in regions
+            }
+
+        else:
+            seg["interior_detail_filter"] = "disabled"
+
+        report = build_region_report(
+            regions,
+            source_numeric,
+            source_alpha,
+            family["numeric_orientation"],
+            family["alpha_orientation"],
+            numeric_order,
+            alpha_order,
+            allow_block_text_write,
+            expected_reference_marker_count=len(arch_trusted),
+            max_region_marker_ratio=max_region_marker_ratio,
+            write_mode=write_mode,
+        )
+
+        clean_plan = []
+
+        for r in regions:
+            ready, blockers, num, alp, warnings = get_region_sync_plan(
+                r,
+                source_numeric,
+                source_alpha,
+                family["numeric_orientation"],
+                family["alpha_orientation"],
+                numeric_order,
+                alpha_order,
+                allow_block_text_write,
+                expected_reference_marker_count=len(arch_trusted),
+                max_region_marker_ratio=max_region_marker_ratio,
+                write_mode=write_mode,
             )
 
-            accepted, rejected = apply_column_proximity_filter(
-                candidates,
-                min_column_spacing=min_column_spacing,
-            )
+            if ready:
+                clean_plan.extend(build_clean_plan_for_region(r, source_numeric, source_alpha, num, alp))
 
-            raw_column_candidates.extend(candidates)
-            accepted_columns.extend(accepted)
-            rejected_columns.extend(rejected)
+        st.session_state.arch_detection = arch_det
+        st.session_state.struc_detection = struc_det
+        st.session_state.arch_axis_groups = arch_groups
+        st.session_state.family = family
+        st.session_state.source_numeric = source_numeric
+        st.session_state.source_alpha = source_alpha
+        st.session_state.regions = regions
+        st.session_state.segmentation = seg
+        st.session_state.region_report = report
+        st.session_state.clean_plan = clean_plan
+        st.session_state.audit = []
+        st.session_state.changed = 0
+        st.session_state.skipped = 0
+        st.session_state.prepared = True
 
+        ready_count = len([r for r in report if r.get("ready_to_sync")])
 
-with st.spinner("Detecting graph slab panels per region..."):
-    panels = []
+        st.success(
+            f"Analysis complete. Regions found: {len(regions)}. Ready clean-sync regions: {ready_count}."
+        )
 
-    if run_graph_slab_detection:
-        for region in regions:
-            region_panels = detect_graph_slab_panels(
-                region["segments"],
-                axis_tol=axis_tol,
-                closure_tol=panel_closure_tol,
-                min_panel_width=min_panel_width,
-                min_panel_height=min_panel_height,
-                max_panel_width=max_panel_width,
-                max_panel_height=max_panel_height,
-                region_id=region["region_id"],
-            )
+        if arch_det["rejected_markers"]:
+            st.warning(f"Reference rejected markers: {len(arch_det['rejected_markers'])}")
 
-            panels.extend(region_panels)
+        if struc_det["rejected_markers"]:
+            st.warning(f"Target rejected markers: {len(struc_det['rejected_markers'])}")
 
-    nodes = collect_junction_nodes(region_segments, axis_tol=axis_tol)
-
-
-# =========================================================
-# SUMMARY
-# =========================================================
-
-st.markdown("### 4. Accuracy / Region / Output Summary")
-
-a1, a2, a3, a4 = st.columns(4)
-
-a1.metric("Raw midpoint centerlines", len(raw_segments) + len(raw_arc_segments))
-a2.metric("Avg thickness error", round(accuracy["avg_thickness_error"], 3))
-a3.metric("Max thickness error", round(accuracy["max_thickness_error"], 3))
-a4.metric("Near-perfect ≤ 1mm", accuracy["perfect_or_near_perfect"])
-
-r1, r2, r3, r4 = st.columns(4)
-
-r1.metric("Detected plan regions", len(regions))
-r2.metric("Final wall centerlines", len(region_segments))
-r3.metric("Accepted columns", len(accepted_columns))
-r4.metric("Graph slab panels", len(panels))
-
-c1, c2, c3, c4 = st.columns(4)
-
-c1.metric("After gap bridging", len(merged_segments))
-c2.metric("After extension", len(extended_segments))
-c3.metric("Removed overlaps", len(removed_overlap_segments))
-c4.metric("Rejected columns", len(rejected_columns))
-
-st.info(
-    f"Output mode: **{output_mode}**. "
-    f"Extension mode: **{extension_mode}** with effective tolerance **{round(effective_extend_tol, 3)}**. "
-    f"Plan region separation: **{'ON' if auto_separate_regions else 'OFF'}**. "
-    f"Slab panels use graph detection per region."
-)
+    except Exception as e:
+        st.error(f"Prepare failed: {e}")
 
 
 # =========================================================
-# PREVIEW TABLES
+# RESULTS / CLEAN SYNC / RECOVERY
 # =========================================================
 
-st.markdown("### 5. Preview Tables")
+if st.session_state.prepared:
+    st.markdown("---")
+    st.markdown("### 4. Detection Summary")
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
-    [
-        "Regions",
-        "Raw Accurate Centerlines",
-        "Final Region Centerlines",
-        "Removed Overlaps",
-        "Accepted Columns",
-        "Rejected Columns",
-        "Graph Slab Panels",
+    arch_det = st.session_state.arch_detection
+    struc_det = st.session_state.struc_detection
+    family = st.session_state.family
+
+    s1, s2 = st.columns(2)
+
+    with s1:
+        st.write("#### Reference Detection")
+        st.write({
+            "texts_on_selected_layer": len(arch_det.get("texts", [])),
+            "circles_on_selected_layer": len(arch_det.get("circles", [])),
+            "axis_lines_on_selected_layer": len(arch_det.get("lines", [])),
+            "trusted_markers_used": len(arch_det.get("trusted_markers", [])),
+            "rejected_markers": len(arch_det.get("rejected_markers", [])),
+            "numeric_orientation": family.get("numeric_orientation"),
+            "alpha_orientation": family.get("alpha_orientation"),
+            "numeric_source_labels": [g["label"] for g in st.session_state.source_numeric],
+            "alpha_source_labels": [g["label"] for g in st.session_state.source_alpha],
+            "family_counts": {
+                "vertical": family.get("vertical_counts"),
+                "horizontal": family.get("horizontal_counts"),
+            },
+        })
+
+    with s2:
+        modes = {}
+
+        for m in struc_det.get("trusted_markers", []):
+            mode = m.get("detection_mode", "unknown")
+            modes[mode] = modes.get(mode, 0) + 1
+
+        st.write("#### Target Detection")
+        st.write({
+            "texts_on_selected_layer": len(struc_det.get("texts", [])),
+            "circles_on_selected_layer": len(struc_det.get("circles", [])),
+            "axis_lines_on_selected_layer": len(struc_det.get("lines", [])),
+            "trusted_markers_used_before_filter": len(struc_det.get("trusted_markers", [])),
+            "rejected_markers": len(struc_det.get("rejected_markers", [])),
+            "regions_found": len(st.session_state.regions),
+            "detection_modes": modes,
+        })
+
+    st.markdown("### 5. Segmentation / Interior Filter")
+
+    st.caption(
+        "Clean sync uses perimeter-filtered markers. If extra axis groups are detected, the app now auto-selects the strongest expected groups and reports what it ignored."
+    )
+
+    seg_diag_rows = build_segmentation_diagnostics_rows(
+        st.session_state.regions,
+        st.session_state.source_numeric,
+        st.session_state.source_alpha,
+        family["numeric_orientation"],
+        family["alpha_orientation"],
+        numeric_order,
+        alpha_order,
+        axis_tol,
+    )
+
+    st.dataframe(seg_diag_rows, use_container_width=True)
+
+    with st.expander("Raw segmentation settings/details", expanded=False):
+        st.write(st.session_state.segmentation)
+
+    st.markdown("### 6. Region Completeness Dashboard")
+    st.dataframe(st.session_state.region_report, use_container_width=True)
+
+    ready_regions = [
+        r["region"]
+        for r in st.session_state.region_report
+        if r.get("ready_to_sync")
     ]
-)
 
-with tab1:
-    regions_df = regions_to_dataframe(regions)
-    if regions_df.empty:
-        st.info("No regions.")
-    else:
-        st.dataframe(regions_df, use_container_width=True)
-        st.download_button(
-            "📄 Download Regions CSV",
-            data=regions_df.to_csv(index=False).encode("utf-8"),
-            file_name="ILS_PLAN_REGIONS.csv",
-            mime="text/csv",
+    all_regions = [
+        r["region"]
+        for r in st.session_state.region_report
+    ]
+
+    selected_regions = st.multiselect(
+        "Select clean regions to sync",
+        options=all_regions,
+        default=ready_regions,
+        help="Ready regions are selected by default. Rows can be edited in the preview before applying.",
+        key="selected_clean_regions",
+    )
+
+    st.markdown("### 7. Clean Sync Editable Preview")
+
+    filtered_clean_plan = [
+        row for row in st.session_state.clean_plan
+        if row["region"] in selected_regions
+    ]
+
+    approved_clean_plan_rows = []
+    unapproved_clean_plan_rows = []
+    invalid_clean_plan_rows = []
+
+    if filtered_clean_plan:
+        clean_preview = clean_preview_rows(filtered_clean_plan)
+
+        edited_clean_preview = st.data_editor(
+            clean_preview,
+            use_container_width=True,
+            hide_index=True,
+            key="clean_sync_approval_editor",
+            column_config={
+                "apply": st.column_config.CheckboxColumn(
+                    "Apply?",
+                    help="Uncheck rows that should not be modified.",
+                    default=True,
+                ),
+                "new_label": st.column_config.TextColumn(
+                    "New Label",
+                    help="Editable. Change this before clean sync is applied.",
+                    required=True,
+                ),
+            },
+            disabled=[
+                "approval_id",
+                "region",
+                "sync_mode",
+                "family",
+                "axis_position",
+                "source_label",
+                "target_old_label",
+                "proposed_new_label",
+                "target_axis_coord",
+                "target_markers",
+                "target_writable_markers",
+                "target_avg_confidence",
+                "target_mixed_labels",
+                "write_risks",
+            ],
         )
 
-with tab2:
-    raw_df = segments_to_dataframe(raw_segments + raw_arc_segments)
-    if raw_df.empty:
-        st.info("No raw centerlines.")
-    else:
-        st.dataframe(raw_df, use_container_width=True)
-        st.download_button(
-            "📄 Download Raw Accurate Centerlines CSV",
-            data=raw_df.to_csv(index=False).encode("utf-8"),
-            file_name="ILS_RAW_ACCURATE_CENTERLINES.csv",
-            mime="text/csv",
+        approved_clean_plan_rows, unapproved_clean_plan_rows, invalid_clean_plan_rows = clean_plan_from_editor(
+            filtered_clean_plan,
+            edited_clean_preview,
         )
 
-with tab3:
-    final_df = segments_to_dataframe(region_segments)
-    if final_df.empty:
-        st.info("No final region centerlines.")
+        if invalid_clean_plan_rows:
+            st.error(
+                "Some approved clean-sync rows have invalid edited New Label values. "
+                "Fix them or uncheck Apply? before syncing."
+            )
+
+            invalid_preview = []
+
+            for bad in invalid_clean_plan_rows:
+                invalid_preview.append({
+                    "region": bad.get("region", ""),
+                    "family": bad.get("family", ""),
+                    "axis_position": bad.get("axis_position", ""),
+                    "target_old_label": bad.get("target_old_label", ""),
+                    "proposed_new_label": bad.get("original_proposed_new_label", bad.get("new_label", "")),
+                    "edited_new_label": bad.get("user_edited_new_label", bad.get("new_label", "")),
+                    "reason": bad.get("invalid_reason", ""),
+                })
+
+            st.dataframe(invalid_preview, use_container_width=True)
+
+        clean_counts = clean_plan_apply_counts(approved_clean_plan_rows)
+
+        st.write("#### Clean Sync Apply Summary")
+        st.write({
+            "approved_axis_rows": clean_counts["approved_axis_rows"],
+            "will_change_text_entities": clean_counts["will_change_text_entities"],
+            "already_match_text_entities": clean_counts["already_match_text_entities"],
+            "high_risk_text_entities": clean_counts["high_risk_text_entities"],
+            "unwritable_text_entities": clean_counts["unwritable_text_entities"],
+            "unchecked_axis_rows": len(unapproved_clean_plan_rows),
+            "write_mode": write_mode,
+        })
     else:
-        st.dataframe(final_df, use_container_width=True)
-        st.download_button(
-            "📄 Download Final Region Centerlines CSV",
-            data=final_df.to_csv(index=False).encode("utf-8"),
-            file_name="ILS_FINAL_REGION_CENTERLINES.csv",
-            mime="text/csv",
+        st.info("No clean-sync preview rows. This usually means no clean ready regions are selected.")
+
+    st.markdown("### 8. Apply Clean Sync")
+
+    region_by_name = {
+        r["name"]: r
+        for r in st.session_state.regions
+    }
+
+    blocked_selected = []
+
+    for region_name in selected_regions:
+        r = region_by_name.get(region_name)
+
+        if not r:
+            blocked_selected.append({
+                "region": region_name,
+                "reason": "Region not found in session state",
+            })
+            continue
+
+        ready, blockers, num, alp, warnings = get_region_sync_plan(
+            r,
+            st.session_state.source_numeric,
+            st.session_state.source_alpha,
+            family["numeric_orientation"],
+            family["alpha_orientation"],
+            numeric_order,
+            alpha_order,
+            allow_block_text_write,
+            expected_reference_marker_count=len(st.session_state.arch_detection.get("trusted_markers", [])),
+            max_region_marker_ratio=max_region_marker_ratio,
+            write_mode=write_mode,
         )
 
-with tab4:
-    removed_df = removed_segments_to_dataframe(removed_overlap_segments)
-    if removed_df.empty:
-        st.info("No overlapping centerlines removed.")
+        if not ready:
+            blocked_selected.append({
+                "region": region_name,
+                "reason": "; ".join(blockers),
+            })
+
+    clean_confirm = False
+
+    if blocked_selected:
+        st.error(
+            "One or more selected clean-sync regions are not safe. "
+            "Unselect them or use Recovery Mode where appropriate."
+        )
+        st.dataframe(blocked_selected, use_container_width=True)
+
     else:
-        st.dataframe(removed_df, use_container_width=True)
-        st.download_button(
-            "📄 Download Removed Overlaps CSV",
-            data=removed_df.to_csv(index=False).encode("utf-8"),
-            file_name="ILS_REMOVED_OVERLAPS.csv",
-            mime="text/csv",
+        clean_confirm = st.checkbox(
+            "I reviewed the editable clean sync preview and understand these changes will modify the DXF.",
+            value=False,
+            key="confirm_clean_sync_apply",
         )
 
-with tab5:
-    accepted_columns_df = columns_to_dataframe(accepted_columns)
-    if accepted_columns_df.empty:
-        st.info("No accepted columns.")
-    else:
-        st.warning("Column suggestions are review geometry only.")
-        st.dataframe(accepted_columns_df, use_container_width=True)
-        st.download_button(
-            "📄 Download Accepted Columns CSV",
-            data=accepted_columns_df.to_csv(index=False).encode("utf-8"),
-            file_name="ILS_ACCEPTED_COLUMNS_REVIEW.csv",
-            mime="text/csv",
+        if st.button(
+            "✍️ Apply Approved Clean Sync to Selected Regions",
+            key="apply_clean_sync_button",
+            disabled=not clean_confirm or not selected_regions or not approved_clean_plan_rows or invalid_clean_plan_rows,
+        ):
+            total_changed, total_skipped, audit = apply_clean_plan_rows(
+                approved_clean_plan_rows,
+                allow_block_text_write=allow_block_text_write,
+                write_mode=write_mode,
+            )
+
+            skipped_audit = build_unapproved_clean_audit_rows(unapproved_clean_plan_rows)
+
+            st.session_state.changed += total_changed
+            st.session_state.skipped += total_skipped + len(unapproved_clean_plan_rows)
+            st.session_state.audit.extend(audit + skipped_audit)
+
+            if total_changed:
+                st.success(f"Clean sync complete. Changed {total_changed} text entities.")
+            else:
+                st.info("Clean sync completed. No labels needed changing.")
+
+            if total_skipped:
+                st.warning(f"Clean sync skipped {total_skipped} text entities.")
+
+            if unapproved_clean_plan_rows:
+                st.info(f"{len(unapproved_clean_plan_rows)} clean-sync axis rows were intentionally unchecked and skipped.")
+
+    st.markdown("### 8B. Slab/Grid Endpoint Recovery Mode")
+
+    st.caption(
+        "Use this for slab/detail regions. It ignores most interior slab/detail bubbles and searches only near outer grid-frame endpoints."
+    )
+
+    recovery_candidates = [
+        row["region"]
+        for row in st.session_state.region_report
+        if not row.get("ready_to_sync")
+    ]
+
+    if recovery_candidates:
+        selected_recovery_regions = st.multiselect(
+            "Select blocked/review slab-detail regions for endpoint recovery",
+            options=recovery_candidates,
+            default=[],
+            help="Select slab/detail regions that still need grid-label sync.",
+            key="selected_recovery_regions",
         )
 
-with tab6:
-    rejected_columns_df = columns_to_dataframe(rejected_columns)
-    if rejected_columns_df.empty:
-        st.info("No rejected columns.")
+        recovery_preview = []
+        recovery_blocked = []
+        recovery_warnings = []
+        recovery_plan_rows_all = []
+        recovery_axis_diagnostics = []
+
+        for region_name in selected_recovery_regions:
+            r = region_by_name.get(region_name)
+
+            if not r:
+                recovery_blocked.append({
+                    "region": region_name,
+                    "reason": "Region not found",
+                })
+                continue
+
+            r_recovery = region_for_endpoint_recovery(
+                r,
+                axis_tol,
+                source_numeric=st.session_state.source_numeric,
+                source_alpha=st.session_state.source_alpha,
+                numeric_orientation=family["numeric_orientation"],
+                alpha_orientation=family["alpha_orientation"],
+                numeric_order=numeric_order,
+                alpha_order=alpha_order,
+            )
+
+            recovery_axis_diagnostics.extend(
+                build_recovery_axis_diagnostics(
+                    r_recovery,
+                    st.session_state.source_numeric,
+                    st.session_state.source_alpha,
+                    family["numeric_orientation"],
+                    family["alpha_orientation"],
+                    numeric_order,
+                    alpha_order,
+                )
+            )
+
+            rec_ready, rec_blockers, rec_warnings, rec_plan_rows = build_endpoint_recovery_plan(
+                r_recovery,
+                st.session_state.source_numeric,
+                st.session_state.source_alpha,
+                family["numeric_orientation"],
+                family["alpha_orientation"],
+                numeric_order,
+                alpha_order,
+                st.session_state.struc_detection.get("lines", []),
+                recovery_endpoint_radius,
+                allow_block_text_write,
+                numeric_extra=recovery_numeric_extra,
+                axis_snap_tolerance=recovery_axis_snap_tolerance,
+                strict_source_labels=recovery_strict_source_labels,
+                allow_virtual_axis_recovery=recovery_allow_virtual_axis,
+                write_mode=write_mode,
+            )
+
+            for w in rec_warnings:
+                recovery_warnings.append({
+                    "region": region_name,
+                    "warning": w,
+                })
+
+            if not rec_ready:
+                recovery_blocked.append({
+                    "region": region_name,
+                    "reason": "; ".join(rec_blockers),
+                })
+
+            if rec_plan_rows:
+                recovery_plan_rows_all.extend(rec_plan_rows)
+                recovery_preview.extend(recovery_preview_rows(rec_plan_rows))
+
+        if recovery_axis_diagnostics:
+            with st.expander("Recovery Axis Group Diagnostics", expanded=False):
+                st.dataframe(recovery_axis_diagnostics, use_container_width=True)
+
+        if recovery_blocked:
+            st.warning(
+                "Some selected recovery regions are not fully safe for endpoint recovery yet. "
+                "If the blocker says an axis-group count is missing, check Section 5 diagnostics. "
+                "If raw axes are also missing, try lowering Minimum Marker Confidence, increasing Text-in-Bubble Gap, "
+                "increasing Gridline Attach Gap, or verifying the selected layers."
+            )
+            st.dataframe(recovery_blocked, use_container_width=True)
+
+        if recovery_warnings:
+            st.info(
+                "Recovery warnings found. Extra groups are now auto-trimmed instead of blocking the sync. "
+                "Review the preview carefully before applying."
+            )
+            st.dataframe(recovery_warnings, use_container_width=True)
+
+        approved_plan_rows = []
+        unapproved_plan_rows = []
+        invalid_plan_rows = []
+
+        if recovery_preview:
+            st.write("#### Endpoint Recovery Manual Approval Preview")
+
+            try:
+                edited_recovery_preview = st.data_editor(
+                    recovery_preview,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="endpoint_recovery_approval_editor",
+                    column_config={
+                        "apply": st.column_config.CheckboxColumn(
+                            "Apply?",
+                            help="Uncheck rows that should not be modified.",
+                            default=True,
+                        ),
+                        "new_label": st.column_config.TextColumn(
+                            "New Label",
+                            help="Editable. Change this if the proposed label is wrong.",
+                            required=True,
+                        ),
+                    },
+                    disabled=[
+                        "approval_id",
+                        "region",
+                        "family",
+                        "axis_position",
+                        "old_label",
+                        "proposed_new_label",
+                        "endpoint",
+                        "distance_to_endpoint",
+                        "axis_distance",
+                        "axis_coord",
+                        "grid_frame_source",
+                        "recovery_score",
+                        "detection_mode",
+                        "text_handle",
+                        "text_source",
+                        "write_source",
+                        "write_risk",
+                        "write_reason",
+                        "layer",
+                        "confidence",
+                        "writable",
+                    ],
+                )
+            except Exception:
+                st.warning("Editable preview table failed. Falling back to read-only preview.")
+                st.dataframe(recovery_preview, use_container_width=True)
+                edited_recovery_preview = recovery_preview
+
+            approved_plan_rows, unapproved_plan_rows, invalid_plan_rows = recovery_plan_from_editor(
+                recovery_plan_rows_all,
+                edited_recovery_preview,
+            )
+
+            if invalid_plan_rows:
+                st.error(
+                    "Some approved rows have invalid edited New Label values. "
+                    "Fix them or uncheck Apply? before syncing."
+                )
+
+                invalid_preview = []
+
+                for bad in invalid_plan_rows:
+                    invalid_preview.append({
+                        "region": bad.get("region", ""),
+                        "family": bad.get("family", ""),
+                        "axis_position": bad.get("axis_position", ""),
+                        "old_label": bad.get("old_label", ""),
+                        "proposed_new_label": bad.get("original_proposed_new_label", bad.get("new_label", "")),
+                        "edited_new_label": bad.get("user_edited_new_label", bad.get("new_label", "")),
+                        "reason": bad.get("invalid_reason", ""),
+                        "endpoint": bad.get("endpoint", ""),
+                        "text_handle": bad.get("text_handle", ""),
+                    })
+
+                st.dataframe(invalid_preview, use_container_width=True)
+
+            counts = recovery_plan_apply_counts(approved_plan_rows)
+
+            st.write("#### Endpoint Recovery Apply Summary")
+            st.write({
+                "approved_rows": counts["approved_rows"],
+                "will_change": counts["will_change"],
+                "already_match": counts["already_match"],
+                "high_risk_writes": counts["high_risk"],
+                "unwritable": counts["unwritable"],
+                "unchecked_rows": len(unapproved_plan_rows),
+                "write_mode": write_mode,
+            })
+
+            recovery_confirm = st.checkbox(
+                "I reviewed the endpoint recovery preview and understand these changes will modify the DXF.",
+                value=False,
+                key="confirm_endpoint_recovery_apply",
+            )
+
+            dangerous_confirm = True
+
+            if write_mode == WRITE_MODE_DANGEROUS:
+                dangerous_confirm = st.checkbox(
+                    "I understand block definition edits may affect repeated symbols.",
+                    value=False,
+                    key="confirm_dangerous_block_write_endpoint",
+                )
+
+            can_apply_recovery = (
+                selected_recovery_regions
+                and approved_plan_rows
+                and not recovery_blocked
+                and not invalid_plan_rows
+                and recovery_confirm
+                and dangerous_confirm
+            )
+
+            if selected_recovery_regions and recovery_plan_rows_all and not recovery_blocked:
+                if st.button(
+                    "🩹 Apply Approved Endpoint Recovery Sync",
+                    key="apply_endpoint_recovery_button",
+                    disabled=not can_apply_recovery,
+                ):
+                    ch, sk, au = apply_endpoint_recovery_plan(
+                        approved_plan_rows,
+                        approved_by_user=True,
+                    )
+
+                    skipped_audit = build_unapproved_recovery_audit_rows(unapproved_plan_rows)
+
+                    st.session_state.changed += ch
+                    st.session_state.skipped += sk + len(unapproved_plan_rows)
+                    st.session_state.audit.extend(au + skipped_audit)
+
+                    if ch:
+                        st.success(f"Endpoint recovery complete. Changed {ch} grid-label text entities.")
+                    else:
+                        st.info("Endpoint recovery completed. No labels needed changing.")
+
+                    if sk:
+                        st.warning(f"Endpoint recovery skipped {sk} text entities.")
+
+                    if unapproved_plan_rows:
+                        st.info(f"{len(unapproved_plan_rows)} rows were intentionally unchecked and skipped.")
+
+        elif selected_recovery_regions and not recovery_plan_rows_all:
+            st.info(
+                "No endpoint recovery candidates found. If the blocker says an axis-group count is missing, "
+                "check Section 5 diagnostics first. If raw axes are complete, endpoint recovery should use all detected markers. "
+                "If raw axes are also missing, try lowering Minimum Marker Confidence, increasing Text-in-Bubble Gap, "
+                "increasing Gridline Attach Gap, or checking selected layers."
+            )
+
     else:
-        st.dataframe(rejected_columns_df, use_container_width=True)
+        st.info("No blocked/review regions are available for recovery.")
+
+    if st.session_state.audit:
+        st.markdown("### 9. Audit Report")
+        st.dataframe(st.session_state.audit, use_container_width=True)
+
+        audit_csv = audit_to_csv_bytes(st.session_state.audit)
+
         st.download_button(
-            "📄 Download Rejected Columns CSV",
-            data=rejected_columns_df.to_csv(index=False).encode("utf-8"),
-            file_name="ILS_REJECTED_COLUMNS.csv",
+            "📄 Download Audit CSV",
+            data=audit_csv,
+            file_name=f"AUDIT_{st.session_state.struc_name}.csv",
             mime="text/csv",
+            key="download_audit_csv",
         )
 
-with tab7:
-    panels_df = panels_to_dataframe(panels)
-    if panels_df.empty:
-        st.info("No graph slab panels detected.")
-    else:
-        st.warning("Slab panels are graph-based review geometry. Verify before structural modelling.")
-        st.dataframe(panels_df, use_container_width=True)
-        st.download_button(
-            "📄 Download Graph Slab Panels CSV",
-            data=panels_df.to_csv(index=False).encode("utf-8"),
-            file_name="ILS_GRAPH_SLAB_PANELS_REVIEW.csv",
-            mime="text/csv",
-        )
+    st.markdown("### 10. Download")
 
+    data = write_doc_to_temp_bytes(st.session_state.struc_doc)
 
-# =========================================================
-# DOWNLOAD DXF
-# =========================================================
-
-st.markdown("### 6. Download Structural Review DXF")
-
-if output_mode == "Review mode":
-    draw_raw_output = True
-    draw_nodes_output = export_junction_nodes
-    clean_length = 0.0
-else:
-    draw_raw_output = False
-    draw_nodes_output = export_junction_nodes
-    clean_length = min_output_centerline_length
-
-
-output_doc = build_output_dxf(
-    raw_segments=raw_segments + raw_arc_segments,
-    final_segments=region_segments,
-    panels=panels,
-    nodes=nodes,
-    columns=accepted_columns,
-    column_size=column_size,
-    draw_raw=draw_raw_output,
-    draw_wall_centerlines=True,
-    draw_panels_enabled=export_slab_panels,
-    draw_nodes_enabled=draw_nodes_output,
-    draw_columns_enabled=export_columns,
-    min_output_centerline_length=clean_length,
-    export_thicknesses=export_wall_thicknesses,
-)
-
-output_bytes = write_doc_to_bytes(output_doc)
-
-timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-if output_mode == "Clean structural mode":
-    output_filename = f"ILS_CLEAN_CENTERLINES_COLUMNS_SLABS_{timestamp}.dxf"
-else:
-    output_filename = f"ILS_REVIEW_CENTERLINES_COLUMNS_SLABS_{timestamp}.dxf"
-
-
-st.download_button(
-    "📥 Download Centerlines + Columns + Slab Panels DXF",
-    data=output_bytes,
-    file_name=output_filename,
-    mime="application/dxf",
-)
-
-st.success(
-    "Analysis complete. The DXF contains region-aware wall centerlines, concentric arcs, preliminary columns, and graph-based slab panel review geometry."
-)
+    st.download_button(
+        "📥 Download Target DXF",
+        data=data,
+        file_name=f"RELABELED_{st.session_state.struc_name}",
+        mime="application/dxf",
+        key="download_relabelled_dxf",
+    )
