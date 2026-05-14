@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 st.title("🏗️ iLoveStructural")
-st.subheader("Tool 4: Architectural Wall Centerline Agent (with Circular Wall Detection)")
+st.subheader("Tool 4: Architectural Wall Centerline Agent (with Arc Support)")
 st.caption(
     "Architectural DXF → accurate wall centerlines → overlap cleanup → columns → graph slab panels."
 )
@@ -124,18 +124,28 @@ def make_face_line(orientation, c, a, b, layer, source_type, handle):
 
 
 def make_centerline_segment(
-    orientation, c, a, b, thickness,
-    actual_thickness=None, thickness_error=None, overlap_length=None,
-    source_count=1, region_id=None, cx=0.0, cy=0.0, radius=0.0
+    orientation,
+    c,
+    a,
+    b,
+    thickness,
+    actual_thickness=None,
+    thickness_error=None,
+    overlap_length=None,
+    source_count=1,
+    region_id=None,
+    cx=0.0,
+    cy=0.0,
+    radius=0.0
 ):
     if actual_thickness is None:
         actual_thickness = thickness
 
     if thickness_error is None:
         thickness_error = abs(float(actual_thickness) - float(thickness))
-        
+
     if orientation == "C":
-        length = radius * math.radians(abs(b - a)) # True arc length
+        length = radius * math.radians(abs(float(b) - float(a)))
     else:
         length = abs(float(b) - float(a))
 
@@ -160,9 +170,9 @@ def make_centerline_segment(
         "source_count": int(source_count),
         "quality_score": float(quality_score),
         "region_id": region_id,
-        "cx": float(cx),        # Added for Arcs
-        "cy": float(cy),        # Added for Arcs
-        "radius": float(radius) # Added for Arcs
+        "cx": float(cx),
+        "cy": float(cy),
+        "radius": float(radius)
     }
 
 
@@ -170,6 +180,7 @@ def segment_length(seg):
     if seg.get("orientation") == "C":
         radius = seg.get("radius", 0.0)
         angle_diff = abs(float(seg["b"]) - float(seg["a"]))
+        if angle_diff > 360: angle_diff = 360
         return radius * math.radians(angle_diff)
     return abs(float(seg["b"]) - float(seg["a"]))
 
@@ -248,7 +259,7 @@ def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_l
 
     horizontal = []
     vertical = []
-    arcs = [] # ADDED ARCS
+    arcs = []
     ignored = 0
 
     def add_segment(x1, y1, x2, y2, layer, source_type, handle):
@@ -286,12 +297,18 @@ def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_l
                 s = e.dxf.start
                 en = e.dxf.end
                 add_segment(
-                    float(s.x), float(s.y), float(en.x), float(en.y),
-                    layer, "LINE", entity_handle(e)
+                    float(s.x),
+                    float(s.y),
+                    float(en.x),
+                    float(en.y),
+                    layer,
+                    "LINE",
+                    entity_handle(e),
                 )
 
             elif dxftype == "LWPOLYLINE":
                 pts = []
+
                 try:
                     for p in e.get_points():
                         pts.append((float(p[0]), float(p[1])))
@@ -301,18 +318,35 @@ def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_l
                 for i in range(len(pts) - 1):
                     x1, y1 = pts[i]
                     x2, y2 = pts[i + 1]
-                    add_segment(x1, y1, x2, y2, layer, "LWPOLYLINE", entity_handle(e))
+                    add_segment(
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        layer,
+                        "LWPOLYLINE",
+                        entity_handle(e),
+                    )
 
                 try:
                     if e.closed and len(pts) >= 2:
                         x1, y1 = pts[-1]
                         x2, y2 = pts[0]
-                        add_segment(x1, y1, x2, y2, layer, "LWPOLYLINE_CLOSED", entity_handle(e))
+                        add_segment(
+                            x1,
+                            y1,
+                            x2,
+                            y2,
+                            layer,
+                            "LWPOLYLINE_CLOSED",
+                            entity_handle(e),
+                        )
                 except Exception:
                     pass
 
             elif dxftype == "POLYLINE":
                 pts = []
+
                 try:
                     for v in e.vertices:
                         loc = v.dxf.location
@@ -323,17 +357,32 @@ def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_l
                 for i in range(len(pts) - 1):
                     x1, y1 = pts[i]
                     x2, y2 = pts[i + 1]
-                    add_segment(x1, y1, x2, y2, layer, "POLYLINE", entity_handle(e))
+                    add_segment(
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        layer,
+                        "POLYLINE",
+                        entity_handle(e),
+                    )
 
                 try:
                     if e.is_closed and len(pts) >= 2:
                         x1, y1 = pts[-1]
                         x2, y2 = pts[0]
-                        add_segment(x1, y1, x2, y2, layer, "POLYLINE_CLOSED", entity_handle(e))
+                        add_segment(
+                            x1,
+                            y1,
+                            x2,
+                            y2,
+                            layer,
+                            "POLYLINE_CLOSED",
+                            entity_handle(e),
+                        )
                 except Exception:
                     pass
 
-            # ADDED CIRCULAR ARC EXTRACTION
             elif dxftype == "ARC":
                 arcs.append({
                     "cx": float(e.dxf.center.x),
@@ -379,7 +428,13 @@ def parse_wall_thicknesses(text):
     return clean
 
 
-def detect_centerlines_from_face_pairs(horizontal_faces, vertical_faces, wall_thicknesses, thickness_tol, min_overlap):
+def detect_centerlines_from_face_pairs(
+    horizontal_faces,
+    vertical_faces,
+    wall_thicknesses,
+    thickness_tol,
+    min_overlap,
+):
     raw_segments = []
 
     for thickness in wall_thicknesses:
@@ -401,8 +456,14 @@ def detect_centerlines_from_face_pairs(horizontal_faces, vertical_faces, wall_th
 
                 raw_segments.append(
                     make_centerline_segment(
-                        "H", center_y, start, end, thickness,
-                        actual_thickness=actual_thickness, thickness_error=thickness_error, overlap_length=face_overlap,
+                        "H",
+                        center_y,
+                        start,
+                        end,
+                        thickness,
+                        actual_thickness=actual_thickness,
+                        thickness_error=thickness_error,
+                        overlap_length=face_overlap,
                     )
                 )
 
@@ -425,8 +486,14 @@ def detect_centerlines_from_face_pairs(horizontal_faces, vertical_faces, wall_th
 
                 raw_segments.append(
                     make_centerline_segment(
-                        "V", center_x, start, end, thickness,
-                        actual_thickness=actual_thickness, thickness_error=thickness_error, overlap_length=face_overlap,
+                        "V",
+                        center_x,
+                        start,
+                        end,
+                        thickness,
+                        actual_thickness=actual_thickness,
+                        thickness_error=thickness_error,
+                        overlap_length=face_overlap,
                     )
                 )
 
@@ -438,7 +505,6 @@ def detect_arc_centerlines(arc_faces, wall_thicknesses, thickness_tol):
     for thickness in wall_thicknesses:
         for i, a1 in enumerate(arc_faces):
             for a2 in arc_faces[i + 1:]:
-                # Check if arcs are concentric
                 if math.dist((a1["cx"], a1["cy"]), (a2["cx"], a2["cy"])) <= 10.0:
                     actual_thickness = abs(a1["radius"] - a2["radius"])
                     thickness_error = abs(actual_thickness - thickness)
@@ -448,7 +514,7 @@ def detect_arc_centerlines(arc_faces, wall_thicknesses, thickness_tol):
                         start_angle = max(a1["start_angle"], a2["start_angle"])
                         end_angle = min(a1["end_angle"], a2["end_angle"])
 
-                        if end_angle > start_angle: # Ensure overlap
+                        if end_angle > start_angle:
                             raw_arc_segments.append(
                                 make_centerline_segment(
                                     "C", 0, start_angle, end_angle, thickness,
@@ -460,7 +526,7 @@ def detect_arc_centerlines(arc_faces, wall_thicknesses, thickness_tol):
 
 
 # =========================================================
-# CENTERLINE HEALING (Orthogonal Only)
+# CENTERLINE HEALING
 # =========================================================
 
 def group_segments_by_axis(segments, axis_tol):
@@ -540,9 +606,15 @@ def merge_collinear_segments(segments, axis_tol, bridge_gap):
             source_count = sum(int(s.get("source_count", 1)) for s in cur_members)
 
             return make_centerline_segment(
-                orientation, avg_c, cur_a, cur_b, thickness,
-                actual_thickness=best_actual, thickness_error=best_error,
-                overlap_length=total_overlap, source_count=source_count,
+                orientation,
+                avg_c,
+                cur_a,
+                cur_b,
+                thickness,
+                actual_thickness=best_actual,
+                thickness_error=best_error,
+                overlap_length=total_overlap,
+                source_count=source_count,
             )
 
         for a, b, seg in intervals[1:]:
@@ -576,6 +648,7 @@ def extend_to_nearby_intersections(segments, axis_tol, extend_tol, iterations=3)
 
         for h in h_segments:
             hy = h["c"]
+
             for v in v_segments:
                 vx = v["c"]
 
@@ -585,10 +658,14 @@ def extend_to_nearby_intersections(segments, axis_tol, extend_tol, iterations=3)
                 if not (vx_near_h and hy_near_v):
                     continue
 
-                if vx < h["a"]: h["a"] = vx
-                if vx > h["b"]: h["b"] = vx
-                if hy < v["a"]: v["a"] = hy
-                if hy > v["b"]: v["b"] = hy
+                if vx < h["a"]:
+                    h["a"] = vx
+                if vx > h["b"]:
+                    h["b"] = vx
+                if hy < v["a"]:
+                    v["a"] = hy
+                if hy > v["b"]:
+                    v["b"] = hy
 
         working = merge_collinear_segments(
             working,
@@ -620,7 +697,10 @@ def segment_priority(seg):
 
 
 def resolve_overlapping_centerlines(
-    segments, axis_tol, min_overlap_length=100.0, min_overlap_ratio=0.60,
+    segments,
+    axis_tol,
+    min_overlap_length=100.0,
+    min_overlap_ratio=0.60,
 ):
     if not segments:
         return [], []
@@ -640,8 +720,10 @@ def resolve_overlapping_centerlines(
         if cand_len <= 0:
             removed.append({
                 **candidate,
-                "removed_reason": "zero_length", "overlap_with_thickness": "",
-                "overlap_amount": 0.0, "overlap_ratio": 0.0,
+                "removed_reason": "zero_length",
+                "overlap_with_thickness": "",
+                "overlap_amount": 0.0,
+                "overlap_ratio": 0.0,
             })
             continue
 
@@ -655,8 +737,10 @@ def resolve_overlapping_centerlines(
                 continue
 
             overlap = interval_overlap_length(
-                candidate["a"], candidate["b"],
-                existing["a"], existing["b"],
+                candidate["a"],
+                candidate["b"],
+                existing["a"],
+                existing["b"],
             )
 
             if overlap < min_overlap_length:
@@ -724,9 +808,11 @@ def segments_connected_for_region(s1, s2, axis_tol, region_gap):
 
     # perpendicular
     if s1["orientation"] == "H":
-        h = s1; v = s2
+        h = s1
+        v = s2
     else:
-        h = s2; v = s1
+        h = s2
+        v = s1
 
     x = v["c"]
     y = h["c"]
@@ -747,7 +833,10 @@ def split_segments_into_regions(segments, axis_tol, region_gap):
     for i in range(n):
         for j in range(i + 1, n):
             if segments_connected_for_region(
-                segments[i], segments[j], axis_tol=axis_tol, region_gap=region_gap,
+                segments[i],
+                segments[j],
+                axis_tol=axis_tol,
+                region_gap=region_gap,
             ):
                 dsu.union(i, j)
 
@@ -778,14 +867,20 @@ def split_segments_into_regions(segments, axis_tol, region_gap):
             s["region_id"] = idx
 
         regions.append({
-            "region_id": idx, "segments": group,
-            "min_x": min(xs), "max_x": max(xs), "min_y": min(ys), "max_y": max(ys),
-            "width": max(xs) - min(xs), "height": max(ys) - min(ys),
+            "region_id": idx,
+            "segments": group,
+            "min_x": min(xs),
+            "max_x": max(xs),
+            "min_y": min(ys),
+            "max_y": max(ys),
+            "width": max(xs) - min(xs),
+            "height": max(ys) - min(ys),
             "segment_count": len(group),
         })
 
     regions = sorted(regions, key=lambda r: (r["min_x"], r["min_y"]))
 
+    # Renumber after sorting.
     all_region_segments = []
     for new_id, r in enumerate(regions, start=1):
         r["region_id"] = new_id
@@ -803,12 +898,14 @@ def split_segments_into_regions(segments, axis_tol, region_gap):
 def cluster_values(values, tol):
     if not values:
         return []
+
     values = sorted(values)
     clusters = []
     cur = [values[0]]
 
     for v in values[1:]:
         avg = sum(cur) / len(cur)
+
         if abs(v - avg) <= tol:
             cur.append(v)
         else:
@@ -822,32 +919,53 @@ def cluster_values(values, tol):
 def nearest_axis(value, axes, tol):
     if not axes:
         return value
+
     best = min(axes, key=lambda a: abs(a - value))
+
     if abs(best - value) <= tol:
         return best
+
     return value
 
 
 def intervals_cover_range(intervals, start, end, closure_tol):
-    if end < start: start, end = end, start
-    if end - start <= 0: return False
+    """
+    True if merged intervals cover start-end allowing small gaps.
+    """
+
+    if end < start:
+        start, end = end, start
+
+    if end - start <= 0:
+        return False
 
     relevant = []
+
     for a, b in intervals:
         a, b = min(a, b), max(a, b)
-        if b < start - closure_tol: continue
-        if a > end + closure_tol: continue
+
+        # Keep intervals that overlap or nearly overlap target range.
+        if b < start - closure_tol:
+            continue
+        if a > end + closure_tol:
+            continue
+
         relevant.append((max(a, start), min(b, end)))
 
-    if not relevant: return False
+    if not relevant:
+        return False
 
     relevant = sorted(relevant, key=lambda x: x[0])
+
     current_end = start
 
     for a, b in relevant:
-        if a > current_end + closure_tol: return False
+        if a > current_end + closure_tol:
+            return False
         current_end = max(current_end, b)
-        if current_end >= end - closure_tol: return True
+
+        if current_end >= end - closure_tol:
+            return True
 
     return current_end >= end - closure_tol
 
@@ -875,51 +993,88 @@ def build_axis_interval_maps(segments, axis_tol):
 def horizontal_edge_exists(h_map, y, x1, x2, axis_tol, closure_tol):
     best_y = None
     best_d = None
+
     for yy in h_map.keys():
         d = abs(yy - y)
         if d <= axis_tol and (best_d is None or d < best_d):
             best_y = yy
             best_d = d
-    if best_y is None: return False
-    return intervals_cover_range(h_map.get(best_y, []), x1, x2, closure_tol)
+
+    if best_y is None:
+        return False
+
+    return intervals_cover_range(
+        h_map.get(best_y, []),
+        x1,
+        x2,
+        closure_tol,
+    )
 
 
 def vertical_edge_exists(v_map, x, y1, y2, axis_tol, closure_tol):
     best_x = None
     best_d = None
+
     for xx in v_map.keys():
         d = abs(xx - x)
         if d <= axis_tol and (best_d is None or d < best_d):
             best_x = xx
             best_d = d
-    if best_x is None: return False
-    return intervals_cover_range(v_map.get(best_x, []), y1, y2, closure_tol)
+
+    if best_x is None:
+        return False
+
+    return intervals_cover_range(
+        v_map.get(best_x, []),
+        y1,
+        y2,
+        closure_tol,
+    )
 
 
 def detect_graph_slab_panels(
-    segments, axis_tol, closure_tol, min_panel_width, min_panel_height,
-    max_panel_width, max_panel_height, region_id=None,
+    segments,
+    axis_tol,
+    closure_tol,
+    min_panel_width,
+    min_panel_height,
+    max_panel_width,
+    max_panel_height,
+    region_id=None,
 ):
+    """
+    Region-based graph slab panel detector.
+
+    It checks adjacent snapped X/Y axes and only creates a panel if
+    all four boundary edges are actually covered by wall centerline intervals.
+    """
+
     xs, ys, h_map, v_map = build_axis_interval_maps(segments, axis_tol)
+
     panels = []
 
-    if len(xs) < 2 or len(ys) < 2: return panels
+    if len(xs) < 2 or len(ys) < 2:
+        return panels
 
     for i in range(len(xs) - 1):
         x1 = xs[i]
         x2 = xs[i + 1]
         width = abs(x2 - x1)
 
-        if width < min_panel_width: continue
-        if max_panel_width > 0 and width > max_panel_width: continue
+        if width < min_panel_width:
+            continue
+        if max_panel_width > 0 and width > max_panel_width:
+            continue
 
         for j in range(len(ys) - 1):
             y1 = ys[j]
             y2 = ys[j + 1]
             height = abs(y2 - y1)
 
-            if height < min_panel_height: continue
-            if max_panel_height > 0 and height > max_panel_height: continue
+            if height < min_panel_height:
+                continue
+            if max_panel_height > 0 and height > max_panel_height:
+                continue
 
             bottom = horizontal_edge_exists(h_map, y1, x1, x2, axis_tol, closure_tol)
             top = horizontal_edge_exists(h_map, y2, x1, x2, axis_tol, closure_tol)
@@ -928,8 +1083,15 @@ def detect_graph_slab_panels(
 
             if bottom and top and left and right:
                 panels.append({
-                    "region_id": region_id, "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                    "width": width, "height": height, "area": width * height, "method": "graph_cell",
+                    "region_id": region_id,
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                    "width": width,
+                    "height": height,
+                    "area": width * height,
+                    "method": "graph_cell",
                 })
 
     return panels
@@ -942,10 +1104,12 @@ def detect_graph_slab_panels(
 def segment_contains_axis_value(seg, value, tol):
     return (seg["a"] - tol) <= value <= (seg["b"] + tol)
 
+
 def segment_side_lengths_at_point(seg, point_coord):
     left_or_down = max(0.0, float(point_coord) - float(seg["a"]))
     right_or_up = max(0.0, float(seg["b"]) - float(point_coord))
     return left_or_down, right_or_up
+
 
 def classify_column_junction(h_seg, v_seg, x, y, min_leg_length):
     h_left, h_right = segment_side_lengths_at_point(h_seg, x)
@@ -960,98 +1124,177 @@ def classify_column_junction(h_seg, v_seg, x, y, min_leg_length):
 
     direction_count = sum(1 for v in directions.values() if v)
 
-    if direction_count >= 4: junction_type = "cross"
-    elif direction_count == 3: junction_type = "tee"
-    elif direction_count == 2: junction_type = "corner"
-    else: junction_type = "weak"
+    if direction_count >= 4:
+        junction_type = "cross"
+    elif direction_count == 3:
+        junction_type = "tee"
+    elif direction_count == 2:
+        junction_type = "corner"
+    else:
+        junction_type = "weak"
 
     return junction_type, direction_count, directions
+
 
 def column_candidate_score(h_seg, v_seg, junction_type, direction_count):
     h_t = int(h_seg.get("thickness", 0))
     v_t = int(v_seg.get("thickness", 0))
+
     thickness_pair = tuple(sorted([h_t, v_t], reverse=True))
 
-    if h_t == 225 and v_t == 225: thickness_score = 1000
-    elif h_t == 225 or v_t == 225: thickness_score = 700
-    elif h_t == 150 and v_t == 150: thickness_score = 300
-    else: thickness_score = 100
+    if h_t == 225 and v_t == 225:
+        thickness_score = 1000
+    elif h_t == 225 or v_t == 225:
+        thickness_score = 700
+    elif h_t == 150 and v_t == 150:
+        thickness_score = 300
+    else:
+        thickness_score = 100
 
-    if junction_type == "cross": junction_score = 400
-    elif junction_type == "tee": junction_score = 300
-    elif junction_type == "corner": junction_score = 200
-    else: junction_score = 50
+    if junction_type == "cross":
+        junction_score = 400
+    elif junction_type == "tee":
+        junction_score = 300
+    elif junction_type == "corner":
+        junction_score = 200
+    else:
+        junction_score = 50
 
     length_score = min(segment_length(h_seg), segment_length(v_seg)) * 0.05
     total_length_score = (segment_length(h_seg) + segment_length(v_seg)) * 0.01
 
     thickness_error_penalty = (
-        float(h_seg.get("thickness_error", 0.0)) + float(v_seg.get("thickness_error", 0.0))
+        float(h_seg.get("thickness_error", 0.0))
+        + float(v_seg.get("thickness_error", 0.0))
     ) * 50.0
 
-    score = thickness_score + junction_score + direction_count * 50 + length_score + total_length_score - thickness_error_penalty
+    score = (
+        thickness_score
+        + junction_score
+        + direction_count * 50
+        + length_score
+        + total_length_score
+        - thickness_error_penalty
+    )
+
     return score, thickness_pair
 
+
 def dedupe_column_candidates(candidates, point_tol):
-    if not candidates: return []
-    sorted_candidates = sorted(candidates, key=lambda c: c["score"], reverse=True)
+    if not candidates:
+        return []
+
+    sorted_candidates = sorted(
+        candidates,
+        key=lambda c: c["score"],
+        reverse=True,
+    )
+
     kept = []
+
     for cand in sorted_candidates:
         exists = False
+
         for existing in kept:
             if point_distance((cand["x"], cand["y"]), (existing["x"], existing["y"])) <= point_tol:
                 exists = True
                 break
+
         if not exists:
             kept.append(cand)
 
     return sorted(kept, key=lambda c: (c.get("region_id", 0), c["x"], c["y"]))
 
+
 def detect_column_candidates(
-    segments, axis_tol, column_candidate_thicknesses,
-    allow_150_150=False, allow_mixed_225_150=True, min_leg_length=450.0, region_id=None,
+    segments,
+    axis_tol,
+    column_candidate_thicknesses,
+    allow_150_150=False,
+    allow_mixed_225_150=True,
+    min_leg_length=450.0,
+    region_id=None,
 ):
     allowed = set(int(x) for x in column_candidate_thicknesses or [])
+
     h_segments, v_segments = split_hv_segments(segments)
     candidates = []
 
     for h in h_segments:
-        if allowed and int(h.get("thickness", 0)) not in allowed: continue
+        if allowed and int(h.get("thickness", 0)) not in allowed:
+            continue
+
         hy = h["c"]
+
         for v in v_segments:
-            if allowed and int(v.get("thickness", 0)) not in allowed: continue
+            if allowed and int(v.get("thickness", 0)) not in allowed:
+                continue
+
             vx = v["c"]
-            if not segment_contains_axis_value(h, vx, axis_tol): continue
-            if not segment_contains_axis_value(v, hy, axis_tol): continue
+
+            if not segment_contains_axis_value(h, vx, axis_tol):
+                continue
+            if not segment_contains_axis_value(v, hy, axis_tol):
+                continue
 
             h_t = int(h.get("thickness", 0))
             v_t = int(v.get("thickness", 0))
 
-            if h_t == 150 and v_t == 150 and not allow_150_150: continue
-            if {h_t, v_t} == {225, 150} and not allow_mixed_225_150: continue
+            if h_t == 150 and v_t == 150 and not allow_150_150:
+                continue
+
+            if {h_t, v_t} == {225, 150} and not allow_mixed_225_150:
+                continue
 
             junction_type, direction_count, directions = classify_column_junction(
-                h, v, vx, hy, min_leg_length=min_leg_length,
+                h,
+                v,
+                vx,
+                hy,
+                min_leg_length=min_leg_length,
             )
 
-            if junction_type == "weak": continue
+            if junction_type == "weak":
+                continue
 
-            score, thickness_pair = column_candidate_score(h, v, junction_type, direction_count)
+            score, thickness_pair = column_candidate_score(
+                h,
+                v,
+                junction_type,
+                direction_count,
+            )
 
             candidates.append({
-                "region_id": region_id, "x": float(vx), "y": float(hy),
-                "score": float(score), "junction_type": junction_type, "direction_count": int(direction_count),
-                "h_thickness": h_t, "v_thickness": v_t, "thickness_pair": f"{thickness_pair[0]}/{thickness_pair[1]}",
-                "h_length": segment_length(h), "v_length": segment_length(v),
-                "left": directions["left"], "right": directions["right"], "down": directions["down"], "up": directions["up"],
+                "region_id": region_id,
+                "x": float(vx),
+                "y": float(hy),
+                "score": float(score),
+                "junction_type": junction_type,
+                "direction_count": int(direction_count),
+                "h_thickness": h_t,
+                "v_thickness": v_t,
+                "thickness_pair": f"{thickness_pair[0]}/{thickness_pair[1]}",
+                "h_length": segment_length(h),
+                "v_length": segment_length(v),
+                "left": directions["left"],
+                "right": directions["right"],
+                "down": directions["down"],
+                "up": directions["up"],
             })
 
     return dedupe_column_candidates(candidates, point_tol=axis_tol)
 
 
 def apply_column_proximity_filter(candidates, min_column_spacing):
-    if not candidates: return [], []
-    sorted_candidates = sorted(candidates, key=lambda c: c["score"], reverse=True)
+    if not candidates:
+        return [], []
+
+    sorted_candidates = sorted(
+        candidates,
+        key=lambda c: c["score"],
+        reverse=True,
+    )
+
     accepted = []
     rejected = []
 
@@ -1060,7 +1303,11 @@ def apply_column_proximity_filter(candidates, min_column_spacing):
         too_close_distance = None
 
         for acc in accepted:
-            d = point_distance((cand["x"], cand["y"]), (acc["x"], acc["y"]))
+            d = point_distance(
+                (cand["x"], cand["y"]),
+                (acc["x"], acc["y"]),
+            )
+
             if d < min_column_spacing:
                 too_close_to = acc
                 too_close_distance = d
@@ -1068,18 +1315,26 @@ def apply_column_proximity_filter(candidates, min_column_spacing):
 
         if too_close_to is None:
             accepted.append({
-                **cand, "accepted": True, "reject_reason": "",
-                "nearest_accepted_x": "", "nearest_accepted_y": "", "nearest_accepted_distance": "",
+                **cand,
+                "accepted": True,
+                "reject_reason": "",
+                "nearest_accepted_x": "",
+                "nearest_accepted_y": "",
+                "nearest_accepted_distance": "",
             })
         else:
             rejected.append({
-                **cand, "accepted": False, "reject_reason": "too_close_to_stronger_column_candidate",
-                "nearest_accepted_x": round(too_close_to["x"], 3), "nearest_accepted_y": round(too_close_to["y"], 3),
+                **cand,
+                "accepted": False,
+                "reject_reason": "too_close_to_stronger_column_candidate",
+                "nearest_accepted_x": round(too_close_to["x"], 3),
+                "nearest_accepted_y": round(too_close_to["y"], 3),
                 "nearest_accepted_distance": round(too_close_distance, 3),
             })
 
     accepted = sorted(accepted, key=lambda c: (c.get("region_id", 0), c["x"], c["y"]))
     rejected = sorted(rejected, key=lambda c: (c.get("region_id", 0), c["x"], c["y"]))
+
     return accepted, rejected
 
 
@@ -1093,20 +1348,26 @@ def collect_junction_nodes(segments, axis_tol):
 
     for h in h_segments:
         hy = h["c"]
+
         for v in v_segments:
             vx = v["c"]
+
             on_h = h["a"] - axis_tol <= vx <= h["b"] + axis_tol
             on_v = v["a"] - axis_tol <= hy <= v["b"] + axis_tol
+
             if on_h and on_v:
                 nodes.append((vx, hy))
 
     deduped = []
+
     for x, y in nodes:
         exists = False
+
         for dx, dy in deduped:
             if math.dist((x, y), (dx, dy)) <= axis_tol:
                 exists = True
                 break
+
         if not exists:
             deduped.append((x, y))
 
@@ -1120,11 +1381,20 @@ def collect_junction_nodes(segments, axis_tol):
 def draw_segment(msp, seg, layer):
     if seg["orientation"] == "H":
         y = seg["c"]
-        msp.add_line((seg["a"], y), (seg["b"], y), dxfattribs={"layer": layer})
+        msp.add_line(
+            (seg["a"], y),
+            (seg["b"], y),
+            dxfattribs={"layer": layer},
+        )
+
     elif seg["orientation"] == "V":
         x = seg["c"]
-        msp.add_line((x, seg["a"]), (x, seg["b"]), dxfattribs={"layer": layer})
-    elif seg["orientation"] == "C": # ADDED ARC DRAWING
+        msp.add_line(
+            (x, seg["a"]),
+            (x, seg["b"]),
+            dxfattribs={"layer": layer},
+        )
+    elif seg["orientation"] == "C":
         msp.add_arc(
             center=(seg["cx"], seg["cy"]),
             radius=seg["radius"],
@@ -1132,6 +1402,7 @@ def draw_segment(msp, seg, layer):
             end_angle=seg["b"],
             dxfattribs={"layer": layer}
         )
+
 
 def draw_segments_by_thickness(msp, segments, prefix):
     for seg in segments:
@@ -1141,35 +1412,92 @@ def draw_segments_by_thickness(msp, segments, prefix):
 
 def draw_panels(msp, panels, layer):
     for p in panels:
-        x1 = p["x1"]; y1 = p["y1"]
-        x2 = p["x2"]; y2 = p["y2"]
-        points = [(x1, y1), (x2, y1), (x2, y2), (x1, y2), (x1, y1)]
-        msp.add_lwpolyline(points, close=True, dxfattribs={"layer": layer})
+        x1 = p["x1"]
+        y1 = p["y1"]
+        x2 = p["x2"]
+        y2 = p["y2"]
+
+        points = [
+            (x1, y1),
+            (x2, y1),
+            (x2, y2),
+            (x1, y2),
+            (x1, y1),
+        ]
+
+        msp.add_lwpolyline(
+            points,
+            close=True,
+            dxfattribs={"layer": layer},
+        )
 
 
 def draw_nodes(msp, nodes, radius, layer):
     for x, y in nodes:
-        msp.add_circle(center=(x, y), radius=radius, dxfattribs={"layer": layer})
+        msp.add_circle(
+            center=(x, y),
+            radius=radius,
+            dxfattribs={"layer": layer},
+        )
 
 
 def draw_column_square(msp, x, y, size, layer):
     half = float(size) / 2.0
-    points = [(x - half, y - half), (x + half, y - half), (x + half, y + half), (x - half, y + half), (x - half, y - half)]
-    msp.add_lwpolyline(points, close=True, dxfattribs={"layer": layer})
+
+    points = [
+        (x - half, y - half),
+        (x + half, y - half),
+        (x + half, y + half),
+        (x - half, y + half),
+        (x - half, y - half),
+    ]
+
+    msp.add_lwpolyline(
+        points,
+        close=True,
+        dxfattribs={"layer": layer},
+    )
+
     cross = min(float(size) * 0.35, 100.0)
-    msp.add_line((x - cross, y), (x + cross, y), dxfattribs={"layer": layer})
-    msp.add_line((x, y - cross), (x, y + cross), dxfattribs={"layer": layer})
+
+    msp.add_line(
+        (x - cross, y),
+        (x + cross, y),
+        dxfattribs={"layer": layer},
+    )
+
+    msp.add_line(
+        (x, y - cross),
+        (x, y + cross),
+        dxfattribs={"layer": layer},
+    )
 
 
 def draw_columns(msp, columns, column_size, layer):
     for c in columns:
-        draw_column_square(msp, float(c["x"]), float(c["y"]), float(column_size), layer)
+        draw_column_square(
+            msp,
+            float(c["x"]),
+            float(c["y"]),
+            float(column_size),
+            layer,
+        )
 
 
 def build_output_dxf(
-    raw_segments, final_segments, panels, nodes, columns, column_size,
-    draw_raw=True, draw_wall_centerlines=True, draw_panels_enabled=False,
-    draw_nodes_enabled=False, draw_columns_enabled=True, min_output_centerline_length=0, export_thicknesses=None,
+    raw_segments,
+    final_segments,
+    panels,
+    nodes,
+    columns,
+    column_size,
+    draw_raw=True,
+    draw_wall_centerlines=True,
+    draw_panels_enabled=False,
+    draw_nodes_enabled=False,
+    draw_columns_enabled=True,
+    min_output_centerline_length=0,
+    export_thicknesses=None,
 ):
     new_doc = ezdxf.new()
     new_msp = new_doc.modelspace()
@@ -1179,32 +1507,66 @@ def build_output_dxf(
     raw_for_output = filter_segments_by_thickness(raw_segments, export_thicknesses)
     final_for_output = filter_segments_by_thickness(final_segments, export_thicknesses)
 
-    clean_final_segments = filter_short_segments(final_for_output, min_output_centerline_length)
+    clean_final_segments = filter_short_segments(
+        final_for_output,
+        min_output_centerline_length,
+    )
 
-    all_thicknesses = sorted(set([int(s["thickness"]) for s in raw_for_output] + [int(s["thickness"]) for s in clean_final_segments]))
+    all_thicknesses = sorted(
+        set(
+            [int(s["thickness"]) for s in raw_for_output]
+            + [int(s["thickness"]) for s in clean_final_segments]
+        )
+    )
 
     for thickness in all_thicknesses:
         safe_layer(new_doc, f"ILS_RAW_CENTERLINE_{thickness}", color=8)
-        safe_layer(new_doc, f"ILS_WALL_CENTERLINE_{thickness}", color=layer_color_for_thickness(thickness))
+        safe_layer(
+            new_doc,
+            f"ILS_WALL_CENTERLINE_{thickness}",
+            color=layer_color_for_thickness(thickness),
+        )
 
     safe_layer(new_doc, "ILS_SLAB_PANEL_REVIEW", color=5)
     safe_layer(new_doc, "ILS_JUNCTION_NODE_REVIEW", color=2)
     safe_layer(new_doc, f"ILS_COLUMN_{int(column_size)}X{int(column_size)}_REVIEW", color=6)
 
     if draw_raw:
-        draw_segments_by_thickness(new_msp, raw_for_output, prefix="ILS_RAW_CENTERLINE")
+        draw_segments_by_thickness(
+            new_msp,
+            raw_for_output,
+            prefix="ILS_RAW_CENTERLINE",
+        )
 
     if draw_wall_centerlines:
-        draw_segments_by_thickness(new_msp, clean_final_segments, prefix="ILS_WALL_CENTERLINE")
+        draw_segments_by_thickness(
+            new_msp,
+            clean_final_segments,
+            prefix="ILS_WALL_CENTERLINE",
+        )
 
     if draw_panels_enabled:
-        draw_panels(new_msp, panels, layer="ILS_SLAB_PANEL_REVIEW")
+        draw_panels(
+            new_msp,
+            panels,
+            layer="ILS_SLAB_PANEL_REVIEW",
+        )
 
     if draw_nodes_enabled:
-        draw_nodes(new_msp, nodes, radius=50, layer="ILS_JUNCTION_NODE_REVIEW")
+        draw_nodes(
+            new_msp,
+            nodes,
+            radius=50,
+            layer="ILS_JUNCTION_NODE_REVIEW",
+        )
 
     if draw_columns_enabled:
-        draw_columns(new_msp, columns, column_size=column_size, layer=f"ILS_COLUMN_{int(column_size)}X{int(column_size)}_REVIEW")
+        draw_columns(
+            new_msp,
+            columns,
+            column_size=column_size,
+            layer=f"ILS_COLUMN_{int(column_size)}X{int(column_size)}_REVIEW",
+        )
 
     return new_doc
 
@@ -1215,84 +1577,143 @@ def build_output_dxf(
 
 def segments_to_dataframe(segments):
     rows = []
+
     for idx, s in enumerate(segments, start=1):
         if s["orientation"] == "H":
-            x1 = s["a"]; y1 = s["c"]; x2 = s["b"]; y2 = s["c"]
+            x1 = s["a"]
+            y1 = s["c"]
+            x2 = s["b"]
+            y2 = s["c"]
         elif s["orientation"] == "V":
-            x1 = s["c"]; y1 = s["a"]; x2 = s["c"]; y2 = s["b"]
-        else: # Safe mapping for Arcs so DataFrames don't crash
-            x1 = s.get("cx", 0); y1 = s.get("cy", 0); x2 = s.get("radius", 0); y2 = 0
+            x1 = s["c"]
+            y1 = s["a"]
+            x2 = s["c"]
+            y2 = s["b"]
+        else: # Safe mapping for Arcs
+            x1 = s.get("cx", 0.0)
+            y1 = s.get("cy", 0.0)
+            x2 = s.get("radius", 0.0)
+            y2 = 0.0
 
         rows.append({
-            "id": idx, "region_id": s.get("region_id", ""), "orientation": s["orientation"],
-            "thickness": s["thickness"], "actual_thickness": round(float(s.get("actual_thickness", s["thickness"])), 3),
+            "id": idx,
+            "region_id": s.get("region_id", ""),
+            "orientation": s["orientation"],
+            "thickness": s["thickness"],
+            "actual_thickness": round(float(s.get("actual_thickness", s["thickness"])), 3),
             "thickness_error": round(float(s.get("thickness_error", 0.0)), 3),
             "overlap_length": round(float(s.get("overlap_length", segment_length(s))), 3),
-            "source_count": int(s.get("source_count", 1)), "quality_score": round(float(s.get("quality_score", 0.0)), 3),
-            "x1": round(x1, 3), "y1": round(y1, 3), "x2": round(x2, 3), "y2": round(y2, 3),
+            "source_count": int(s.get("source_count", 1)),
+            "quality_score": round(float(s.get("quality_score", 0.0)), 3),
+            "x1": round(x1, 3),
+            "y1": round(y1, 3),
+            "x2": round(x2, 3),
+            "y2": round(y2, 3),
             "length": round(segment_length(s), 3),
         })
+
     return pd.DataFrame(rows)
 
 
 def removed_segments_to_dataframe(segments):
     df = segments_to_dataframe(segments)
-    if df.empty: return df
+
+    if df.empty:
+        return df
+
     for col in ["removed_reason", "overlap_with_thickness", "overlap_amount", "overlap_ratio"]:
         df[col] = [s.get(col, "") for s in segments]
+
     return df
 
 
 def panels_to_dataframe(panels):
     rows = []
+
     for idx, p in enumerate(panels, start=1):
         rows.append({
-            "panel_id": idx, "region_id": p.get("region_id", ""), "method": p.get("method", ""),
-            "x1": round(p["x1"], 3), "y1": round(p["y1"], 3), "x2": round(p["x2"], 3), "y2": round(p["y2"], 3),
-            "width": round(p["width"], 3), "height": round(p["height"], 3), "area": round(p["area"], 3),
+            "panel_id": idx,
+            "region_id": p.get("region_id", ""),
+            "method": p.get("method", ""),
+            "x1": round(p["x1"], 3),
+            "y1": round(p["y1"], 3),
+            "x2": round(p["x2"], 3),
+            "y2": round(p["y2"], 3),
+            "width": round(p["width"], 3),
+            "height": round(p["height"], 3),
+            "area": round(p["area"], 3),
         })
+
     return pd.DataFrame(rows)
 
 
 def columns_to_dataframe(columns):
     rows = []
+
     for idx, c in enumerate(columns, start=1):
         rows.append({
-            "column_id": idx, "region_id": c.get("region_id", ""), "x": round(float(c["x"]), 3), "y": round(float(c["y"]), 3),
-            "score": round(float(c["score"]), 3), "junction_type": c.get("junction_type", ""),
-            "direction_count": c.get("direction_count", ""), "h_thickness": c.get("h_thickness", ""),
-            "v_thickness": c.get("v_thickness", ""), "thickness_pair": c.get("thickness_pair", ""),
-            "h_length": round(float(c.get("h_length", 0.0)), 3), "v_length": round(float(c.get("v_length", 0.0)), 3),
-            "left": c.get("left", ""), "right": c.get("right", ""), "down": c.get("down", ""), "up": c.get("up", ""),
-            "accepted": c.get("accepted", ""), "reject_reason": c.get("reject_reason", ""),
-            "nearest_accepted_x": c.get("nearest_accepted_x", ""), "nearest_accepted_y": c.get("nearest_accepted_y", ""),
+            "column_id": idx,
+            "region_id": c.get("region_id", ""),
+            "x": round(float(c["x"]), 3),
+            "y": round(float(c["y"]), 3),
+            "score": round(float(c["score"]), 3),
+            "junction_type": c.get("junction_type", ""),
+            "direction_count": c.get("direction_count", ""),
+            "h_thickness": c.get("h_thickness", ""),
+            "v_thickness": c.get("v_thickness", ""),
+            "thickness_pair": c.get("thickness_pair", ""),
+            "h_length": round(float(c.get("h_length", 0.0)), 3),
+            "v_length": round(float(c.get("v_length", 0.0)), 3),
+            "left": c.get("left", ""),
+            "right": c.get("right", ""),
+            "down": c.get("down", ""),
+            "up": c.get("up", ""),
+            "accepted": c.get("accepted", ""),
+            "reject_reason": c.get("reject_reason", ""),
+            "nearest_accepted_x": c.get("nearest_accepted_x", ""),
+            "nearest_accepted_y": c.get("nearest_accepted_y", ""),
             "nearest_accepted_distance": c.get("nearest_accepted_distance", ""),
         })
+
     return pd.DataFrame(rows)
 
 
 def regions_to_dataframe(regions):
     rows = []
+
     for r in regions:
         rows.append({
-            "region_id": r["region_id"], "segment_count": r["segment_count"],
-            "min_x": round(r["min_x"], 3), "max_x": round(r["max_x"], 3),
-            "min_y": round(r["min_y"], 3), "max_y": round(r["max_y"], 3),
-            "width": round(r["width"], 3), "height": round(r["height"], 3),
+            "region_id": r["region_id"],
+            "segment_count": r["segment_count"],
+            "min_x": round(r["min_x"], 3),
+            "max_x": round(r["max_x"], 3),
+            "min_y": round(r["min_y"], 3),
+            "max_y": round(r["max_y"], 3),
+            "width": round(r["width"], 3),
+            "height": round(r["height"], 3),
         })
+
     return pd.DataFrame(rows)
 
 
 def centerline_accuracy_summary(raw_segments):
     if not raw_segments:
-        return {"raw_count": 0, "avg_thickness_error": 0.0, "max_thickness_error": 0.0, "perfect_or_near_perfect": 0}
+        return {
+            "raw_count": 0,
+            "avg_thickness_error": 0.0,
+            "max_thickness_error": 0.0,
+            "perfect_or_near_perfect": 0,
+        }
 
     errors = [abs(float(s.get("thickness_error", 0.0))) for s in raw_segments]
+
     near_perfect = len([e for e in errors if e <= 1.0])
 
     return {
-        "raw_count": len(raw_segments), "avg_thickness_error": sum(errors) / len(errors),
-        "max_thickness_error": max(errors), "perfect_or_near_perfect": near_perfect,
+        "raw_count": len(raw_segments),
+        "avg_thickness_error": sum(errors) / len(errors),
+        "max_thickness_error": max(errors),
+        "perfect_or_near_perfect": near_perfect,
     }
 
 
@@ -1301,15 +1722,21 @@ def centerline_accuracy_summary(raw_segments):
 # =========================================================
 
 st.info(
-    "This MVP works best when architectural walls are drawn as LINE, LWPOLYLINE, POLYLINE, or ARC wall faces. "
-    "It accurately extracts orthogonal grids and concentric arcs."
+    "This MVP works best when architectural walls are drawn as LINE, LWPOLYLINE, or POLYLINE wall faces. "
+    "It currently focuses on orthogonal walls, and now supports concentric ARCS."
 )
 
-st.warning("Columns and slab panels are review geometry. Final structural design must be reviewed by an engineer.")
+st.warning(
+    "Columns and slab panels are review geometry. Final structural design must be reviewed by an engineer."
+)
 
 st.markdown("### 1. Upload Architectural DXF")
 
-uploaded_dxf = st.file_uploader("Upload architectural plan DXF", type=["dxf"], key="arch_centerline_upload")
+uploaded_dxf = st.file_uploader(
+    "Upload architectural plan DXF",
+    type=["dxf"],
+    key="arch_centerline_upload",
+)
 
 if uploaded_dxf is None:
     st.stop()
@@ -1325,53 +1752,133 @@ except Exception as e:
 
 st.markdown("### 2. Detection Settings")
 
-with st.expander("Wall source layers (Isolator Tool)", expanded=True):
+with st.expander("Wall source layers", expanded=True):
     use_all_layers = st.checkbox(
-        "Use all layers (Uncheck to enable Layer Selection)",
-        value=False,
+        "Use all layers",
+        value=True,
+        help="If checked, all LINE/LWPOLYLINE/POLYLINE/ARC entities are scanned.",
     )
 
     if use_all_layers:
-        selected_layers = layers
+        selected_layers = []
     else:
         selected_layers = st.multiselect(
-            "Select specific wall layers to scan (Speeds up extraction)",
+            "Select wall face layers",
             options=layers,
-            default=layers[:2] if len(layers) >= 2 else layers,
+            default=layers,
         )
 
 
 with st.expander("Geometry tolerances", expanded=True):
     c1, c2, c3 = st.columns(3)
 
-    wall_thickness_text = c1.text_input("Wall thicknesses to detect", value="225,150")
-    thickness_tol = c2.number_input("Wall thickness tolerance", min_value=0.0, value=10.0, step=1.0)
-    ortho_tol = c3.number_input("Orthogonal tolerance", min_value=0.0, value=1.0, step=0.5)
+    wall_thickness_text = c1.text_input(
+        "Wall thicknesses to detect",
+        value="225,150",
+    )
+
+    thickness_tol = c2.number_input(
+        "Wall thickness tolerance",
+        min_value=0.0,
+        value=10.0,
+        step=1.0,
+    )
+
+    ortho_tol = c3.number_input(
+        "Orthogonal tolerance",
+        min_value=0.0,
+        value=1.0,
+        step=0.5,
+    )
 
     c4, c5, c6 = st.columns(3)
 
-    min_line_length = c4.number_input("Minimum wall face line length", min_value=0.0, value=100.0, step=50.0)
-    min_overlap = c5.number_input("Minimum wall face overlap", min_value=0.0, value=100.0, step=50.0)
-    axis_tol = c6.number_input("Axis merge tolerance", min_value=0.0, value=20.0, step=5.0)
+    min_line_length = c4.number_input(
+        "Minimum wall face line length",
+        min_value=0.0,
+        value=100.0,
+        step=50.0,
+    )
+
+    min_overlap = c5.number_input(
+        "Minimum wall face overlap",
+        min_value=0.0,
+        value=100.0,
+        step=50.0,
+    )
+
+    axis_tol = c6.number_input(
+        "Axis merge tolerance",
+        min_value=0.0,
+        value=20.0,
+        step=5.0,
+    )
 
     c7, c8, c9 = st.columns(3)
 
-    bridge_gap = c7.number_input("Door/window bridge gap", min_value=0.0, value=1200.0, step=100.0)
-    intersection_extend_tol = c8.number_input("Intersection extension tolerance", min_value=0.0, value=300.0, step=50.0)
-    extension_mode = c9.selectbox("Intersection extension mode", ["Off", "Conservative", "Normal", "Aggressive"], index=1)
+    bridge_gap = c7.number_input(
+        "Door/window bridge gap",
+        min_value=0.0,
+        value=1200.0,
+        step=100.0,
+    )
+
+    intersection_extend_tol = c8.number_input(
+        "Intersection extension tolerance",
+        min_value=0.0,
+        value=300.0,
+        step=50.0,
+    )
+
+    extension_mode = c9.selectbox(
+        "Intersection extension mode",
+        ["Off", "Conservative", "Normal", "Aggressive"],
+        index=1,
+    )
 
 
 with st.expander("Output mode and cleanup", expanded=True):
     o1, o2, o3 = st.columns(3)
 
-    output_mode = o1.selectbox("Output mode", ["Review mode", "Clean structural mode"], index=1)
-    min_output_centerline_length = o2.number_input("Minimum output centerline length", min_value=0.0, value=750.0, step=50.0)
-    overlap_cleanup_enabled = o3.checkbox("Remove overlapping duplicate centerlines", value=True)
+    output_mode = o1.selectbox(
+        "Output mode",
+        ["Review mode", "Clean structural mode"],
+        index=1,
+    )
+
+    min_output_centerline_length = o2.number_input(
+        "Minimum output centerline length",
+        min_value=0.0,
+        value=750.0,
+        step=50.0,
+    )
+
+    overlap_cleanup_enabled = o3.checkbox(
+        "Remove overlapping duplicate centerlines",
+        value=True,
+    )
 
     o4, o5, o6 = st.columns(3)
-    overlap_cleanup_ratio = o4.number_input("Overlap cleanup ratio", min_value=0.10, max_value=1.00, value=0.60, step=0.05)
-    overlap_cleanup_min_length = o5.number_input("Minimum duplicate overlap length", min_value=0.0, value=100.0, step=50.0)
-    export_junction_nodes = o6.checkbox("Export junction nodes", value=False)
+
+    overlap_cleanup_ratio = o4.number_input(
+        "Overlap cleanup ratio",
+        min_value=0.10,
+        max_value=1.00,
+        value=0.60,
+        step=0.05,
+    )
+
+    overlap_cleanup_min_length = o5.number_input(
+        "Minimum duplicate overlap length",
+        min_value=0.0,
+        value=100.0,
+        step=50.0,
+    )
+
+    export_junction_nodes = o6.checkbox(
+        "Export junction nodes",
+        value=False,
+    )
 
 
 wall_thicknesses = parse_wall_thicknesses(wall_thickness_text)
@@ -1382,7 +1889,11 @@ if not wall_thicknesses:
 
 
 with st.expander("Wall thickness export", expanded=True):
-    export_wall_thicknesses = st.multiselect("Export wall thicknesses", options=wall_thicknesses, default=wall_thicknesses)
+    export_wall_thicknesses = st.multiselect(
+        "Export wall thicknesses",
+        options=wall_thicknesses,
+        default=wall_thicknesses,
+    )
 
 if not export_wall_thicknesses:
     st.warning("Select at least one wall thickness to export.")
@@ -1391,38 +1902,133 @@ if not export_wall_thicknesses:
 
 with st.expander("Multiple plan / region settings", expanded=True):
     r1, r2 = st.columns(2)
-    auto_separate_regions = r1.checkbox("Auto separate disconnected plans", value=True, help="Recommended when a DXF contains more than one plan/drawing.")
-    region_gap = r2.number_input("Plan separation / region connection gap", min_value=0.0, value=3000.0, step=250.0, help="Geometry farther apart than this is treated as separate regions.")
+
+    auto_separate_regions = r1.checkbox(
+        "Auto separate disconnected plans",
+        value=True,
+        help="Recommended when a DXF contains more than one plan/drawing.",
+    )
+
+    region_gap = r2.number_input(
+        "Plan separation / region connection gap",
+        min_value=0.0,
+        value=3000.0,
+        step=250.0,
+        help="Geometry farther apart than this is treated as separate regions.",
+    )
 
 
 with st.expander("Column suggestion settings", expanded=True):
     col1, col2, col3 = st.columns(3)
-    generate_columns = col1.checkbox("Generate column suggestions", value=True)
-    column_size = col2.number_input("Column size", min_value=100.0, value=225.0, step=25.0)
-    min_column_spacing = col3.number_input("Minimum column spacing", min_value=0.0, value=1800.0, step=100.0)
+
+    generate_columns = col1.checkbox(
+        "Generate column suggestions",
+        value=True,
+    )
+
+    column_size = col2.number_input(
+        "Column size",
+        min_value=100.0,
+        value=225.0,
+        step=25.0,
+    )
+
+    min_column_spacing = col3.number_input(
+        "Minimum column spacing",
+        min_value=0.0,
+        value=1800.0,
+        step=100.0,
+    )
 
     col4, col5, col6 = st.columns(3)
+
     default_column_thicknesses = [225] if 225 in wall_thicknesses else wall_thicknesses
-    column_candidate_thicknesses = col4.multiselect("Use wall thicknesses for column candidates", options=wall_thicknesses, default=default_column_thicknesses)
-    allow_mixed_225_150 = col5.checkbox("Allow 225/150 mixed junctions", value=True)
-    allow_150_150_columns = col6.checkbox("Allow 150/150 junctions", value=False)
+
+    column_candidate_thicknesses = col4.multiselect(
+        "Use wall thicknesses for column candidates",
+        options=wall_thicknesses,
+        default=default_column_thicknesses,
+    )
+
+    allow_mixed_225_150 = col5.checkbox(
+        "Allow 225/150 mixed junctions",
+        value=True,
+    )
+
+    allow_150_150_columns = col6.checkbox(
+        "Allow 150/150 junctions",
+        value=False,
+    )
 
     col7, col8 = st.columns(2)
-    min_column_leg_length = col7.number_input("Minimum connected wall leg length", min_value=0.0, value=450.0, step=50.0)
-    export_columns = col8.checkbox("Export columns", value=True)
+
+    min_column_leg_length = col7.number_input(
+        "Minimum connected wall leg length",
+        min_value=0.0,
+        value=450.0,
+        step=50.0,
+    )
+
+    export_columns = col8.checkbox(
+        "Export columns",
+        value=True,
+    )
 
 
 with st.expander("Graph slab panel settings", expanded=True):
     p1, p2, p3 = st.columns(3)
-    run_graph_slab_detection = p1.checkbox("Run graph-based slab panel detection", value=True)
-    export_slab_panels = p2.checkbox("Export slab panels", value=True)
-    panel_closure_tol = p3.number_input("Panel closure tolerance", min_value=0.0, value=150.0, step=25.0)
+
+    run_graph_slab_detection = p1.checkbox(
+        "Run graph-based slab panel detection",
+        value=True,
+        help="Uses final wall centerline graph per region.",
+    )
+
+    export_slab_panels = p2.checkbox(
+        "Export slab panels",
+        value=True,
+        help="Exports graph slab panels to ILS_SLAB_PANEL_REVIEW.",
+    )
+
+    panel_closure_tol = p3.number_input(
+        "Panel closure tolerance",
+        min_value=0.0,
+        value=150.0,
+        step=25.0,
+        help="Allows small gaps during slab panel recognition only.",
+    )
 
     p4, p5, p6, p7 = st.columns(4)
-    min_panel_width = p4.number_input("Minimum panel width", min_value=0.0, value=1200.0, step=100.0)
-    min_panel_height = p5.number_input("Minimum panel height", min_value=0.0, value=1200.0, step=100.0)
-    max_panel_width = p6.number_input("Maximum panel width", min_value=0.0, value=9000.0, step=500.0)
-    max_panel_height = p7.number_input("Maximum panel height", min_value=0.0, value=9000.0, step=500.0)
+
+    min_panel_width = p4.number_input(
+        "Minimum panel width",
+        min_value=0.0,
+        value=1200.0,
+        step=100.0,
+    )
+
+    min_panel_height = p5.number_input(
+        "Minimum panel height",
+        min_value=0.0,
+        value=1200.0,
+        step=100.0,
+    )
+
+    max_panel_width = p6.number_input(
+        "Maximum panel width",
+        min_value=0.0,
+        value=9000.0,
+        step=500.0,
+        help="0 means no maximum.",
+    )
+
+    max_panel_height = p7.number_input(
+        "Maximum panel height",
+        min_value=0.0,
+        value=9000.0,
+        step=500.0,
+        help="0 means no maximum.",
+    )
 
 
 analyze = st.button("🔎 Analyze Architectural Walls", type="primary")
@@ -1432,7 +2038,7 @@ if not analyze:
 
 
 # =========================================================
-# ANALYSIS RUN (Parallel Arc Injection)
+# ANALYSIS RUN
 # =========================================================
 
 with st.spinner("Extracting wall face lines and arcs..."):
@@ -1446,108 +2052,145 @@ with st.spinner("Extracting wall face lines and arcs..."):
 
 horizontal_faces = extracted["horizontal"]
 vertical_faces = extracted["vertical"]
-arc_faces = extracted["arcs"]
+arc_faces = extracted.get("arcs", [])
 
 st.markdown("### 3. Extraction Summary")
 
-e1, e2, e3, e4 = st.columns(4)
-e1.metric("Horizontal wall lines", len(horizontal_faces))
-e2.metric("Vertical wall lines", len(vertical_faces))
-e3.metric("Circular arcs", len(arc_faces))
-e4.metric("Ignored", extracted["ignored"])
+e1, e2, e3 = st.columns(3)
+
+e1.metric("Horizontal wall-face lines", len(horizontal_faces))
+e2.metric("Vertical wall-face lines", len(vertical_faces))
+e3.metric("Ignored / non-orthogonal", extracted["ignored"])
 
 if len(horizontal_faces) + len(vertical_faces) + len(arc_faces) == 0:
-    st.error("No valid lines or arcs found. Check your layer selection.")
+    st.error(
+        "No horizontal/vertical wall face lines found. Check layer selection or entity types."
+    )
     st.stop()
 
 
-with st.spinner("Detecting accurate midpoint centerlines..."):
-    # Detect orthogonal
-    raw_hv_segments = detect_centerlines_from_face_pairs(
-        horizontal_faces=horizontal_faces, vertical_faces=vertical_faces,
-        wall_thicknesses=wall_thicknesses, thickness_tol=thickness_tol, min_overlap=min_overlap,
+with st.spinner("Detecting accurate midpoint wall centerlines..."):
+    # Detect orthogonal centerlines
+    raw_segments = detect_centerlines_from_face_pairs(
+        horizontal_faces=horizontal_faces,
+        vertical_faces=vertical_faces,
+        wall_thicknesses=wall_thicknesses,
+        thickness_tol=thickness_tol,
+        min_overlap=min_overlap,
     )
-    # Detect arcs in parallel
-    raw_arc_segments = detect_arc_centerlines(arc_faces, wall_thicknesses, thickness_tol)
     
-    raw_segments = raw_hv_segments + raw_arc_segments
+    # Detect arc centerlines
+    raw_arc_segments = detect_arc_centerlines(
+        arc_faces=arc_faces,
+        wall_thicknesses=wall_thicknesses,
+        thickness_tol=thickness_tol
+    )
 
-accuracy = centerline_accuracy_summary(raw_segments)
+accuracy = centerline_accuracy_summary(raw_segments + raw_arc_segments)
 
 
 with st.spinner("Healing orthogonal centerlines..."):
-    # CRITICAL: We only pass HV lines through the gap bridger so logic doesn't break
+    # Only pass the H/V segments to the healing pipeline so math doesn't break
     merged_segments = merge_collinear_segments(
-        raw_hv_segments, axis_tol=axis_tol, bridge_gap=bridge_gap,
+        raw_segments,
+        axis_tol=axis_tol,
+        bridge_gap=bridge_gap,
     )
 
-    if extension_mode == "Off": effective_extend_tol = 0.0
-    elif extension_mode == "Conservative": effective_extend_tol = intersection_extend_tol * 0.5
-    elif extension_mode == "Normal": effective_extend_tol = intersection_extend_tol
-    else: effective_extend_tol = intersection_extend_tol * 1.5
+    if extension_mode == "Off":
+        effective_extend_tol = 0.0
+    elif extension_mode == "Conservative":
+        effective_extend_tol = intersection_extend_tol * 0.5
+    elif extension_mode == "Normal":
+        effective_extend_tol = intersection_extend_tol
+    else:
+        effective_extend_tol = intersection_extend_tol * 1.5
 
     extended_segments = extend_to_nearby_intersections(
-        merged_segments, axis_tol=axis_tol, extend_tol=effective_extend_tol, iterations=3,
+        merged_segments,
+        axis_tol=axis_tol,
+        extend_tol=effective_extend_tol,
+        iterations=3,
     )
 
     extended_segments = merge_collinear_segments(
-        extended_segments, axis_tol=axis_tol, bridge_gap=axis_tol,
+        extended_segments,
+        axis_tol=axis_tol,
+        bridge_gap=axis_tol,
     )
 
 
 with st.spinner("Cleaning duplicate centerlines..."):
     if overlap_cleanup_enabled:
-        final_hv_segments, removed_overlap_segments = resolve_overlapping_centerlines(
-            extended_segments, axis_tol=axis_tol,
-            min_overlap_length=overlap_cleanup_min_length, min_overlap_ratio=overlap_cleanup_ratio,
+        final_segments, removed_overlap_segments = resolve_overlapping_centerlines(
+            extended_segments,
+            axis_tol=axis_tol,
+            min_overlap_length=overlap_cleanup_min_length,
+            min_overlap_ratio=overlap_cleanup_ratio,
         )
     else:
-        final_hv_segments = extended_segments
+        final_segments = extended_segments
         removed_overlap_segments = []
 
-# Select exports
-selected_final_hv = filter_segments_by_thickness(final_hv_segments, export_wall_thicknesses)
-selected_final_arcs = filter_segments_by_thickness(raw_arc_segments, export_wall_thicknesses)
+# SAFELY INJECT ARCS BACK INTO THE PIPELINE
+final_segments.extend(raw_arc_segments)
+
+selected_final_segments = filter_segments_by_thickness(
+    final_segments,
+    export_wall_thicknesses,
+)
 
 if output_mode == "Clean structural mode":
-    clean_export_hv = filter_short_segments(selected_final_hv, min_output_centerline_length)
+    clean_export_segments = filter_short_segments(
+        selected_final_segments,
+        min_output_centerline_length,
+    )
 else:
-    clean_export_hv = filter_short_segments(selected_final_hv, 0.0)
-
-clean_export_arcs = selected_final_arcs # Arcs are kept natively intact
+    clean_export_segments = filter_short_segments(
+        selected_final_segments,
+        0.0,
+    )
 
 
 with st.spinner("Separating plan regions..."):
-    # CRITICAL: DSU only handles Orthogonal lines. We isolate it.
     if auto_separate_regions:
-        regions, hv_region_segments = split_segments_into_regions(
-            clean_export_hv, axis_tol=axis_tol, region_gap=region_gap,
+        # Filter out arcs for the DSU, it expects H/V only
+        hv_only_for_dsu = [s for s in clean_export_segments if s["orientation"] in ["H", "V"]]
+        arcs_only = [s for s in clean_export_segments if s["orientation"] == "C"]
+        
+        regions, region_segments = split_segments_into_regions(
+            hv_only_for_dsu,
+            axis_tol=axis_tol,
+            region_gap=region_gap,
         )
+        
+        # Add arcs back to Region 1 to ensure they render
+        for arc in arcs_only:
+            arc_copy = copy_segment(arc)
+            arc_copy["region_id"] = 1
+            region_segments.append(arc_copy)
+            if regions:
+                regions[0]["segments"].append(arc_copy)
+                regions[0]["segment_count"] += 1
+                
     else:
-        hv_region_segments = []
-        for s in clean_export_hv:
+        region_segments = []
+        for s in clean_export_segments:
             ss = copy_segment(s)
             ss["region_id"] = 1
-            hv_region_segments.append(ss)
+            region_segments.append(ss)
 
         regions = [{
-            "region_id": 1, "segments": hv_region_segments,
-            "min_x": min([s["a"] if s["orientation"] == "H" else s["c"] for s in hv_region_segments]) if hv_region_segments else 0,
-            "max_x": max([s["b"] if s["orientation"] == "H" else s["c"] for s in hv_region_segments]) if hv_region_segments else 0,
-            "min_y": min([s["c"] if s["orientation"] == "H" else s["a"] for s in hv_region_segments]) if hv_region_segments else 0,
-            "max_y": max([s["c"] if s["orientation"] == "H" else s["b"] for s in hv_region_segments]) if hv_region_segments else 0,
-            "width": 0, "height": 0, "segment_count": len(hv_region_segments),
+            "region_id": 1,
+            "segments": region_segments,
+            "min_x": min([s["a"] if s["orientation"] == "H" else s["c"] for s in region_segments if s["orientation"] in ["H","V"]]) if region_segments else 0,
+            "max_x": max([s["b"] if s["orientation"] == "H" else s["c"] for s in region_segments if s["orientation"] in ["H","V"]]) if region_segments else 0,
+            "min_y": min([s["c"] if s["orientation"] == "H" else s["a"] for s in region_segments if s["orientation"] in ["H","V"]]) if region_segments else 0,
+            "max_y": max([s["c"] if s["orientation"] == "H" else s["b"] for s in region_segments if s["orientation"] in ["H","V"]]) if region_segments else 0,
+            "width": 0,
+            "height": 0,
+            "segment_count": len(region_segments),
         }]
-
-    # Re-inject Arcs into the final region payload so they get drawn
-    region_segments = hv_region_segments
-    for arc in clean_export_arcs:
-        arc_copy = copy_segment(arc)
-        arc_copy["region_id"] = 1 # Default to region 1 so it renders safely
-        region_segments.append(arc_copy)
-        if regions:
-            regions[0]["segments"].append(arc_copy)
-            regions[0]["segment_count"] += 1
 
 
 with st.spinner("Generating region-aware columns..."):
@@ -1558,11 +2201,20 @@ with st.spinner("Generating region-aware columns..."):
     if generate_columns and column_candidate_thicknesses:
         for region in regions:
             candidates = detect_column_candidates(
-                region["segments"], axis_tol=axis_tol, column_candidate_thicknesses=column_candidate_thicknesses,
-                allow_150_150=allow_150_150_columns, allow_mixed_225_150=allow_mixed_225_150,
-                min_leg_length=min_column_leg_length, region_id=region["region_id"],
+                region["segments"],
+                axis_tol=axis_tol,
+                column_candidate_thicknesses=column_candidate_thicknesses,
+                allow_150_150=allow_150_150_columns,
+                allow_mixed_225_150=allow_mixed_225_150,
+                min_leg_length=min_column_leg_length,
+                region_id=region["region_id"],
             )
-            accepted, rejected = apply_column_proximity_filter(candidates, min_column_spacing=min_column_spacing)
+
+            accepted, rejected = apply_column_proximity_filter(
+                candidates,
+                min_column_spacing=min_column_spacing,
+            )
+
             raw_column_candidates.extend(candidates)
             accepted_columns.extend(accepted)
             rejected_columns.extend(rejected)
@@ -1570,14 +2222,22 @@ with st.spinner("Generating region-aware columns..."):
 
 with st.spinner("Detecting graph slab panels per region..."):
     panels = []
+
     if run_graph_slab_detection:
         for region in regions:
             region_panels = detect_graph_slab_panels(
-                region["segments"], axis_tol=axis_tol, closure_tol=panel_closure_tol,
-                min_panel_width=min_panel_width, min_panel_height=min_panel_height,
-                max_panel_width=max_panel_width, max_panel_height=max_panel_height, region_id=region["region_id"],
+                region["segments"],
+                axis_tol=axis_tol,
+                closure_tol=panel_closure_tol,
+                min_panel_width=min_panel_width,
+                min_panel_height=min_panel_height,
+                max_panel_width=max_panel_width,
+                max_panel_height=max_panel_height,
+                region_id=region["region_id"],
             )
+
             panels.extend(region_panels)
+
     nodes = collect_junction_nodes(region_segments, axis_tol=axis_tol)
 
 
@@ -1589,7 +2249,7 @@ st.markdown("### 4. Accuracy / Region / Output Summary")
 
 a1, a2, a3, a4 = st.columns(4)
 
-a1.metric("Raw midpoint centerlines", len(raw_segments))
+a1.metric("Raw midpoint centerlines", len(raw_segments) + len(raw_arc_segments))
 a2.metric("Avg thickness error", round(accuracy["avg_thickness_error"], 3))
 a3.metric("Max thickness error", round(accuracy["max_thickness_error"], 3))
 a4.metric("Near-perfect ≤ 1mm", accuracy["perfect_or_near_perfect"])
@@ -1624,61 +2284,108 @@ st.markdown("### 5. Preview Tables")
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
     [
-        "Regions", "Raw Accurate Centerlines", "Final Region Centerlines",
-        "Removed Overlaps", "Accepted Columns", "Rejected Columns", "Graph Slab Panels",
+        "Regions",
+        "Raw Accurate Centerlines",
+        "Final Region Centerlines",
+        "Removed Overlaps",
+        "Accepted Columns",
+        "Rejected Columns",
+        "Graph Slab Panels",
     ]
 )
 
 with tab1:
     regions_df = regions_to_dataframe(regions)
-    if regions_df.empty: st.info("No regions.")
+    if regions_df.empty:
+        st.info("No regions.")
     else:
         st.dataframe(regions_df, use_container_width=True)
-        st.download_button("📄 Download Regions CSV", data=regions_df.to_csv(index=False).encode("utf-8"), file_name="ILS_PLAN_REGIONS.csv", mime="text/csv")
+        st.download_button(
+            "📄 Download Regions CSV",
+            data=regions_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_PLAN_REGIONS.csv",
+            mime="text/csv",
+        )
 
 with tab2:
-    raw_df = segments_to_dataframe(raw_segments)
-    if raw_df.empty: st.info("No raw centerlines.")
+    raw_df = segments_to_dataframe(raw_segments + raw_arc_segments)
+    if raw_df.empty:
+        st.info("No raw centerlines.")
     else:
         st.dataframe(raw_df, use_container_width=True)
-        st.download_button("📄 Download Raw Accurate Centerlines CSV", data=raw_df.to_csv(index=False).encode("utf-8"), file_name="ILS_RAW_ACCURATE_CENTERLINES.csv", mime="text/csv")
+        st.download_button(
+            "📄 Download Raw Accurate Centerlines CSV",
+            data=raw_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_RAW_ACCURATE_CENTERLINES.csv",
+            mime="text/csv",
+        )
 
 with tab3:
     final_df = segments_to_dataframe(region_segments)
-    if final_df.empty: st.info("No final region centerlines.")
+    if final_df.empty:
+        st.info("No final region centerlines.")
     else:
         st.dataframe(final_df, use_container_width=True)
-        st.download_button("📄 Download Final Region Centerlines CSV", data=final_df.to_csv(index=False).encode("utf-8"), file_name="ILS_FINAL_REGION_CENTERLINES.csv", mime="text/csv")
+        st.download_button(
+            "📄 Download Final Region Centerlines CSV",
+            data=final_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_FINAL_REGION_CENTERLINES.csv",
+            mime="text/csv",
+        )
 
 with tab4:
     removed_df = removed_segments_to_dataframe(removed_overlap_segments)
-    if removed_df.empty: st.info("No overlapping centerlines removed.")
+    if removed_df.empty:
+        st.info("No overlapping centerlines removed.")
     else:
         st.dataframe(removed_df, use_container_width=True)
-        st.download_button("📄 Download Removed Overlaps CSV", data=removed_df.to_csv(index=False).encode("utf-8"), file_name="ILS_REMOVED_OVERLAPS.csv", mime="text/csv")
+        st.download_button(
+            "📄 Download Removed Overlaps CSV",
+            data=removed_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_REMOVED_OVERLAPS.csv",
+            mime="text/csv",
+        )
 
 with tab5:
     accepted_columns_df = columns_to_dataframe(accepted_columns)
-    if accepted_columns_df.empty: st.info("No accepted columns.")
+    if accepted_columns_df.empty:
+        st.info("No accepted columns.")
     else:
         st.warning("Column suggestions are review geometry only.")
         st.dataframe(accepted_columns_df, use_container_width=True)
-        st.download_button("📄 Download Accepted Columns CSV", data=accepted_columns_df.to_csv(index=False).encode("utf-8"), file_name="ILS_ACCEPTED_COLUMNS_REVIEW.csv", mime="text/csv")
+        st.download_button(
+            "📄 Download Accepted Columns CSV",
+            data=accepted_columns_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_ACCEPTED_COLUMNS_REVIEW.csv",
+            mime="text/csv",
+        )
 
 with tab6:
     rejected_columns_df = columns_to_dataframe(rejected_columns)
-    if rejected_columns_df.empty: st.info("No rejected columns.")
+    if rejected_columns_df.empty:
+        st.info("No rejected columns.")
     else:
         st.dataframe(rejected_columns_df, use_container_width=True)
-        st.download_button("📄 Download Rejected Columns CSV", data=rejected_columns_df.to_csv(index=False).encode("utf-8"), file_name="ILS_REJECTED_COLUMNS.csv", mime="text/csv")
+        st.download_button(
+            "📄 Download Rejected Columns CSV",
+            data=rejected_columns_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_REJECTED_COLUMNS.csv",
+            mime="text/csv",
+        )
 
 with tab7:
     panels_df = panels_to_dataframe(panels)
-    if panels_df.empty: st.info("No graph slab panels detected.")
+    if panels_df.empty:
+        st.info("No graph slab panels detected.")
     else:
         st.warning("Slab panels are graph-based review geometry. Verify before structural modelling.")
         st.dataframe(panels_df, use_container_width=True)
-        st.download_button("📄 Download Graph Slab Panels CSV", data=panels_df.to_csv(index=False).encode("utf-8"), file_name="ILS_GRAPH_SLAB_PANELS_REVIEW.csv", mime="text/csv")
+        st.download_button(
+            "📄 Download Graph Slab Panels CSV",
+            data=panels_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_GRAPH_SLAB_PANELS_REVIEW.csv",
+            mime="text/csv",
+        )
 
 
 # =========================================================
@@ -1696,8 +2403,9 @@ else:
     draw_nodes_output = export_junction_nodes
     clean_length = min_output_centerline_length
 
+
 output_doc = build_output_dxf(
-    raw_segments=raw_segments,
+    raw_segments=raw_segments + raw_arc_segments,
     final_segments=region_segments,
     panels=panels,
     nodes=nodes,
@@ -1713,12 +2421,14 @@ output_doc = build_output_dxf(
 )
 
 output_bytes = write_doc_to_bytes(output_doc)
+
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 if output_mode == "Clean structural mode":
     output_filename = f"ILS_CLEAN_CENTERLINES_COLUMNS_SLABS_{timestamp}.dxf"
 else:
     output_filename = f"ILS_REVIEW_CENTERLINES_COLUMNS_SLABS_{timestamp}.dxf"
+
 
 st.download_button(
     "📥 Download Centerlines + Columns + Slab Panels DXF",
@@ -1728,5 +2438,5 @@ st.download_button(
 )
 
 st.success(
-    "Analysis complete. The DXF contains region-aware wall centerlines, concentric curves, preliminary columns, and graph-based slab panel review geometry."
+    "Analysis complete. The DXF contains region-aware wall centerlines, concentric arcs, preliminary columns, and graph-based slab panel review geometry."
 )
