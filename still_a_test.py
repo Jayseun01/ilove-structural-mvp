@@ -4086,11 +4086,19 @@ if st.session_state.prepared:
             key="confirm_clean_sync_apply",
         )
 
+        clean_sync_disabled = (
+            not clean_confirm
+            or not selected_regions
+            or not approved_clean_plan_rows
+            or bool(invalid_clean_plan_rows)
+        )
+
         if st.button(
             "✍️ Apply Approved Clean Sync to Selected Regions",
             key="apply_clean_sync_button",
-            disabled=not clean_confirm or not selected_regions or not approved_clean_plan_rows or invalid_clean_plan_rows,
+            disabled=clean_sync_disabled,
         ):
+
             total_changed, total_skipped, audit = apply_clean_plan_rows(
                 approved_clean_plan_rows,
                 allow_block_text_write=allow_block_text_write,
