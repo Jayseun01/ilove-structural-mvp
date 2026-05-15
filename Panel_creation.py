@@ -1,10 +1,11 @@
-import streamlit as st
-import ezdxf
-import tempfile
-import os
-import math
 import datetime
+import math
+import os
+import tempfile
+
+import ezdxf
 import pandas as pd
+import streamlit as st
 
 
 # =========================================================
@@ -12,16 +13,131 @@ import pandas as pd
 # =========================================================
 
 st.set_page_config(
-    page_title="iLoveStructural - Architectural Wall Centerline Agent",
-    page_icon="🏗️",
+    page_title="iLoveStructural - Structural Layout Agent",
+    page_icon=":building_construction:",
     layout="wide",
 )
 
-st.title("🏗️ iLoveStructural")
-st.subheader("Tool 4: Architectural Wall Centerline Agent")
+st.title("iLoveStructural")
+st.subheader("Tool 4: Architectural Wall Centerline and Structural Layout Agent")
 st.caption(
-    "Architectural DXF → accurate wall centerlines → overlap cleanup → columns → graph slab panels."
+    "Architectural DXF -> accurate wall centerlines -> structural grid -> economical columns -> slab panel review."
 )
+
+
+# =========================================================
+# IMPORTANT SCOPE NOTE
+# =========================================================
+
+st.info(
+    "This assistant produces code-aware preliminary structural layout geometry. "
+    "It is not a substitute for a signed structural design, load take-off, foundation design, or local authority review."
+)
+
+st.warning(
+    "Columns, beam/grid lines, and slab panels are review geometry. "
+    "A qualified engineer must verify member sizes, loads, detailing, drift, punching shear, foundations, and code compliance."
+)
+
+
+# =========================================================
+# DESIGN CODE / PRELIMINARY PROFILE DATA
+# =========================================================
+
+DESIGN_CODE_PROFILES = {
+    "Eurocode 2 (EN 1992) - preliminary": {
+        "target_column_spacing": 4000.0,
+        "max_column_spacing": 6000.0,
+        "min_column_spacing": 2200.0,
+        "max_panel_span": 5500.0,
+        "preferred_column_family": "metric_rc",
+    },
+    "ACI 318 - preliminary": {
+        "target_column_spacing": 4200.0,
+        "max_column_spacing": 6100.0,
+        "min_column_spacing": 2400.0,
+        "max_panel_span": 5600.0,
+        "preferred_column_family": "metric_rc",
+    },
+    "BS 8110 - preliminary": {
+        "target_column_spacing": 4000.0,
+        "max_column_spacing": 6000.0,
+        "min_column_spacing": 2200.0,
+        "max_panel_span": 5500.0,
+        "preferred_column_family": "metric_rc",
+    },
+    "IS 456 - preliminary": {
+        "target_column_spacing": 3800.0,
+        "max_column_spacing": 5750.0,
+        "min_column_spacing": 2200.0,
+        "max_panel_span": 5250.0,
+        "preferred_column_family": "metric_rc",
+    },
+    "Custom / office standard": {
+        "target_column_spacing": 4000.0,
+        "max_column_spacing": 6000.0,
+        "min_column_spacing": 2200.0,
+        "max_panel_span": 5500.0,
+        "preferred_column_family": "metric_rc",
+    },
+}
+
+
+def preliminary_column_size_options(floor_count, building_use, column_shape):
+    """
+    Practical starting sizes only. Final sizes require real loading and design checks.
+    """
+
+    floors = max(1, int(floor_count))
+    use_factor = {
+        "Residential": 1.0,
+        "Office / commercial": 1.10,
+        "School / assembly": 1.15,
+        "Retail": 1.15,
+        "Storage / heavy loading": 1.35,
+    }.get(building_use, 1.0)
+
+    demand = floors * use_factor
+
+    if column_shape == "Circular":
+        if demand <= 1.2:
+            return [(300.0, 300.0), (350.0, 350.0)]
+        if demand <= 2.5:
+            return [(350.0, 350.0), (400.0, 400.0)]
+        if demand <= 4.5:
+            return [(450.0, 450.0), (500.0, 500.0)]
+        if demand <= 7.0:
+            return [(550.0, 550.0), (600.0, 600.0)]
+        return [(650.0, 650.0), (750.0, 750.0)]
+
+    if column_shape == "Rectangular":
+        if demand <= 1.2:
+            return [(225.0, 300.0), (300.0, 300.0)]
+        if demand <= 2.5:
+            return [(300.0, 450.0), (300.0, 500.0)]
+        if demand <= 4.5:
+            return [(300.0, 600.0), (450.0, 450.0)]
+        if demand <= 7.0:
+            return [(450.0, 600.0), (500.0, 650.0)]
+        return [(600.0, 750.0), (750.0, 750.0)]
+
+    if demand <= 1.2:
+        return [(225.0, 225.0), (225.0, 300.0)]
+    if demand <= 2.5:
+        return [(300.0, 300.0), (300.0, 450.0)]
+    if demand <= 4.5:
+        return [(300.0, 450.0), (450.0, 450.0)]
+    if demand <= 7.0:
+        return [(450.0, 450.0), (450.0, 600.0)]
+    return [(600.0, 600.0), (600.0, 750.0)]
+
+
+def column_size_label(shape, width, depth):
+    if shape == "Circular":
+        return f"DIA {int(round(width))}"
+    if abs(width - depth) <= 1e-9:
+        return f"{int(round(width))}x{int(round(depth))}"
+    return f"{int(round(width))}x{int(round(depth))}"
 
 
 # =========================================================
@@ -233,6 +349,55 @@ def entity_handle(entity):
         return ""
 
 
+def merge_intervals(intervals, gap_tol=0.0):
+    clean = []
+    for a, b in intervals:
+        aa, bb = min(float(a), float(b)), max(float(a), float(b))
+        if bb > aa:
+            clean.append((aa, bb))
+
+    if not clean:
+        return []
+
+    clean = sorted(clean, key=lambda x: x[0])
+    merged = [clean[0]]
+
+    for a, b in clean[1:]:
+        cur_a, cur_b = merged[-1]
+        if a <= cur_b + gap_tol:
+            merged[-1] = (cur_a, max(cur_b, b))
+        else:
+            merged.append((a, b))
+
+    return merged
+
+
+def total_interval_length(intervals):
+    return sum(max(0.0, b - a) for a, b in intervals)
+
+
+def point_on_intervals(intervals, value, tol):
+    for a, b in intervals:
+        if min(a, b) - tol <= value <= max(a, b) + tol:
+            return True
+    return False
+
+
+def closest_value(value, values):
+    if not values:
+        return None
+    return min(values, key=lambda v: abs(float(v) - float(value)))
+
+
+def value_in_list(value, values, tol):
+    best = closest_value(value, values)
+    return best is not None and abs(best - value) <= tol
+
+
+def is_near_any(value, values, tol):
+    return value_in_list(value, values, tol)
+
+
 # =========================================================
 # DXF WALL FACE EXTRACTION
 # =========================================================
@@ -255,15 +420,10 @@ def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_l
 
         if is_horizontal_segment(x1, y1, x2, y2, ortho_tol):
             y = (y1 + y2) / 2.0
-            horizontal.append(
-                make_face_line("H", y, x1, x2, layer, source_type, handle)
-            )
-
+            horizontal.append(make_face_line("H", y, x1, x2, layer, source_type, handle))
         elif is_vertical_segment(x1, y1, x2, y2, ortho_tol):
             x = (x1 + x2) / 2.0
-            vertical.append(
-                make_face_line("V", x, y1, y2, layer, source_type, handle)
-            )
+            vertical.append(make_face_line("V", x, y1, y2, layer, source_type, handle))
         else:
             ignored += 1
 
@@ -290,7 +450,6 @@ def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_l
 
             elif dxftype == "LWPOLYLINE":
                 pts = []
-
                 try:
                     for p in e.get_points():
                         pts.append((float(p[0]), float(p[1])))
@@ -300,35 +459,18 @@ def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_l
                 for i in range(len(pts) - 1):
                     x1, y1 = pts[i]
                     x2, y2 = pts[i + 1]
-                    add_segment(
-                        x1,
-                        y1,
-                        x2,
-                        y2,
-                        layer,
-                        "LWPOLYLINE",
-                        entity_handle(e),
-                    )
+                    add_segment(x1, y1, x2, y2, layer, "LWPOLYLINE", entity_handle(e))
 
                 try:
                     if e.closed and len(pts) >= 2:
                         x1, y1 = pts[-1]
                         x2, y2 = pts[0]
-                        add_segment(
-                            x1,
-                            y1,
-                            x2,
-                            y2,
-                            layer,
-                            "LWPOLYLINE_CLOSED",
-                            entity_handle(e),
-                        )
+                        add_segment(x1, y1, x2, y2, layer, "LWPOLYLINE_CLOSED", entity_handle(e))
                 except Exception:
                     pass
 
             elif dxftype == "POLYLINE":
                 pts = []
-
                 try:
                     for v in e.vertices:
                         loc = v.dxf.location
@@ -339,29 +481,13 @@ def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_l
                 for i in range(len(pts) - 1):
                     x1, y1 = pts[i]
                     x2, y2 = pts[i + 1]
-                    add_segment(
-                        x1,
-                        y1,
-                        x2,
-                        y2,
-                        layer,
-                        "POLYLINE",
-                        entity_handle(e),
-                    )
+                    add_segment(x1, y1, x2, y2, layer, "POLYLINE", entity_handle(e))
 
                 try:
                     if e.is_closed and len(pts) >= 2:
                         x1, y1 = pts[-1]
                         x2, y2 = pts[0]
-                        add_segment(
-                            x1,
-                            y1,
-                            x2,
-                            y2,
-                            layer,
-                            "POLYLINE_CLOSED",
-                            entity_handle(e),
-                        )
+                        add_segment(x1, y1, x2, y2, layer, "POLYLINE_CLOSED", entity_handle(e))
                 except Exception:
                     pass
 
@@ -537,17 +663,11 @@ def merge_collinear_segments(segments, axis_tol, bridge_gap):
 
         def flush_current():
             best_error = min(float(s.get("thickness_error", 0.0)) for s in cur_members)
-
             best_actual = sorted(
                 cur_members,
                 key=lambda s: float(s.get("thickness_error", 0.0)),
             )[0].get("actual_thickness", thickness)
-
-            total_overlap = sum(
-                float(s.get("overlap_length", segment_length(s)))
-                for s in cur_members
-            )
-
+            total_overlap = sum(float(s.get("overlap_length", segment_length(s))) for s in cur_members)
             source_count = sum(int(s.get("source_count", 1)) for s in cur_members)
 
             return make_centerline_segment(
@@ -751,7 +871,6 @@ def segments_connected_for_region(s1, s2, axis_tol, region_gap):
         gap = interval_gap(s1["a"], s1["b"], s2["a"], s2["b"])
         return gap <= region_gap
 
-    # perpendicular
     if s1["orientation"] == "H":
         h = s1
         v = s2
@@ -825,7 +944,6 @@ def split_segments_into_regions(segments, axis_tol, region_gap):
 
     regions = sorted(regions, key=lambda r: (r["min_x"], r["min_y"]))
 
-    # Renumber after sorting.
     all_region_segments = []
     for new_id, r in enumerate(regions, start=1):
         r["region_id"] = new_id
@@ -874,10 +992,6 @@ def nearest_axis(value, axes, tol):
 
 
 def intervals_cover_range(intervals, start, end, closure_tol):
-    """
-    True if merged intervals cover start-end allowing small gaps.
-    """
-
     if end < start:
         start, end = end, start
 
@@ -889,7 +1003,6 @@ def intervals_cover_range(intervals, start, end, closure_tol):
     for a, b in intervals:
         a, b = min(a, b), max(a, b)
 
-        # Keep intervals that overlap or nearly overlap target range.
         if b < start - closure_tol:
             continue
         if a > end + closure_tol:
@@ -901,7 +1014,6 @@ def intervals_cover_range(intervals, start, end, closure_tol):
         return False
 
     relevant = sorted(relevant, key=lambda x: x[0])
-
     current_end = start
 
     for a, b in relevant:
@@ -948,12 +1060,7 @@ def horizontal_edge_exists(h_map, y, x1, x2, axis_tol, closure_tol):
     if best_y is None:
         return False
 
-    return intervals_cover_range(
-        h_map.get(best_y, []),
-        x1,
-        x2,
-        closure_tol,
-    )
+    return intervals_cover_range(h_map.get(best_y, []), x1, x2, closure_tol)
 
 
 def vertical_edge_exists(v_map, x, y1, y2, axis_tol, closure_tol):
@@ -969,12 +1076,7 @@ def vertical_edge_exists(v_map, x, y1, y2, axis_tol, closure_tol):
     if best_x is None:
         return False
 
-    return intervals_cover_range(
-        v_map.get(best_x, []),
-        y1,
-        y2,
-        closure_tol,
-    )
+    return intervals_cover_range(v_map.get(best_x, []), y1, y2, closure_tol)
 
 
 def detect_graph_slab_panels(
@@ -987,15 +1089,7 @@ def detect_graph_slab_panels(
     max_panel_height,
     region_id=None,
 ):
-    """
-    Region-based graph slab panel detector.
-
-    It checks adjacent snapped X/Y axes and only creates a panel if
-    all four boundary edges are actually covered by wall centerline intervals.
-    """
-
     xs, ys, h_map, v_map = build_axis_interval_maps(segments, axis_tol)
-
     panels = []
 
     if len(xs) < 2 or len(ys) < 2:
@@ -1036,105 +1130,466 @@ def detect_graph_slab_panels(
                     "width": width,
                     "height": height,
                     "area": width * height,
-                    "method": "graph_cell",
+                    "method": "wall_graph_cell",
+                    "edge_support_count": 4,
+                    "corner_support_count": "",
+                    "review_status": "wall_bounded",
                 })
 
     return panels
 
 
 # =========================================================
-# COLUMN MODULE
+# SMART STRUCTURAL LAYOUT ENGINE
 # =========================================================
 
-def segment_contains_axis_value(seg, value, tol):
-    return (seg["a"] - tol) <= value <= (seg["b"] + tol)
+def axis_weight_from_segments(related_segments):
+    if not related_segments:
+        return 0.0
+
+    max_thickness = max(int(s.get("thickness", 0)) for s in related_segments)
+    count = len(related_segments)
+    total_len = sum(segment_length(s) for s in related_segments)
+    quality = sum(float(s.get("quality_score", 0.0)) for s in related_segments)
+
+    return total_len * 0.15 + count * 150.0 + max_thickness * 3.0 + quality * 0.01
 
 
-def segment_side_lengths_at_point(seg, point_coord):
-    left_or_down = max(0.0, float(point_coord) - float(seg["a"]))
-    right_or_up = max(0.0, float(seg["b"]) - float(point_coord))
-    return left_or_down, right_or_up
+def build_structural_axis_infos(region, axis_tol):
+    segments = region.get("segments", [])
+    h_segments, v_segments = split_hv_segments(segments)
+    xs, ys, h_map, v_map = build_axis_interval_maps(segments, axis_tol)
+
+    min_x = float(region.get("min_x", 0.0))
+    max_x = float(region.get("max_x", 0.0))
+    min_y = float(region.get("min_y", 0.0))
+    max_y = float(region.get("max_y", 0.0))
+    width = max(max_x - min_x, 1.0)
+    height = max(max_y - min_y, 1.0)
+    edge_tol = max(axis_tol * 2.0, 100.0)
+
+    x_infos = []
+    y_infos = []
+
+    for x in xs:
+        intervals = merge_intervals(v_map.get(x, []), gap_tol=axis_tol)
+        related = [s for s in v_segments if abs(nearest_axis(s["c"], xs, axis_tol) - x) <= axis_tol]
+        coverage = total_interval_length(intervals)
+        coverage_ratio = coverage / height
+        max_thickness = max([int(s.get("thickness", 0)) for s in related] or [0])
+        is_outer = abs(x - min_x) <= edge_tol or abs(x - max_x) <= edge_tol
+        is_major = coverage_ratio >= 0.50 or max_thickness >= 225 or len(related) >= 2
+
+        x_infos.append({
+            "axis": "X",
+            "value": float(x),
+            "coverage": float(coverage),
+            "coverage_ratio": float(coverage_ratio),
+            "segment_count": len(related),
+            "max_thickness": max_thickness,
+            "intervals": intervals,
+            "is_outer": is_outer,
+            "is_major": is_major,
+            "score": axis_weight_from_segments(related) + coverage_ratio * 1000.0 + (500.0 if is_outer else 0.0),
+            "selected_reason": "",
+        })
+
+    for y in ys:
+        intervals = merge_intervals(h_map.get(y, []), gap_tol=axis_tol)
+        related = [s for s in h_segments if abs(nearest_axis(s["c"], ys, axis_tol) - y) <= axis_tol]
+        coverage = total_interval_length(intervals)
+        coverage_ratio = coverage / width
+        max_thickness = max([int(s.get("thickness", 0)) for s in related] or [0])
+        is_outer = abs(y - min_y) <= edge_tol or abs(y - max_y) <= edge_tol
+        is_major = coverage_ratio >= 0.50 or max_thickness >= 225 or len(related) >= 2
+
+        y_infos.append({
+            "axis": "Y",
+            "value": float(y),
+            "coverage": float(coverage),
+            "coverage_ratio": float(coverage_ratio),
+            "segment_count": len(related),
+            "max_thickness": max_thickness,
+            "intervals": intervals,
+            "is_outer": is_outer,
+            "is_major": is_major,
+            "score": axis_weight_from_segments(related) + coverage_ratio * 1000.0 + (500.0 if is_outer else 0.0),
+            "selected_reason": "",
+        })
+
+    return sorted(x_infos, key=lambda a: a["value"]), sorted(y_infos, key=lambda a: a["value"]), h_map, v_map
 
 
-def classify_column_junction(h_seg, v_seg, x, y, min_leg_length):
-    h_left, h_right = segment_side_lengths_at_point(h_seg, x)
-    v_down, v_up = segment_side_lengths_at_point(v_seg, y)
-
-    directions = {
-        "left": h_left >= min_leg_length,
-        "right": h_right >= min_leg_length,
-        "down": v_down >= min_leg_length,
-        "up": v_up >= min_leg_length,
-    }
-
-    direction_count = sum(1 for v in directions.values() if v)
-
-    if direction_count >= 4:
-        junction_type = "cross"
-    elif direction_count == 3:
-        junction_type = "tee"
-    elif direction_count == 2:
-        junction_type = "corner"
-    else:
-        junction_type = "weak"
-
-    return junction_type, direction_count, directions
+def clone_axis_info(info, reason):
+    out = dict(info)
+    out["selected_reason"] = reason
+    return out
 
 
-def column_candidate_score(h_seg, v_seg, junction_type, direction_count):
-    h_t = int(h_seg.get("thickness", 0))
-    v_t = int(v_seg.get("thickness", 0))
+def add_axis_if_spaced(selected, candidate, min_spacing, axis_tol, reason):
+    for current in selected:
+        if abs(current["value"] - candidate["value"]) < max(min_spacing, axis_tol):
+            return False
+    selected.append(clone_axis_info(candidate, reason))
+    return True
 
-    thickness_pair = tuple(sorted([h_t, v_t], reverse=True))
 
-    if h_t == 225 and v_t == 225:
-        thickness_score = 1000
-    elif h_t == 225 or v_t == 225:
-        thickness_score = 700
-    elif h_t == 150 and v_t == 150:
-        thickness_score = 300
-    else:
-        thickness_score = 100
+def select_edge_axis(axis_infos, edge_value):
+    if not axis_infos:
+        return None
+    return min(axis_infos, key=lambda a: abs(a["value"] - edge_value))
 
-    if junction_type == "cross":
-        junction_score = 400
-    elif junction_type == "tee":
-        junction_score = 300
-    elif junction_type == "corner":
-        junction_score = 200
-    else:
-        junction_score = 50
 
-    length_score = min(segment_length(h_seg), segment_length(v_seg)) * 0.05
-    total_length_score = (segment_length(h_seg) + segment_length(v_seg)) * 0.01
+def find_best_axis_in_gap(axis_infos, left, right, min_spacing):
+    candidates = [
+        a for a in axis_infos
+        if (left + min_spacing) <= a["value"] <= (right - min_spacing)
+    ]
 
-    thickness_error_penalty = (
-        float(h_seg.get("thickness_error", 0.0))
-        + float(v_seg.get("thickness_error", 0.0))
-    ) * 50.0
+    if not candidates:
+        return None
 
-    score = (
-        thickness_score
-        + junction_score
-        + direction_count * 50
-        + length_score
-        + total_length_score
-        - thickness_error_penalty
+    mid = (left + right) / 2.0
+    gap = max(right - left, 1.0)
+
+    return max(
+        candidates,
+        key=lambda a: (
+            a["score"] - abs(a["value"] - mid) / gap * 500.0,
+            a["coverage_ratio"],
+            -abs(a["value"] - mid),
+        ),
     )
 
-    return score, thickness_pair
+
+def select_support_axes(axis_infos, low_bound, high_bound, max_spacing, min_spacing, axis_tol, strategy):
+    if not axis_infos:
+        return []
+
+    selected = []
+    low_axis = select_edge_axis(axis_infos, low_bound)
+    high_axis = select_edge_axis(axis_infos, high_bound)
+
+    if low_axis:
+        add_axis_if_spaced(selected, low_axis, 0.0, axis_tol, "outer_edge")
+    if high_axis:
+        add_axis_if_spaced(selected, high_axis, 0.0, axis_tol, "outer_edge")
+
+    if strategy == "Dense review":
+        major_threshold = 0.30
+    elif strategy == "Balanced":
+        major_threshold = 0.48
+    else:
+        major_threshold = 0.65
+
+    for axis in sorted(axis_infos, key=lambda a: a["score"], reverse=True):
+        strong_major_axis = axis["coverage_ratio"] >= major_threshold or (
+            strategy != "Economical" and axis["is_major"] and axis["segment_count"] >= 2
+        )
+        if strong_major_axis:
+            add_axis_if_spaced(selected, axis, min_spacing, axis_tol, "major_continuous_wall_axis")
+
+    guard = 0
+    while guard < 50:
+        guard += 1
+        ordered = sorted(selected, key=lambda a: a["value"])
+        largest_gap = None
+        largest_pair = None
+
+        for a, b in zip(ordered, ordered[1:]):
+            gap = b["value"] - a["value"]
+            if gap > max_spacing and (largest_gap is None or gap > largest_gap):
+                largest_gap = gap
+                largest_pair = (a, b)
+
+        if largest_pair is None:
+            break
+
+        left, right = largest_pair[0]["value"], largest_pair[1]["value"]
+        best = find_best_axis_in_gap(axis_infos, left, right, min_spacing)
+
+        if best is None:
+            break
+
+        if not add_axis_if_spaced(selected, best, min_spacing, axis_tol, "span_control"):
+            break
+
+    return sorted(selected, key=lambda a: a["value"])
+
+
+def axis_lookup(axis_infos):
+    return {round(float(a["value"]), 6): a for a in axis_infos}
+
+
+def find_axis_info_by_value(axis_infos, value, axis_tol):
+    if not axis_infos:
+        return None
+    best = min(axis_infos, key=lambda a: abs(a["value"] - value))
+    if abs(best["value"] - value) <= axis_tol:
+        return best
+    return None
+
+
+def adjacent_spans(selected_values, value):
+    ordered = sorted(selected_values)
+    if not ordered:
+        return 0.0, 0.0
+
+    idx = min(range(len(ordered)), key=lambda i: abs(ordered[i] - value))
+    left = ordered[idx] - ordered[idx - 1] if idx > 0 else 0.0
+    right = ordered[idx + 1] - ordered[idx] if idx < len(ordered) - 1 else 0.0
+    return left, right
+
+
+def supported_wall_junction(x, y, h_map, v_map, axis_tol, node_tol):
+    h_axis = closest_value(y, list(h_map.keys()))
+    v_axis = closest_value(x, list(v_map.keys()))
+
+    h_hit = h_axis is not None and abs(h_axis - y) <= axis_tol and point_on_intervals(h_map.get(h_axis, []), x, node_tol)
+    v_hit = v_axis is not None and abs(v_axis - x) <= axis_tol and point_on_intervals(v_map.get(v_axis, []), y, node_tol)
+
+    return h_hit and v_hit, h_hit, v_hit
+
+
+def column_candidate_role(x, y, region, axis_tol):
+    edge_tol = max(axis_tol * 2.0, 100.0)
+    outer_x = abs(x - region["min_x"]) <= edge_tol or abs(x - region["max_x"]) <= edge_tol
+    outer_y = abs(y - region["min_y"]) <= edge_tol or abs(y - region["max_y"]) <= edge_tol
+
+    if outer_x and outer_y:
+        return "corner"
+    if outer_x or outer_y:
+        return "perimeter"
+    return "interior"
+
+
+def score_structural_column_candidate(
+    role,
+    x_info,
+    y_info,
+    x_selected,
+    y_selected,
+    max_selected_span,
+    max_spacing,
+    has_wall_junction,
+    floor_count,
+):
+    role_score = {
+        "corner": 1600.0,
+        "perimeter": 1000.0,
+        "interior": 450.0,
+    }.get(role, 300.0)
+
+    continuity_score = 0.0
+    if x_info:
+        continuity_score += min(800.0, x_info.get("coverage_ratio", 0.0) * 700.0)
+        continuity_score += 300.0 if x_info.get("is_major") else 0.0
+        continuity_score += x_info.get("max_thickness", 0) * 0.8
+    if y_info:
+        continuity_score += min(800.0, y_info.get("coverage_ratio", 0.0) * 700.0)
+        continuity_score += 300.0 if y_info.get("is_major") else 0.0
+        continuity_score += y_info.get("max_thickness", 0) * 0.8
+
+    grid_score = 500.0 if x_selected and y_selected else -700.0
+    junction_score = 300.0 if has_wall_junction else -600.0
+    span_pressure = max(0.0, max_selected_span - (max_spacing * 0.70))
+    span_score = min(500.0, span_pressure * 0.10)
+    floor_score = min(300.0, max(0, floor_count - 1) * 35.0)
+
+    return role_score + continuity_score + grid_score + junction_score + span_score + floor_score
+
+
+def should_accept_structural_candidate(candidate, strategy):
+    if not candidate["on_selected_support_grid"]:
+        return False, "not_on_economical_support_grid"
+
+    if not candidate["has_wall_junction"]:
+        return False, "not_confirmed_wall_grid_junction"
+
+    if candidate["role"] == "corner":
+        return True, "corner_support"
+
+    if candidate["role"] == "perimeter":
+        return True, "perimeter_support_grid"
+
+    x_major = candidate.get("x_axis_major", False)
+    y_major = candidate.get("y_axis_major", False)
+    x_reason = candidate.get("x_selected_reason", "")
+    y_reason = candidate.get("y_selected_reason", "")
+    span_control = "span_control" in (x_reason, y_reason)
+
+    if strategy == "Economical":
+        if x_major and y_major and span_control:
+            return True, "interior_span_control_major_axes"
+        if x_major and y_major and candidate["governing_selected_span"] >= candidate["target_spacing"]:
+            return True, "interior_major_axis_support"
+        return False, "interior_partition_junction_filtered"
+
+    if strategy == "Balanced":
+        if x_major or y_major or span_control:
+            return True, "balanced_grid_support"
+        return False, "minor_partition_junction_filtered"
+
+    return True, "dense_review_grid_support"
+
+
+def build_region_structural_layout(
+    region,
+    axis_tol,
+    strategy,
+    max_spacing,
+    target_spacing,
+    min_spacing,
+    floor_count,
+    node_tol,
+):
+    x_infos, y_infos, h_map, v_map = build_structural_axis_infos(region, axis_tol)
+
+    selected_x_infos = select_support_axes(
+        x_infos,
+        region["min_x"],
+        region["max_x"],
+        max_spacing=max_spacing,
+        min_spacing=min_spacing,
+        axis_tol=axis_tol,
+        strategy=strategy,
+    )
+    selected_y_infos = select_support_axes(
+        y_infos,
+        region["min_y"],
+        region["max_y"],
+        max_spacing=max_spacing,
+        min_spacing=min_spacing,
+        axis_tol=axis_tol,
+        strategy=strategy,
+    )
+
+    selected_x_values = [a["value"] for a in selected_x_infos]
+    selected_y_values = [a["value"] for a in selected_y_infos]
+
+    candidates = []
+    rejected = []
+
+    for x_info in x_infos:
+        x = x_info["value"]
+        x_selected_info = find_axis_info_by_value(selected_x_infos, x, axis_tol)
+        x_selected = x_selected_info is not None
+
+        for y_info in y_infos:
+            y = y_info["value"]
+            y_selected_info = find_axis_info_by_value(selected_y_infos, y, axis_tol)
+            y_selected = y_selected_info is not None
+
+            has_junction, h_hit, v_hit = supported_wall_junction(
+                x,
+                y,
+                h_map,
+                v_map,
+                axis_tol=axis_tol,
+                node_tol=node_tol,
+            )
+
+            if not has_junction and not (x_selected and y_selected):
+                continue
+
+            role = column_candidate_role(x, y, region, axis_tol)
+            x_left, x_right = adjacent_spans(selected_x_values, x)
+            y_down, y_up = adjacent_spans(selected_y_values, y)
+            governing_span = max(x_left, x_right, y_down, y_up)
+
+            candidate = {
+                "region_id": region["region_id"],
+                "x": float(x),
+                "y": float(y),
+                "role": role,
+                "has_wall_junction": bool(has_junction),
+                "h_axis_hit": bool(h_hit),
+                "v_axis_hit": bool(v_hit),
+                "on_selected_support_grid": bool(x_selected and y_selected),
+                "x_axis_major": bool(x_info.get("is_major", False)),
+                "y_axis_major": bool(y_info.get("is_major", False)),
+                "x_axis_coverage_ratio": float(x_info.get("coverage_ratio", 0.0)),
+                "y_axis_coverage_ratio": float(y_info.get("coverage_ratio", 0.0)),
+                "x_selected_reason": x_selected_info.get("selected_reason", "") if x_selected_info else "",
+                "y_selected_reason": y_selected_info.get("selected_reason", "") if y_selected_info else "",
+                "governing_selected_span": float(governing_span),
+                "target_spacing": float(target_spacing),
+                "score": 0.0,
+                "junction_type": role,
+                "direction_count": "",
+                "h_thickness": int(y_info.get("max_thickness", 0)),
+                "v_thickness": int(x_info.get("max_thickness", 0)),
+                "thickness_pair": f"{int(y_info.get('max_thickness', 0))}/{int(x_info.get('max_thickness', 0))}",
+                "h_length": float(y_info.get("coverage", 0.0)),
+                "v_length": float(x_info.get("coverage", 0.0)),
+                "left": "",
+                "right": "",
+                "down": "",
+                "up": "",
+            }
+
+            candidate["score"] = score_structural_column_candidate(
+                role=role,
+                x_info=x_info,
+                y_info=y_info,
+                x_selected=x_selected,
+                y_selected=y_selected,
+                max_selected_span=governing_span,
+                max_spacing=max_spacing,
+                has_wall_junction=has_junction,
+                floor_count=floor_count,
+            )
+
+            accepted, reason = should_accept_structural_candidate(candidate, strategy)
+
+            if accepted:
+                candidate["layout_reason"] = reason
+                candidates.append(candidate)
+            else:
+                rejected.append({
+                    **candidate,
+                    "accepted": False,
+                    "reject_reason": reason,
+                    "nearest_accepted_x": "",
+                    "nearest_accepted_y": "",
+                    "nearest_accepted_distance": "",
+                })
+
+    warnings = []
+    for values, axis_name in [(selected_x_values, "X"), (selected_y_values, "Y")]:
+        values = sorted(values)
+        for a, b in zip(values, values[1:]):
+            gap = b - a
+            if gap > max_spacing:
+                warnings.append(f"{axis_name}-axis support gap {round(gap, 1)} exceeds selected maximum {round(max_spacing, 1)}")
+
+    return {
+        "region_id": region["region_id"],
+        "selected_x_infos": selected_x_infos,
+        "selected_y_infos": selected_y_infos,
+        "selected_x_values": selected_x_values,
+        "selected_y_values": selected_y_values,
+        "all_x_axis_count": len(x_infos),
+        "all_y_axis_count": len(y_infos),
+        "accepted_candidates": candidates,
+        "rejected_candidates": rejected,
+        "warnings": warnings,
+        "bounds": {
+            "min_x": region["min_x"],
+            "max_x": region["max_x"],
+            "min_y": region["min_y"],
+            "max_y": region["max_y"],
+        },
+        "h_map": h_map,
+        "v_map": v_map,
+    }
 
 
 def dedupe_column_candidates(candidates, point_tol):
     if not candidates:
         return []
 
-    sorted_candidates = sorted(
-        candidates,
-        key=lambda c: c["score"],
-        reverse=True,
-    )
-
+    sorted_candidates = sorted(candidates, key=lambda c: c["score"], reverse=True)
     kept = []
 
     for cand in sorted_candidates:
@@ -1151,95 +1606,11 @@ def dedupe_column_candidates(candidates, point_tol):
     return sorted(kept, key=lambda c: (c.get("region_id", 0), c["x"], c["y"]))
 
 
-def detect_column_candidates(
-    segments,
-    axis_tol,
-    column_candidate_thicknesses,
-    allow_150_150=False,
-    allow_mixed_225_150=True,
-    min_leg_length=450.0,
-    region_id=None,
-):
-    allowed = set(int(x) for x in column_candidate_thicknesses or [])
-
-    h_segments, v_segments = split_hv_segments(segments)
-    candidates = []
-
-    for h in h_segments:
-        if allowed and int(h.get("thickness", 0)) not in allowed:
-            continue
-
-        hy = h["c"]
-
-        for v in v_segments:
-            if allowed and int(v.get("thickness", 0)) not in allowed:
-                continue
-
-            vx = v["c"]
-
-            if not segment_contains_axis_value(h, vx, axis_tol):
-                continue
-            if not segment_contains_axis_value(v, hy, axis_tol):
-                continue
-
-            h_t = int(h.get("thickness", 0))
-            v_t = int(v.get("thickness", 0))
-
-            if h_t == 150 and v_t == 150 and not allow_150_150:
-                continue
-
-            if {h_t, v_t} == {225, 150} and not allow_mixed_225_150:
-                continue
-
-            junction_type, direction_count, directions = classify_column_junction(
-                h,
-                v,
-                vx,
-                hy,
-                min_leg_length=min_leg_length,
-            )
-
-            if junction_type == "weak":
-                continue
-
-            score, thickness_pair = column_candidate_score(
-                h,
-                v,
-                junction_type,
-                direction_count,
-            )
-
-            candidates.append({
-                "region_id": region_id,
-                "x": float(vx),
-                "y": float(hy),
-                "score": float(score),
-                "junction_type": junction_type,
-                "direction_count": int(direction_count),
-                "h_thickness": h_t,
-                "v_thickness": v_t,
-                "thickness_pair": f"{thickness_pair[0]}/{thickness_pair[1]}",
-                "h_length": segment_length(h),
-                "v_length": segment_length(v),
-                "left": directions["left"],
-                "right": directions["right"],
-                "down": directions["down"],
-                "up": directions["up"],
-            })
-
-    return dedupe_column_candidates(candidates, point_tol=axis_tol)
-
-
 def apply_column_proximity_filter(candidates, min_column_spacing):
     if not candidates:
         return [], []
 
-    sorted_candidates = sorted(
-        candidates,
-        key=lambda c: c["score"],
-        reverse=True,
-    )
-
+    sorted_candidates = sorted(candidates, key=lambda c: c["score"], reverse=True)
     accepted = []
     rejected = []
 
@@ -1248,10 +1619,9 @@ def apply_column_proximity_filter(candidates, min_column_spacing):
         too_close_distance = None
 
         for acc in accepted:
-            d = point_distance(
-                (cand["x"], cand["y"]),
-                (acc["x"], acc["y"]),
-            )
+            if cand.get("region_id") != acc.get("region_id"):
+                continue
+            d = point_distance((cand["x"], cand["y"]), (acc["x"], acc["y"]))
 
             if d < min_column_spacing:
                 too_close_to = acc
@@ -1271,7 +1641,7 @@ def apply_column_proximity_filter(candidates, min_column_spacing):
             rejected.append({
                 **cand,
                 "accepted": False,
-                "reject_reason": "too_close_to_stronger_column_candidate",
+                "reject_reason": "too_close_to_stronger_structural_column",
                 "nearest_accepted_x": round(too_close_to["x"], 3),
                 "nearest_accepted_y": round(too_close_to["y"], 3),
                 "nearest_accepted_distance": round(too_close_distance, 3),
@@ -1281,6 +1651,129 @@ def apply_column_proximity_filter(candidates, min_column_spacing):
     rejected = sorted(rejected, key=lambda c: (c.get("region_id", 0), c["x"], c["y"]))
 
     return accepted, rejected
+
+
+def build_structural_layout_for_regions(
+    regions,
+    axis_tol,
+    strategy,
+    max_spacing,
+    target_spacing,
+    min_spacing,
+    floor_count,
+    min_column_spacing,
+    node_tol,
+):
+    layouts = []
+    accepted_candidates = []
+    rejected_candidates = []
+
+    for region in regions:
+        layout = build_region_structural_layout(
+            region=region,
+            axis_tol=axis_tol,
+            strategy=strategy,
+            max_spacing=max_spacing,
+            target_spacing=target_spacing,
+            min_spacing=min_spacing,
+            floor_count=floor_count,
+            node_tol=node_tol,
+        )
+        layouts.append(layout)
+        accepted_candidates.extend(layout["accepted_candidates"])
+        rejected_candidates.extend(layout["rejected_candidates"])
+
+    accepted_candidates = dedupe_column_candidates(accepted_candidates, point_tol=axis_tol)
+    accepted_columns, proximity_rejected = apply_column_proximity_filter(
+        accepted_candidates,
+        min_column_spacing=min_column_spacing,
+    )
+    rejected_candidates.extend(proximity_rejected)
+
+    return layouts, accepted_columns, rejected_candidates
+
+
+def column_exists_at(columns, x, y, tol, region_id=None):
+    for c in columns:
+        if region_id is not None and c.get("region_id") != region_id:
+            continue
+        if point_distance((c["x"], c["y"]), (x, y)) <= tol:
+            return True
+    return False
+
+
+def detect_structural_grid_panels(layouts, accepted_columns, axis_tol, min_width, min_height, max_width, max_height, closure_tol):
+    panels = []
+
+    for layout in layouts:
+        region_id = layout["region_id"]
+        xs = sorted(layout["selected_x_values"])
+        ys = sorted(layout["selected_y_values"])
+        h_map = layout["h_map"]
+        v_map = layout["v_map"]
+
+        if len(xs) < 2 or len(ys) < 2:
+            continue
+
+        for i in range(len(xs) - 1):
+            x1 = xs[i]
+            x2 = xs[i + 1]
+            width = abs(x2 - x1)
+
+            if width < min_width:
+                continue
+            if max_width > 0 and width > max_width:
+                continue
+
+            for j in range(len(ys) - 1):
+                y1 = ys[j]
+                y2 = ys[j + 1]
+                height = abs(y2 - y1)
+
+                if height < min_height:
+                    continue
+                if max_height > 0 and height > max_height:
+                    continue
+
+                bottom = horizontal_edge_exists(h_map, y1, x1, x2, axis_tol, closure_tol)
+                top = horizontal_edge_exists(h_map, y2, x1, x2, axis_tol, closure_tol)
+                left = vertical_edge_exists(v_map, x1, y1, y2, axis_tol, closure_tol)
+                right = vertical_edge_exists(v_map, x2, y1, y2, axis_tol, closure_tol)
+                edge_count = sum([bottom, top, left, right])
+
+                corner_count = sum([
+                    column_exists_at(accepted_columns, x1, y1, axis_tol * 2.0, region_id),
+                    column_exists_at(accepted_columns, x2, y1, axis_tol * 2.0, region_id),
+                    column_exists_at(accepted_columns, x1, y2, axis_tol * 2.0, region_id),
+                    column_exists_at(accepted_columns, x2, y2, axis_tol * 2.0, region_id),
+                ])
+
+                if edge_count < 2 and corner_count < 3:
+                    continue
+
+                if edge_count == 4:
+                    review_status = "wall_bounded"
+                elif corner_count >= 3:
+                    review_status = "column_grid_panel_review"
+                else:
+                    review_status = "partial_edge_panel_review"
+
+                panels.append({
+                    "region_id": region_id,
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                    "width": width,
+                    "height": height,
+                    "area": width * height,
+                    "method": "structural_grid_cell",
+                    "edge_support_count": int(edge_count),
+                    "corner_support_count": int(corner_count),
+                    "review_status": review_status,
+                })
+
+    return panels
 
 
 # =========================================================
@@ -1326,19 +1819,10 @@ def collect_junction_nodes(segments, axis_tol):
 def draw_segment(msp, seg, layer):
     if seg["orientation"] == "H":
         y = seg["c"]
-        msp.add_line(
-            (seg["a"], y),
-            (seg["b"], y),
-            dxfattribs={"layer": layer},
-        )
-
+        msp.add_line((seg["a"], y), (seg["b"], y), dxfattribs={"layer": layer})
     elif seg["orientation"] == "V":
         x = seg["c"]
-        msp.add_line(
-            (x, seg["a"]),
-            (x, seg["b"]),
-            dxfattribs={"layer": layer},
-        )
+        msp.add_line((x, seg["a"]), (x, seg["b"]), dxfattribs={"layer": layer})
 
 
 def draw_segments_by_thickness(msp, segments, prefix):
@@ -1362,63 +1846,70 @@ def draw_panels(msp, panels, layer):
             (x1, y1),
         ]
 
-        msp.add_lwpolyline(
-            points,
-            close=True,
-            dxfattribs={"layer": layer},
-        )
+        msp.add_lwpolyline(points, close=True, dxfattribs={"layer": layer})
 
 
 def draw_nodes(msp, nodes, radius, layer):
     for x, y in nodes:
-        msp.add_circle(
-            center=(x, y),
-            radius=radius,
-            dxfattribs={"layer": layer},
-        )
+        msp.add_circle(center=(x, y), radius=radius, dxfattribs={"layer": layer})
 
 
-def draw_column_square(msp, x, y, size, layer):
-    half = float(size) / 2.0
+def draw_column_marker(msp, x, y, width, depth, shape, layer):
+    if shape == "Circular":
+        radius = float(width) / 2.0
+        msp.add_circle(center=(x, y), radius=radius, dxfattribs={"layer": layer})
+        cross = min(radius * 0.70, 125.0)
+    else:
+        half_w = float(width) / 2.0
+        half_d = float(depth) / 2.0
+        points = [
+            (x - half_w, y - half_d),
+            (x + half_w, y - half_d),
+            (x + half_w, y + half_d),
+            (x - half_w, y + half_d),
+            (x - half_w, y - half_d),
+        ]
+        msp.add_lwpolyline(points, close=True, dxfattribs={"layer": layer})
+        cross = min(max(float(width), float(depth)) * 0.35, 125.0)
 
-    points = [
-        (x - half, y - half),
-        (x + half, y - half),
-        (x + half, y + half),
-        (x - half, y + half),
-        (x - half, y - half),
-    ]
-
-    msp.add_lwpolyline(
-        points,
-        close=True,
-        dxfattribs={"layer": layer},
-    )
-
-    cross = min(float(size) * 0.35, 100.0)
-
-    msp.add_line(
-        (x - cross, y),
-        (x + cross, y),
-        dxfattribs={"layer": layer},
-    )
-
-    msp.add_line(
-        (x, y - cross),
-        (x, y + cross),
-        dxfattribs={"layer": layer},
-    )
+    msp.add_line((x - cross, y), (x + cross, y), dxfattribs={"layer": layer})
+    msp.add_line((x, y - cross), (x, y + cross), dxfattribs={"layer": layer})
 
 
-def draw_columns(msp, columns, column_size, layer):
+def draw_columns(msp, columns, width, depth, shape, layer):
     for c in columns:
-        draw_column_square(
+        draw_column_marker(
             msp,
             float(c["x"]),
             float(c["y"]),
-            float(column_size),
+            float(width),
+            float(depth),
+            shape,
             layer,
         )
+
+
+def draw_structural_grid_lines(msp, layouts, columns, axis_tol, layer):
+    for layout in layouts:
+        region_id = layout["region_id"]
+        xs = sorted(layout["selected_x_values"])
+        ys = sorted(layout["selected_y_values"])
+
+        for y in ys:
+            row_points = sorted(
+                [(c["x"], c["y"]) for c in columns if c.get("region_id") == region_id and abs(c["y"] - y) <= axis_tol * 2.0],
+                key=lambda p: p[0],
+            )
+            for p1, p2 in zip(row_points, row_points[1:]):
+                msp.add_line(p1, p2, dxfattribs={"layer": layer})
+
+        for x in xs:
+            col_points = sorted(
+                [(c["x"], c["y"]) for c in columns if c.get("region_id") == region_id and abs(c["x"] - x) <= axis_tol * 2.0],
+                key=lambda p: p[1],
+            )
+            for p1, p2 in zip(col_points, col_points[1:]):
+                msp.add_line(p1, p2, dxfattribs={"layer": layer})
 
 
 def build_output_dxf(
@@ -1427,12 +1918,17 @@ def build_output_dxf(
     panels,
     nodes,
     columns,
-    column_size,
+    layouts,
+    column_width,
+    column_depth,
+    column_shape,
+    axis_tol,
     draw_raw=True,
     draw_wall_centerlines=True,
     draw_panels_enabled=False,
     draw_nodes_enabled=False,
     draw_columns_enabled=True,
+    draw_structural_grid_enabled=True,
     min_output_centerline_length=0,
     export_thicknesses=None,
 ):
@@ -1444,65 +1940,53 @@ def build_output_dxf(
     raw_for_output = filter_segments_by_thickness(raw_segments, export_thicknesses)
     final_for_output = filter_segments_by_thickness(final_segments, export_thicknesses)
 
-    clean_final_segments = filter_short_segments(
-        final_for_output,
-        min_output_centerline_length,
-    )
+    clean_final_segments = filter_short_segments(final_for_output, min_output_centerline_length)
 
     all_thicknesses = sorted(
-        set(
-            [int(s["thickness"]) for s in raw_for_output]
-            + [int(s["thickness"]) for s in clean_final_segments]
-        )
+        set([int(s["thickness"]) for s in raw_for_output] + [int(s["thickness"]) for s in clean_final_segments])
     )
 
     for thickness in all_thicknesses:
         safe_layer(new_doc, f"ILS_RAW_CENTERLINE_{thickness}", color=8)
-        safe_layer(
-            new_doc,
-            f"ILS_WALL_CENTERLINE_{thickness}",
-            color=layer_color_for_thickness(thickness),
-        )
+        safe_layer(new_doc, f"ILS_WALL_CENTERLINE_{thickness}", color=layer_color_for_thickness(thickness))
 
+    safe_layer(new_doc, "ILS_STRUCTURAL_GRID_REVIEW", color=1)
     safe_layer(new_doc, "ILS_SLAB_PANEL_REVIEW", color=5)
     safe_layer(new_doc, "ILS_JUNCTION_NODE_REVIEW", color=2)
-    safe_layer(new_doc, f"ILS_COLUMN_{int(column_size)}X{int(column_size)}_REVIEW", color=6)
+
+    col_label = column_size_label(column_shape, column_width, column_depth).replace(" ", "_")
+    column_layer = f"ILS_COLUMN_{col_label}_REVIEW"
+    safe_layer(new_doc, column_layer, color=6)
 
     if draw_raw:
-        draw_segments_by_thickness(
-            new_msp,
-            raw_for_output,
-            prefix="ILS_RAW_CENTERLINE",
-        )
+        draw_segments_by_thickness(new_msp, raw_for_output, prefix="ILS_RAW_CENTERLINE")
 
     if draw_wall_centerlines:
-        draw_segments_by_thickness(
+        draw_segments_by_thickness(new_msp, clean_final_segments, prefix="ILS_WALL_CENTERLINE")
+
+    if draw_structural_grid_enabled:
+        draw_structural_grid_lines(
             new_msp,
-            clean_final_segments,
-            prefix="ILS_WALL_CENTERLINE",
+            layouts,
+            columns,
+            axis_tol=axis_tol,
+            layer="ILS_STRUCTURAL_GRID_REVIEW",
         )
 
     if draw_panels_enabled:
-        draw_panels(
-            new_msp,
-            panels,
-            layer="ILS_SLAB_PANEL_REVIEW",
-        )
+        draw_panels(new_msp, panels, layer="ILS_SLAB_PANEL_REVIEW")
 
     if draw_nodes_enabled:
-        draw_nodes(
-            new_msp,
-            nodes,
-            radius=50,
-            layer="ILS_JUNCTION_NODE_REVIEW",
-        )
+        draw_nodes(new_msp, nodes, radius=50, layer="ILS_JUNCTION_NODE_REVIEW")
 
     if draw_columns_enabled:
         draw_columns(
             new_msp,
             columns,
-            column_size=column_size,
-            layer=f"ILS_COLUMN_{int(column_size)}X{int(column_size)}_REVIEW",
+            width=column_width,
+            depth=column_depth,
+            shape=column_shape,
+            layer=column_layer,
         )
 
     return new_doc
@@ -1567,6 +2051,9 @@ def panels_to_dataframe(panels):
             "panel_id": idx,
             "region_id": p.get("region_id", ""),
             "method": p.get("method", ""),
+            "review_status": p.get("review_status", ""),
+            "edge_support_count": p.get("edge_support_count", ""),
+            "corner_support_count": p.get("corner_support_count", ""),
             "x1": round(p["x1"], 3),
             "y1": round(p["y1"], 3),
             "x2": round(p["x2"], 3),
@@ -1588,7 +2075,14 @@ def columns_to_dataframe(columns):
             "region_id": c.get("region_id", ""),
             "x": round(float(c["x"]), 3),
             "y": round(float(c["y"]), 3),
-            "score": round(float(c["score"]), 3),
+            "score": round(float(c.get("score", 0.0)), 3),
+            "role": c.get("role", ""),
+            "layout_reason": c.get("layout_reason", ""),
+            "governing_selected_span": round(float(c.get("governing_selected_span", 0.0)), 3),
+            "x_selected_reason": c.get("x_selected_reason", ""),
+            "y_selected_reason": c.get("y_selected_reason", ""),
+            "x_axis_major": c.get("x_axis_major", ""),
+            "y_axis_major": c.get("y_axis_major", ""),
             "junction_type": c.get("junction_type", ""),
             "direction_count": c.get("direction_count", ""),
             "h_thickness": c.get("h_thickness", ""),
@@ -1596,10 +2090,6 @@ def columns_to_dataframe(columns):
             "thickness_pair": c.get("thickness_pair", ""),
             "h_length": round(float(c.get("h_length", 0.0)), 3),
             "v_length": round(float(c.get("v_length", 0.0)), 3),
-            "left": c.get("left", ""),
-            "right": c.get("right", ""),
-            "down": c.get("down", ""),
-            "up": c.get("up", ""),
             "accepted": c.get("accepted", ""),
             "reject_reason": c.get("reject_reason", ""),
             "nearest_accepted_x": c.get("nearest_accepted_x", ""),
@@ -1628,6 +2118,26 @@ def regions_to_dataframe(regions):
     return pd.DataFrame(rows)
 
 
+def structural_layouts_to_dataframe(layouts):
+    rows = []
+
+    for layout in layouts:
+        sx = sorted(layout.get("selected_x_values", []))
+        sy = sorted(layout.get("selected_y_values", []))
+        rows.append({
+            "region_id": layout["region_id"],
+            "all_x_axis_count": layout.get("all_x_axis_count", 0),
+            "all_y_axis_count": layout.get("all_y_axis_count", 0),
+            "selected_x_axis_count": len(sx),
+            "selected_y_axis_count": len(sy),
+            "selected_x_axes": ", ".join(str(round(v, 3)) for v in sx),
+            "selected_y_axes": ", ".join(str(round(v, 3)) for v in sy),
+            "warnings": " | ".join(layout.get("warnings", [])),
+        })
+
+    return pd.DataFrame(rows)
+
+
 def centerline_accuracy_summary(raw_segments):
     if not raw_segments:
         return {
@@ -1638,7 +2148,6 @@ def centerline_accuracy_summary(raw_segments):
         }
 
     errors = [abs(float(s.get("thickness_error", 0.0))) for s in raw_segments]
-
     near_perfect = len([e for e in errors if e <= 1.0])
 
     return {
@@ -1652,15 +2161,6 @@ def centerline_accuracy_summary(raw_segments):
 # =========================================================
 # STREAMLIT UI
 # =========================================================
-
-st.info(
-    "This MVP works best when architectural walls are drawn as LINE, LWPOLYLINE, or POLYLINE wall faces. "
-    "It currently focuses on orthogonal walls."
-)
-
-st.warning(
-    "Columns and slab panels are review geometry. Final structural design must be reviewed by an engineer."
-)
 
 st.markdown("### 1. Upload Architectural DXF")
 
@@ -1682,7 +2182,114 @@ except Exception as e:
     st.stop()
 
 
-st.markdown("### 2. Detection Settings")
+st.markdown("### 2. Detection and Structural Settings")
+
+with st.expander("Design code, floors, and preliminary structural rules", expanded=True):
+    d1, d2, d3 = st.columns(3)
+
+    design_code = d1.selectbox(
+        "Design code profile",
+        list(DESIGN_CODE_PROFILES.keys()),
+        index=0,
+        help="Used for preliminary layout limits only. Final code design still requires engineering calculations.",
+    )
+
+    building_use = d2.selectbox(
+        "Building use",
+        ["Residential", "Office / commercial", "School / assembly", "Retail", "Storage / heavy loading"],
+        index=0,
+    )
+
+    floor_count = d3.number_input(
+        "Number of floors supported",
+        min_value=1,
+        value=2,
+        step=1,
+        help="Used to suggest a practical starting column size and to raise the column selection priority.",
+    )
+
+    profile = DESIGN_CODE_PROFILES[design_code]
+
+    d4, d5, d6, d7 = st.columns(4)
+
+    target_column_spacing = d4.number_input(
+        "Target column spacing",
+        min_value=1000.0,
+        value=float(profile["target_column_spacing"]),
+        step=250.0,
+    )
+
+    max_column_spacing = d5.number_input(
+        "Maximum column/support spacing",
+        min_value=1000.0,
+        value=float(profile["max_column_spacing"]),
+        step=250.0,
+        help="If selected supports are farther apart than this, the engine tries to add a stronger axis inside the gap.",
+    )
+
+    min_structural_axis_spacing = d6.number_input(
+        "Minimum structural axis spacing",
+        min_value=500.0,
+        value=float(profile["min_column_spacing"]),
+        step=100.0,
+        help="Prevents the engine from accepting many close partition intersections as columns.",
+    )
+
+    max_panel_span_from_code = d7.number_input(
+        "Maximum slab panel span",
+        min_value=1000.0,
+        value=float(profile["max_panel_span"]),
+        step=250.0,
+    )
+
+with st.expander("Column type and sizing", expanded=True):
+    cs1, cs2, cs3 = st.columns(3)
+
+    column_shape = cs1.selectbox(
+        "Column type",
+        ["Square", "Rectangular", "Circular"],
+        index=0,
+    )
+
+    suggested_sizes = preliminary_column_size_options(floor_count, building_use, column_shape)
+    suggested_labels = [column_size_label(column_shape, w, d) for w, d in suggested_sizes]
+
+    column_size_mode = cs2.selectbox(
+        "Column size mode",
+        ["Use suggested size", "Choose manually"],
+        index=0,
+    )
+
+    if column_size_mode == "Use suggested size":
+        suggested_choice = cs3.selectbox(
+            "Suggested preliminary size",
+            suggested_labels,
+            index=0,
+        )
+        suggested_index = suggested_labels.index(suggested_choice)
+        column_width, column_depth = suggested_sizes[suggested_index]
+    else:
+        manual1, manual2 = cs3.columns(2)
+        column_width = manual1.number_input(
+            "Width / diameter",
+            min_value=100.0,
+            value=300.0,
+            step=25.0,
+        )
+        if column_shape == "Circular":
+            column_depth = column_width
+        else:
+            column_depth = manual2.number_input(
+                "Depth",
+                min_value=100.0,
+                value=300.0,
+                step=25.0,
+            )
+
+    st.caption(
+        f"Selected preliminary column: {column_shape} {column_size_label(column_shape, column_width, column_depth)}. "
+        "This is a starting size, not a completed design check."
+    )
 
 with st.expander("Wall source layers", expanded=True):
     use_all_layers = st.checkbox(
@@ -1700,14 +2307,10 @@ with st.expander("Wall source layers", expanded=True):
             default=layers,
         )
 
-
 with st.expander("Geometry tolerances", expanded=True):
     c1, c2, c3 = st.columns(3)
 
-    wall_thickness_text = c1.text_input(
-        "Wall thicknesses to detect",
-        value="225,150",
-    )
+    wall_thickness_text = c1.text_input("Wall thicknesses to detect", value="225,150")
 
     thickness_tol = c2.number_input(
         "Wall thickness tolerance",
@@ -1768,7 +2371,6 @@ with st.expander("Geometry tolerances", expanded=True):
         index=1,
     )
 
-
 with st.expander("Output mode and cleanup", expanded=True):
     o1, o2, o3 = st.columns(3)
 
@@ -1807,18 +2409,13 @@ with st.expander("Output mode and cleanup", expanded=True):
         step=50.0,
     )
 
-    export_junction_nodes = o6.checkbox(
-        "Export junction nodes",
-        value=False,
-    )
-
+    export_junction_nodes = o6.checkbox("Export junction nodes", value=False)
 
 wall_thicknesses = parse_wall_thicknesses(wall_thickness_text)
 
 if not wall_thicknesses:
     st.error("Enter at least one wall thickness, for example: 225,150")
     st.stop()
-
 
 with st.expander("Wall thickness export", expanded=True):
     export_wall_thicknesses = st.multiselect(
@@ -1830,7 +2427,6 @@ with st.expander("Wall thickness export", expanded=True):
 if not export_wall_thicknesses:
     st.warning("Select at least one wall thickness to export.")
     st.stop()
-
 
 with st.expander("Multiple plan / region settings", expanded=True):
     r1, r2 = st.columns(2)
@@ -1849,77 +2445,56 @@ with st.expander("Multiple plan / region settings", expanded=True):
         help="Geometry farther apart than this is treated as separate regions.",
     )
 
-
-with st.expander("Column suggestion settings", expanded=True):
+with st.expander("Smart column layout settings", expanded=True):
     col1, col2, col3 = st.columns(3)
 
-    generate_columns = col1.checkbox(
-        "Generate column suggestions",
-        value=True,
-    )
+    generate_columns = col1.checkbox("Generate smart structural columns", value=True)
 
-    column_size = col2.number_input(
-        "Column size",
-        min_value=100.0,
-        value=225.0,
-        step=25.0,
+    column_layout_strategy = col2.selectbox(
+        "Column economy strategy",
+        ["Economical", "Balanced", "Dense review"],
+        index=0,
+        help="Economical filters minor partitions hardest. Dense review keeps more selected-grid intersections for checking.",
     )
 
     min_column_spacing = col3.number_input(
         "Minimum column spacing",
         min_value=0.0,
-        value=1800.0,
+        value=max(1800.0, float(profile["min_column_spacing"])),
         step=100.0,
     )
 
     col4, col5, col6 = st.columns(3)
 
-    default_column_thicknesses = [225] if 225 in wall_thicknesses else wall_thicknesses
-
-    column_candidate_thicknesses = col4.multiselect(
-        "Use wall thicknesses for column candidates",
-        options=wall_thicknesses,
-        default=default_column_thicknesses,
-    )
-
-    allow_mixed_225_150 = col5.checkbox(
-        "Allow 225/150 mixed junctions",
-        value=True,
-    )
-
-    allow_150_150_columns = col6.checkbox(
-        "Allow 150/150 junctions",
-        value=False,
-    )
-
-    col7, col8 = st.columns(2)
-
-    min_column_leg_length = col7.number_input(
-        "Minimum connected wall leg length",
+    structural_node_tol = col4.number_input(
+        "Wall/grid node tolerance",
         min_value=0.0,
-        value=450.0,
-        step=50.0,
+        value=max(250.0, axis_tol * 3.0),
+        step=25.0,
+        help="Lets a column sit on a near wall-grid intersection after centerline cleanup.",
     )
 
-    export_columns = col8.checkbox(
-        "Export columns",
+    export_columns = col5.checkbox("Export columns", value=True)
+
+    export_structural_grid = col6.checkbox(
+        "Export structural grid/beam lines",
         value=True,
+        help="Draws review grid lines through accepted columns, useful for seeing the intended engineer-style layout.",
     )
 
-
-with st.expander("Graph slab panel settings", expanded=True):
+with st.expander("Slab panel settings", expanded=True):
     p1, p2, p3 = st.columns(3)
 
-    run_graph_slab_detection = p1.checkbox(
-        "Run graph-based slab panel detection",
-        value=True,
-        help="Uses final wall centerline graph per region.",
+    slab_panel_method = p1.selectbox(
+        "Panel creation method",
+        ["Structural grid panels", "Wall-bounded graph panels", "Both"],
+        index=0,
     )
 
     export_slab_panels = p2.checkbox(
         "Export slab panels",
         value=True,
-        help="Exports graph slab panels to ILS_SLAB_PANEL_REVIEW.",
+        help="Exports slab panel review rectangles to ILS_SLAB_PANEL_REVIEW.",
     )
 
     panel_closure_tol = p3.number_input(
@@ -1927,43 +2502,28 @@ with st.expander("Graph slab panel settings", expanded=True):
         min_value=0.0,
         value=150.0,
         step=25.0,
-        help="Allows small gaps during slab panel recognition only.",
     )
 
     p4, p5, p6, p7 = st.columns(4)
 
-    min_panel_width = p4.number_input(
-        "Minimum panel width",
-        min_value=0.0,
-        value=1200.0,
-        step=100.0,
-    )
-
-    min_panel_height = p5.number_input(
-        "Minimum panel height",
-        min_value=0.0,
-        value=1200.0,
-        step=100.0,
-    )
-
+    min_panel_width = p4.number_input("Minimum panel width", min_value=0.0, value=1200.0, step=100.0)
+    min_panel_height = p5.number_input("Minimum panel height", min_value=0.0, value=1200.0, step=100.0)
     max_panel_width = p6.number_input(
         "Maximum panel width",
         min_value=0.0,
-        value=9000.0,
+        value=max_panel_span_from_code,
         step=500.0,
         help="0 means no maximum.",
     )
-
     max_panel_height = p7.number_input(
         "Maximum panel height",
         min_value=0.0,
-        value=9000.0,
+        value=max_panel_span_from_code,
         step=500.0,
         help="0 means no maximum.",
     )
 
-
-analyze = st.button("🔎 Analyze Architectural Walls", type="primary")
+analyze = st.button("Analyze Architectural Walls", type="primary")
 
 if not analyze:
     st.stop()
@@ -1988,19 +2548,15 @@ vertical_faces = extracted["vertical"]
 st.markdown("### 3. Extraction Summary")
 
 e1, e2, e3 = st.columns(3)
-
 e1.metric("Horizontal wall-face lines", len(horizontal_faces))
 e2.metric("Vertical wall-face lines", len(vertical_faces))
 e3.metric("Ignored / non-orthogonal", extracted["ignored"])
 
 if len(horizontal_faces) + len(vertical_faces) == 0:
-    st.error(
-        "No horizontal/vertical wall face lines found. Check layer selection or entity types."
-    )
+    st.error("No horizontal/vertical wall face lines found. Check layer selection or entity types.")
     st.stop()
 
-
-with st.spinner("Detecting accurate midpoint wall centerlines..."):
+with st.spinner("Detecting midpoint wall centerlines..."):
     raw_segments = detect_centerlines_from_face_pairs(
         horizontal_faces=horizontal_faces,
         vertical_faces=vertical_faces,
@@ -2011,13 +2567,8 @@ with st.spinner("Detecting accurate midpoint wall centerlines..."):
 
 accuracy = centerline_accuracy_summary(raw_segments)
 
-
 with st.spinner("Healing centerlines..."):
-    merged_segments = merge_collinear_segments(
-        raw_segments,
-        axis_tol=axis_tol,
-        bridge_gap=bridge_gap,
-    )
+    merged_segments = merge_collinear_segments(raw_segments, axis_tol=axis_tol, bridge_gap=bridge_gap)
 
     if extension_mode == "Off":
         effective_extend_tol = 0.0
@@ -2041,7 +2592,6 @@ with st.spinner("Healing centerlines..."):
         bridge_gap=axis_tol,
     )
 
-
 with st.spinner("Cleaning duplicate centerlines..."):
     if overlap_cleanup_enabled:
         final_segments, removed_overlap_segments = resolve_overlapping_centerlines(
@@ -2054,23 +2604,12 @@ with st.spinner("Cleaning duplicate centerlines..."):
         final_segments = extended_segments
         removed_overlap_segments = []
 
-
-selected_final_segments = filter_segments_by_thickness(
-    final_segments,
-    export_wall_thicknesses,
-)
+selected_final_segments = filter_segments_by_thickness(final_segments, export_wall_thicknesses)
 
 if output_mode == "Clean structural mode":
-    clean_export_segments = filter_short_segments(
-        selected_final_segments,
-        min_output_centerline_length,
-    )
+    clean_export_segments = filter_short_segments(selected_final_segments, min_output_centerline_length)
 else:
-    clean_export_segments = filter_short_segments(
-        selected_final_segments,
-        0.0,
-    )
-
+    clean_export_segments = filter_short_segments(selected_final_segments, 0.0)
 
 with st.spinner("Separating plan regions..."):
     if auto_separate_regions:
@@ -2086,63 +2625,106 @@ with st.spinner("Separating plan regions..."):
             ss["region_id"] = 1
             region_segments.append(ss)
 
-        regions = [{
-            "region_id": 1,
-            "segments": region_segments,
-            "min_x": min([s["a"] if s["orientation"] == "H" else s["c"] for s in region_segments]) if region_segments else 0,
-            "max_x": max([s["b"] if s["orientation"] == "H" else s["c"] for s in region_segments]) if region_segments else 0,
-            "min_y": min([s["c"] if s["orientation"] == "H" else s["a"] for s in region_segments]) if region_segments else 0,
-            "max_y": max([s["c"] if s["orientation"] == "H" else s["b"] for s in region_segments]) if region_segments else 0,
-            "width": 0,
-            "height": 0,
-            "segment_count": len(region_segments),
-        }]
+        if region_segments:
+            xs = []
+            ys = []
+            for s in region_segments:
+                if s["orientation"] == "H":
+                    xs.extend([s["a"], s["b"]])
+                    ys.append(s["c"])
+                else:
+                    xs.append(s["c"])
+                    ys.extend([s["a"], s["b"]])
+            regions = [{
+                "region_id": 1,
+                "segments": region_segments,
+                "min_x": min(xs),
+                "max_x": max(xs),
+                "min_y": min(ys),
+                "max_y": max(ys),
+                "width": max(xs) - min(xs),
+                "height": max(ys) - min(ys),
+                "segment_count": len(region_segments),
+            }]
+        else:
+            regions = []
 
+if not regions:
+    st.error("No usable plan regions were created after filtering. Lower the output length filter or check wall thickness selection.")
+    st.stop()
 
-with st.spinner("Generating region-aware columns..."):
-    raw_column_candidates = []
+with st.spinner("Building smart structural grid and economical columns..."):
+    structural_layouts = []
     accepted_columns = []
     rejected_columns = []
 
-    if generate_columns and column_candidate_thicknesses:
+    if generate_columns:
+        structural_layouts, accepted_columns, rejected_columns = build_structural_layout_for_regions(
+            regions=regions,
+            axis_tol=axis_tol,
+            strategy=column_layout_strategy,
+            max_spacing=max_column_spacing,
+            target_spacing=target_column_spacing,
+            min_spacing=min_structural_axis_spacing,
+            floor_count=floor_count,
+            min_column_spacing=min_column_spacing,
+            node_tol=structural_node_tol,
+        )
+    else:
         for region in regions:
-            candidates = detect_column_candidates(
-                region["segments"],
-                axis_tol=axis_tol,
-                column_candidate_thicknesses=column_candidate_thicknesses,
-                allow_150_150=allow_150_150_columns,
-                allow_mixed_225_150=allow_mixed_225_150,
-                min_leg_length=min_column_leg_length,
-                region_id=region["region_id"],
-            )
+            x_infos, y_infos, h_map, v_map = build_structural_axis_infos(region, axis_tol)
+            structural_layouts.append({
+                "region_id": region["region_id"],
+                "selected_x_infos": [],
+                "selected_y_infos": [],
+                "selected_x_values": [],
+                "selected_y_values": [],
+                "all_x_axis_count": len(x_infos),
+                "all_y_axis_count": len(y_infos),
+                "accepted_candidates": [],
+                "rejected_candidates": [],
+                "warnings": [],
+                "bounds": {
+                    "min_x": region["min_x"],
+                    "max_x": region["max_x"],
+                    "min_y": region["min_y"],
+                    "max_y": region["max_y"],
+                },
+                "h_map": h_map,
+                "v_map": v_map,
+            })
 
-            accepted, rejected = apply_column_proximity_filter(
-                candidates,
-                min_column_spacing=min_column_spacing,
-            )
-
-            raw_column_candidates.extend(candidates)
-            accepted_columns.extend(accepted)
-            rejected_columns.extend(rejected)
-
-
-with st.spinner("Detecting graph slab panels per region..."):
+with st.spinner("Creating slab panels..."):
     panels = []
 
-    if run_graph_slab_detection:
+    if slab_panel_method in ["Wall-bounded graph panels", "Both"]:
         for region in regions:
-            region_panels = detect_graph_slab_panels(
-                region["segments"],
-                axis_tol=axis_tol,
-                closure_tol=panel_closure_tol,
-                min_panel_width=min_panel_width,
-                min_panel_height=min_panel_height,
-                max_panel_width=max_panel_width,
-                max_panel_height=max_panel_height,
-                region_id=region["region_id"],
+            panels.extend(
+                detect_graph_slab_panels(
+                    region["segments"],
+                    axis_tol=axis_tol,
+                    closure_tol=panel_closure_tol,
+                    min_panel_width=min_panel_width,
+                    min_panel_height=min_panel_height,
+                    max_panel_width=max_panel_width,
+                    max_panel_height=max_panel_height,
+                    region_id=region["region_id"],
+                )
             )
 
-            panels.extend(region_panels)
+    if slab_panel_method in ["Structural grid panels", "Both"]:
+        panels.extend(
+            detect_structural_grid_panels(
+                structural_layouts,
+                accepted_columns,
+                axis_tol=axis_tol,
+                min_width=min_panel_width,
+                min_height=min_panel_height,
+                max_width=max_panel_width,
+                max_height=max_panel_height,
+                closure_tol=panel_closure_tol,
+            )
+        )
 
     nodes = collect_junction_nodes(region_segments, axis_tol=axis_tol)
 
@@ -2151,34 +2733,40 @@ with st.spinner("Detecting graph slab panels per region..."):
 # SUMMARY
 # =========================================================
 
-st.markdown("### 4. Accuracy / Region / Output Summary")
+st.markdown("### 4. Accuracy / Structural Layout Summary")
 
 a1, a2, a3, a4 = st.columns(4)
-
 a1.metric("Raw midpoint centerlines", len(raw_segments))
 a2.metric("Avg thickness error", round(accuracy["avg_thickness_error"], 3))
 a3.metric("Max thickness error", round(accuracy["max_thickness_error"], 3))
-a4.metric("Near-perfect ≤ 1mm", accuracy["perfect_or_near_perfect"])
+a4.metric("Near-perfect <= 1mm", accuracy["perfect_or_near_perfect"])
 
 r1, r2, r3, r4 = st.columns(4)
-
 r1.metric("Detected plan regions", len(regions))
 r2.metric("Final wall centerlines", len(region_segments))
 r3.metric("Accepted columns", len(accepted_columns))
-r4.metric("Graph slab panels", len(panels))
+r4.metric("Slab panels", len(panels))
 
 c1, c2, c3, c4 = st.columns(4)
-
 c1.metric("After gap bridging", len(merged_segments))
 c2.metric("After extension", len(extended_segments))
 c3.metric("Removed overlaps", len(removed_overlap_segments))
-c4.metric("Rejected columns", len(rejected_columns))
+c4.metric("Rejected column candidates", len(rejected_columns))
+
+warnings = []
+for layout in structural_layouts:
+    warnings.extend([f"Region {layout['region_id']}: {w}" for w in layout.get("warnings", [])])
+
+if warnings:
+    st.warning("Structural layout warnings: " + " | ".join(warnings))
 
 st.info(
+    f"Design profile: **{design_code}**. "
+    f"Floors: **{floor_count}**. "
+    f"Column strategy: **{column_layout_strategy}**. "
+    f"Column: **{column_shape} {column_size_label(column_shape, column_width, column_depth)}**. "
     f"Output mode: **{output_mode}**. "
-    f"Extension mode: **{extension_mode}** with effective tolerance **{round(effective_extend_tol, 3)}**. "
-    f"Plan region separation: **{'ON' if auto_separate_regions else 'OFF'}**. "
-    f"Slab panels use graph detection per region."
+    f"Panel method: **{slab_panel_method}**."
 )
 
 
@@ -2188,15 +2776,16 @@ st.info(
 
 st.markdown("### 5. Preview Tables")
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
     [
         "Regions",
-        "Raw Accurate Centerlines",
+        "Structural Grid",
+        "Raw Centerlines",
         "Final Region Centerlines",
         "Removed Overlaps",
         "Accepted Columns",
         "Rejected Columns",
-        "Graph Slab Panels",
+        "Slab Panels",
     ]
 )
 
@@ -2207,89 +2796,102 @@ with tab1:
     else:
         st.dataframe(regions_df, use_container_width=True)
         st.download_button(
-            "📄 Download Regions CSV",
+            "Download Regions CSV",
             data=regions_df.to_csv(index=False).encode("utf-8"),
             file_name="ILS_PLAN_REGIONS.csv",
             mime="text/csv",
         )
 
 with tab2:
+    layout_df = structural_layouts_to_dataframe(structural_layouts)
+    if layout_df.empty:
+        st.info("No structural grid layout.")
+    else:
+        st.dataframe(layout_df, use_container_width=True)
+        st.download_button(
+            "Download Structural Grid CSV",
+            data=layout_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_STRUCTURAL_GRID_REVIEW.csv",
+            mime="text/csv",
+        )
+
+with tab3:
     raw_df = segments_to_dataframe(raw_segments)
     if raw_df.empty:
         st.info("No raw centerlines.")
     else:
         st.dataframe(raw_df, use_container_width=True)
         st.download_button(
-            "📄 Download Raw Accurate Centerlines CSV",
+            "Download Raw Centerlines CSV",
             data=raw_df.to_csv(index=False).encode("utf-8"),
             file_name="ILS_RAW_ACCURATE_CENTERLINES.csv",
             mime="text/csv",
         )
 
-with tab3:
+with tab4:
     final_df = segments_to_dataframe(region_segments)
     if final_df.empty:
         st.info("No final region centerlines.")
     else:
         st.dataframe(final_df, use_container_width=True)
         st.download_button(
-            "📄 Download Final Region Centerlines CSV",
+            "Download Final Region Centerlines CSV",
             data=final_df.to_csv(index=False).encode("utf-8"),
             file_name="ILS_FINAL_REGION_CENTERLINES.csv",
             mime="text/csv",
         )
 
-with tab4:
+with tab5:
     removed_df = removed_segments_to_dataframe(removed_overlap_segments)
     if removed_df.empty:
         st.info("No overlapping centerlines removed.")
     else:
         st.dataframe(removed_df, use_container_width=True)
         st.download_button(
-            "📄 Download Removed Overlaps CSV",
+            "Download Removed Overlaps CSV",
             data=removed_df.to_csv(index=False).encode("utf-8"),
             file_name="ILS_REMOVED_OVERLAPS.csv",
             mime="text/csv",
         )
 
-with tab5:
+with tab6:
     accepted_columns_df = columns_to_dataframe(accepted_columns)
     if accepted_columns_df.empty:
         st.info("No accepted columns.")
     else:
-        st.warning("Column suggestions are review geometry only.")
+        st.warning("Column suggestions are preliminary review geometry only.")
         st.dataframe(accepted_columns_df, use_container_width=True)
         st.download_button(
-            "📄 Download Accepted Columns CSV",
+            "Download Accepted Columns CSV",
             data=accepted_columns_df.to_csv(index=False).encode("utf-8"),
             file_name="ILS_ACCEPTED_COLUMNS_REVIEW.csv",
             mime="text/csv",
         )
 
-with tab6:
+with tab7:
     rejected_columns_df = columns_to_dataframe(rejected_columns)
     if rejected_columns_df.empty:
         st.info("No rejected columns.")
     else:
         st.dataframe(rejected_columns_df, use_container_width=True)
         st.download_button(
-            "📄 Download Rejected Columns CSV",
+            "Download Rejected Columns CSV",
             data=rejected_columns_df.to_csv(index=False).encode("utf-8"),
             file_name="ILS_REJECTED_COLUMNS.csv",
             mime="text/csv",
         )
 
-with tab7:
+with tab8:
     panels_df = panels_to_dataframe(panels)
     if panels_df.empty:
-        st.info("No graph slab panels detected.")
+        st.info("No slab panels detected.")
     else:
-        st.warning("Slab panels are graph-based review geometry. Verify before structural modelling.")
+        st.warning("Slab panels are review geometry. Verify all spans and edge conditions before structural modelling.")
         st.dataframe(panels_df, use_container_width=True)
         st.download_button(
-            "📄 Download Graph Slab Panels CSV",
+            "Download Slab Panels CSV",
             data=panels_df.to_csv(index=False).encode("utf-8"),
-            file_name="ILS_GRAPH_SLAB_PANELS_REVIEW.csv",
+            file_name="ILS_SLAB_PANELS_REVIEW.csv",
             mime="text/csv",
         )
 
@@ -2302,13 +2904,10 @@ st.markdown("### 6. Download Structural Review DXF")
 
 if output_mode == "Review mode":
     draw_raw_output = True
-    draw_nodes_output = export_junction_nodes
     clean_length = 0.0
 else:
     draw_raw_output = False
-    draw_nodes_output = export_junction_nodes
     clean_length = min_output_centerline_length
-
 
 output_doc = build_output_dxf(
     raw_segments=raw_segments,
@@ -2316,33 +2915,36 @@ output_doc = build_output_dxf(
     panels=panels,
     nodes=nodes,
     columns=accepted_columns,
-    column_size=column_size,
+    layouts=structural_layouts,
+    column_width=column_width,
+    column_depth=column_depth,
+    column_shape=column_shape,
+    axis_tol=axis_tol,
     draw_raw=draw_raw_output,
     draw_wall_centerlines=True,
     draw_panels_enabled=export_slab_panels,
-    draw_nodes_enabled=draw_nodes_output,
+    draw_nodes_enabled=export_junction_nodes,
     draw_columns_enabled=export_columns,
+    draw_structural_grid_enabled=export_structural_grid,
     min_output_centerline_length=clean_length,
     export_thicknesses=export_wall_thicknesses,
 )
 
 output_bytes = write_doc_to_bytes(output_doc)
-
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 if output_mode == "Clean structural mode":
-    output_filename = f"ILS_CLEAN_CENTERLINES_COLUMNS_SLABS_{timestamp}.dxf"
+    output_filename = f"ILS_SMART_STRUCTURAL_LAYOUT_{timestamp}.dxf"
 else:
-    output_filename = f"ILS_REVIEW_CENTERLINES_COLUMNS_SLABS_{timestamp}.dxf"
-
+    output_filename = f"ILS_REVIEW_STRUCTURAL_LAYOUT_{timestamp}.dxf"
 
 st.download_button(
-    "📥 Download Centerlines + Columns + Slab Panels DXF",
+    "Download Centerlines + Smart Columns + Slab Panels DXF",
     data=output_bytes,
     file_name=output_filename,
     mime="application/dxf",
 )
 
 st.success(
-    "Analysis complete. The DXF contains region-aware wall centerlines, preliminary columns, and graph-based slab panel review geometry."
+    "Analysis complete. The DXF now separates wall centerlines from a smarter structural grid, economical column suggestions, and slab panel review geometry."
 )
