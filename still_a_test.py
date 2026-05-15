@@ -1921,6 +1921,226 @@ def validate_axis_group_purity(groups, family_name):
 
     return blockers
 
+# =========================================================
+# SMART SUBDIVISION SYNC HELPERS
+# =========================================================
+
+def number_to_letters(n):
+    # 1 -> A, 2 -> B, 27 -> AA
+    n = int(n)
+    out = ""
+
+    while n > 0:
+        n -= 1
+        out = chr(65 + (n % 26)) + out
+        n //= 26
+
+    return out
+
+
+def numeric_subdivision_label(base_label, step):
+    if step <= 0:
+        return clean_text(base_label)
+
+    return f"{clean_text(base_label)}{number_to_letters(step)}"
+
+
+def alpha_subdivision_label(base_label, step):
+    if step <= 0:
+        return clean_text(base_label)
+
+    if step == 1:
+        return f"{clean_text(base_label)}'"
+
+    if step == 2:
+        return f'{clean_text(base_label)}"'
+
+    return f"{clean_text(base_label)}" + ("'" * step)
+
+
+def smart_subdivision_label(start_label, end_label, step, span, family_name):
+    start_label = clean_text(start_label)
+    end_label = clean_text(end_label)
+
+    if step <= 0:
+        return start_label
+
+    if step >= span:
+        return end_label
+
+    if family_name == "numeric":
+        return numeric_subdivision_label(start_label, step)
+
+    return alpha_subdivision_label(start_label, step)
+
+
+def axis_position_ratios(groups):
+    if not groups:
+        return []
+
+    if len(groups) == 1:
+        return [0.0]
+
+    first = float(groups[0].get("coord", 0.0))
+    last = float(groups[-1].get("coord", 0.0))
+    denom = last - first
+
+    if abs(denom) < 1e-9:
+        return [i / (len(groups) - 1) for i in range(len(groups))]
+
+    return [
+        (float(g.get("coord", 0.0)) - first) / denom
+        for g in groups
+    ]
+
+
+def smart_anchor_indexes(source_groups, target_groups):
+    source_count = len(source_groups)
+    target_count = len(target_groups)
+
+    if source_count <= 1:
+        return [0]
+
+    if source_count == target_count:
+        return list(range(target_count))
+
+    source_ratios = axis_position_ratios(source_groups)
+    target_ratios = axis_position_ratios(target_groups)
+
+    anchors = []
+
+    for ratio in source_ratios:
+        nearest = min(
+            range(target_count),
+            key=lambda i: abs(target_ratios[i] - ratio),
+        )
+        anchors.append(nearest)
+
+    anchors[0] = 0
+    anchors[-1] = target_count - 1
+
+    for i in range(1, source_count - 1):
+        min_allowed = anchors[i - 1] + 1
+        max_allowed = target_count - (source_count - i)
+        anchors[i] = min(max(anchors[i], min_allowed), max_allowed)
+
+    for i in range(source_count - 2, 0, -1):
+        min_allowed = i
+        max_allowed = anchors[i + 1] - 1
+        anchors[i] = min(max(anchors[i], min_allowed), max_allowed)
+
+    return anchors
+
+
+def build_smart_axis_label_map(source_groups, target_groups, family_name):
+    blockers = []
+    warnings = []
+
+    source_count = len(source_groups)
+    target_count = len(target_groups)
+
+    if source_count == 0:
+        blockers.append(f"No source {family_name} axes were detected.")
+        return [], blockers, warnings
+
+    if target_count == 0:
+        blockers.append(f"No target {family_name} axes were detected.")
+        return [], blockers, warnings
+
+    if target_count < source_count:
+        blockers.append(
+            f"{family_name.title()} axis count mismatch: found {target_count}, expected at least {source_count}. "
+            "Missing target axes cannot be safely inferred automatically."
+        )
+        return [], blockers, warnings
+
+    if target_count > source_count:
+        warnings.append(
+            f"{family_name.title()} target has {target_count} axes but reference has {source_count}. "
+            "Smart subdivision labels will be generated for the extra target axes."
+        )
+
+    rows_by_target_index = {}
+
+    if source_count == 1:
+        base_label = clean_text(source_groups[0].get("label", ""))
+
+        for target_index, target_group in enumerate(target_groups):
+            if family_name == "numeric":
+                new_label = numeric_subdivision_label(base_label, target_index)
+            else:
+                new_label = alpha_subdivision_label(base_label, target_index)
+
+            rows_by_target_index[target_index] = {
+                "target_group": target_group,
+                "target_index": target_index + 1,
+                "source_start_label": base_label,
+                "source_end_label": "",
+                "new_label": new_label,
+                "subdivision_step": target_index,
+                "subdivision_span": target_count - 1,
+            }
+
+        return [rows_by_target_index[i] for i in sorted(rows_by_target_index)], blockers, warnings
+
+    anchors = smart_anchor_indexes(source_groups, target_groups)
+
+    for source_index in range(source_count - 1):
+        start_target_index = anchors[source_index]
+        end_target_index = anchors[source_index + 1]
+        span = max(1, end_target_index - start_target_index)
+
+        start_label = clean_text(source_groups[source_index].get("label", ""))
+        end_label = clean_text(source_groups[source_index + 1].get("label", ""))
+
+        for target_index in range(start_target_index, end_target_index + 1):
+            step = target_index - start_target_index
+            target_group = target_groups[target_index]
+
+            new_label = smart_subdivision_label(
+                start_label,
+                end_label,
+                step,
+                span,
+                family_name,
+            )
+
+            rows_by_target_index[target_index] = {
+                "target_group": target_group,
+                "target_index": target_index + 1,
+                "source_start_label": start_label,
+                "source_end_label": end_label,
+                "new_label": new_label,
+                "subdivision_step": step,
+                "subdivision_span": span,
+            }
+
+    return [rows_by_target_index[i] for i in sorted(rows_by_target_index)], blockers, warnings
+
+
+def select_axis_groups_for_smart_sync(source_groups, target_groups, family_name):
+    expected = len(source_groups)
+    found = len(target_groups)
+
+    blockers = []
+    warnings = []
+
+    if expected == 0:
+        blockers.append(f"No source {family_name} axes were detected.")
+        return [], blockers, warnings
+
+    if found < expected:
+        blockers.append(
+            f"{family_name.title()} axis count mismatch: found {found}, expected at least {expected}."
+        )
+        return [], blockers, warnings
+
+    if found > expected:
+        warnings.append(
+            f"{family_name.title()} target has extra axes. Smart subdivision labels will be used."
+        )
+
+    return target_groups, blockers, warnings
 
 def get_region_sync_plan(
     region,
@@ -1934,7 +2154,6 @@ def get_region_sync_plan(
     expected_reference_marker_count=None,
     max_region_marker_ratio=1.5,
     write_mode=None,
-    allow_extra_axis_groups=True,
 ):
     raw_numeric_groups, raw_alpha_groups = get_family_groups(
         region,
@@ -1954,18 +2173,16 @@ def get_region_sync_plan(
     if expected_total == 0:
         blockers.append("No source axes were detected from the reference drawing")
 
-    numeric_groups, num_blockers, num_warnings = select_axis_groups_for_sync(
+    numeric_groups, num_blockers, num_warnings = select_axis_groups_for_smart_sync(
         source_numeric,
         raw_numeric_groups,
         "numeric",
-        allow_extra_groups=allow_extra_axis_groups,
     )
 
-    alpha_groups, alpha_blockers, alpha_warnings = select_axis_groups_for_sync(
+    alpha_groups, alpha_blockers, alpha_warnings = select_axis_groups_for_smart_sync(
         source_alpha,
         raw_alpha_groups,
         "alphabetic",
-        allow_extra_groups=allow_extra_axis_groups,
     )
 
     blockers.extend(num_blockers)
@@ -1973,19 +2190,11 @@ def get_region_sync_plan(
     warnings.extend(num_warnings)
     warnings.extend(alpha_warnings)
 
-    if expected_reference_marker_count and expected_reference_marker_count > 0:
-        max_allowed = int(math.ceil(expected_reference_marker_count * max_region_marker_ratio))
-
-        if len(region["markers"]) > max_allowed:
-            warnings.append(
-                f"Region has many sync markers: found {len(region['markers'])}, "
-                f"recommended maximum {max_allowed}. Extra axis groups will be ignored if detected."
-            )
-
     blockers.extend(validate_axis_group_purity(numeric_groups, "Numeric"))
     blockers.extend(validate_axis_group_purity(alpha_groups, "Alphabetic"))
 
     selected_markers = []
+
     for group in numeric_groups + alpha_groups:
         selected_markers.extend(group.get("markers", []))
 
@@ -2002,6 +2211,7 @@ def get_region_sync_plan(
     ready = len(blockers) == 0
 
     return ready, blockers, numeric_groups, alpha_groups, warnings
+
 
 
 def build_segmentation_diagnostics_rows(
@@ -2203,24 +2413,37 @@ def make_clean_approval_id(region_name, family_name, position, group):
 def build_clean_plan_for_region(region, source_numeric, source_alpha, numeric_groups, alpha_groups):
     rows = []
 
-    for family_name, source_groups, target_groups in [
+    family_sets = [
         ("numeric", source_numeric, numeric_groups),
         ("alphabetic", source_alpha, alpha_groups),
-    ]:
-        for i, (s, t) in enumerate(zip(source_groups, target_groups), start=1):
-            new_label = clean_text(s["label"])
+    ]
+
+    for family_name, source_groups, target_groups in family_sets:
+        label_map, blockers, warnings = build_smart_axis_label_map(
+            source_groups,
+            target_groups,
+            family_name,
+        )
+
+        for item in label_map:
+            t = item["target_group"]
+            new_label = clean_text(item["new_label"])
+            position = item["target_index"]
 
             rows.append({
-                "approval_id": make_clean_approval_id(region["name"], family_name, i, t),
+                "approval_id": make_clean_approval_id(region["name"], family_name, position, t),
                 "apply": True,
                 "region": region["name"],
                 "sync_mode": "clean_sync",
                 "family": family_name,
-                "axis_position": i,
-                "source_label": new_label,
+                "axis_position": position,
+                "source_label": item["source_start_label"],
+                "source_end_label": item["source_end_label"],
                 "target_old_label": t["label"],
                 "proposed_new_label": new_label,
                 "new_label": new_label,
+                "subdivision_step": item["subdivision_step"],
+                "subdivision_span": item["subdivision_span"],
                 "target_axis_coord": t["coord"],
                 "target_markers": t["marker_count"],
                 "target_writable_markers": t["writable_marker_count"],
@@ -2231,6 +2454,7 @@ def build_clean_plan_for_region(region, source_numeric, source_alpha, numeric_gr
             })
 
     return rows
+
 
 
 def clean_preview_rows(plan_rows):
