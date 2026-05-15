@@ -96,6 +96,10 @@ def clean_text(value):
     txt = txt.replace("\\P", " ")
     txt = txt.replace("\n", " ")
     txt = txt.replace("′", "'")
+    txt = txt.replace("’", "'")
+    txt = txt.replace("″", '"')
+    txt = txt.replace("“", '"')
+    txt = txt.replace("”", '"')
     txt = re.sub(r"\s+", " ", txt)
     return txt.strip().upper()
 
@@ -104,32 +108,30 @@ def probable_grid_label(text):
     text = clean_text(text)
 
     patterns = [
-        r"[A-Z]{1,3}",
-        r"[A-Z]{1,3}'",
-        r"\d{1,3}",
-        r"\d{1,3}[A-Z]?",
-        r"\d{1,3}[A-Z]?'?",
+        r"[A-Z]{1,3}(?:'{1,6}|\"{1,2})?",
+        r"\d{1,3}[A-Z]{0,3}(?:'{1,6}|\"{1,2})?",
     ]
 
     return any(re.fullmatch(p, text) for p in patterns)
 
 
 def is_numeric_label(text):
-    return bool(re.fullmatch(r"\d{1,3}[A-Z]?'?", clean_text(text)))
+    return bool(re.fullmatch(r"\d{1,3}[A-Z]{0,3}(?:'{1,6}|\"{1,2})?", clean_text(text)))
 
 
 def is_alpha_label(text):
-    return bool(re.fullmatch(r"[A-Z]{1,3}'?", clean_text(text)))
+    return bool(re.fullmatch(r"[A-Z]{1,3}(?:'{1,6}|\"{1,2})?", clean_text(text)))
 
 
 def numeric_label_value(text):
     txt = clean_text(text)
-    m = re.fullmatch(r"(\d{1,3})([A-Z]?)(?:')?", txt)
+    m = re.fullmatch(r"(\d{1,3})([A-Z]{0,3})(?:'{1,6}|\"{1,2})?", txt)
 
     if not m:
         return None
 
     return int(m.group(1))
+
 
 
 # =========================================================
@@ -1922,11 +1924,10 @@ def validate_axis_group_purity(groups, family_name):
     return blockers
 
 # =========================================================
-# SMART SUBDIVISION SYNC HELPERS
+# SMART OMISSION / PROXIMITY SUBDIVISION SYNC HELPERS
 # =========================================================
 
 def number_to_letters(n):
-    # 1 -> A, 2 -> B, 27 -> AA
     n = int(n)
     out = ""
 
@@ -1946,16 +1947,18 @@ def numeric_subdivision_label(base_label, step):
 
 
 def alpha_subdivision_label(base_label, step):
+    base_label = clean_text(base_label)
+
     if step <= 0:
-        return clean_text(base_label)
+        return base_label
 
     if step == 1:
-        return f"{clean_text(base_label)}'"
+        return f"{base_label}'"
 
     if step == 2:
-        return f'{clean_text(base_label)}"'
+        return f'{base_label}"'
 
-    return f"{clean_text(base_label)}" + ("'" * step)
+    return f"{base_label}" + ("'" * step)
 
 
 def smart_subdivision_label(start_label, end_label, step, span, family_name):
@@ -1994,42 +1997,120 @@ def axis_position_ratios(groups):
     ]
 
 
-def smart_anchor_indexes(source_groups, target_groups):
+def smart_anchor_pairs(
+    source_groups,
+    target_groups,
+    anchor_tolerance_ratio=0.14,
+    force_endpoints=True,
+):
     source_count = len(source_groups)
     target_count = len(target_groups)
 
-    if source_count <= 1:
-        return [0]
+    if source_count == 0 or target_count == 0:
+        return [], list(range(source_count))
 
-    if source_count == target_count:
-        return list(range(target_count))
+    if source_count == 1:
+        target_ratios = axis_position_ratios(target_groups)
+        nearest = min(range(target_count), key=lambda i: abs(target_ratios[i]))
+        return [(0, nearest)], []
+
+    if target_count == 1:
+        source_ratios = axis_position_ratios(source_groups)
+        nearest = min(range(source_count), key=lambda i: abs(source_ratios[i]))
+        omitted = [i for i in range(source_count) if i != nearest]
+        return [(nearest, 0)], omitted
 
     source_ratios = axis_position_ratios(source_groups)
     target_ratios = axis_position_ratios(target_groups)
 
-    anchors = []
+    fixed_pairs = []
 
-    for ratio in source_ratios:
-        nearest = min(
-            range(target_count),
-            key=lambda i: abs(target_ratios[i] - ratio),
-        )
-        anchors.append(nearest)
+    if force_endpoints:
+        fixed_pairs = [
+            (0, 0),
+            (source_count - 1, target_count - 1),
+        ]
+        source_indices = list(range(1, source_count - 1))
+        target_indices = list(range(1, target_count - 1))
+    else:
+        source_indices = list(range(source_count))
+        target_indices = list(range(target_count))
 
-    anchors[0] = 0
-    anchors[-1] = target_count - 1
+    ns = len(source_indices)
+    nt = len(target_indices)
 
-    for i in range(1, source_count - 1):
-        min_allowed = anchors[i - 1] + 1
-        max_allowed = target_count - (source_count - i)
-        anchors[i] = min(max(anchors[i], min_allowed), max_allowed)
+    if ns == 0:
+        return sorted(fixed_pairs), []
 
-    for i in range(source_count - 2, 0, -1):
-        min_allowed = i
-        max_allowed = anchors[i + 1] - 1
-        anchors[i] = min(max(anchors[i], min_allowed), max_allowed)
+    if nt == 0:
+        omitted = source_indices[:]
+        return sorted(fixed_pairs), omitted
 
-    return anchors
+    source_omit_penalty = anchor_tolerance_ratio * 1.25
+    target_extra_penalty = 0.015
+    max_match_distance = anchor_tolerance_ratio
+
+    dp = [[float("inf")] * (nt + 1) for _ in range(ns + 1)]
+    parent = [[None] * (nt + 1) for _ in range(ns + 1)]
+
+    dp[0][0] = 0.0
+
+    for i in range(ns + 1):
+        for j in range(nt + 1):
+            current = dp[i][j]
+
+            if current == float("inf"):
+                continue
+
+            if i < ns:
+                cost = current + source_omit_penalty
+                if cost < dp[i + 1][j]:
+                    dp[i + 1][j] = cost
+                    parent[i + 1][j] = (i, j, "omit_source")
+
+            if j < nt:
+                cost = current + target_extra_penalty
+                if cost < dp[i][j + 1]:
+                    dp[i][j + 1] = cost
+                    parent[i][j + 1] = (i, j, "skip_target")
+
+            if i < ns and j < nt:
+                si = source_indices[i]
+                tj = target_indices[j]
+                dist = abs(source_ratios[si] - target_ratios[tj])
+
+                if dist <= max_match_distance:
+                    cost = current + dist
+                    if cost < dp[i + 1][j + 1]:
+                        dp[i + 1][j + 1] = cost
+                        parent[i + 1][j + 1] = (i, j, "match")
+
+    pairs = fixed_pairs[:]
+    omitted = []
+
+    i = ns
+    j = nt
+
+    while i > 0 or j > 0:
+        step = parent[i][j]
+
+        if step is None:
+            break
+
+        pi, pj, action = step
+
+        if action == "match":
+            pairs.append((source_indices[pi], target_indices[pj]))
+
+        elif action == "omit_source":
+            omitted.append(source_indices[pi])
+
+        i, j = pi, pj
+
+    pairs = sorted(set(pairs), key=lambda x: (x[0], x[1]))
+    omitted = sorted(set(omitted))
+
+    return pairs, omitted
 
 
 def build_smart_axis_label_map(source_groups, target_groups, family_name):
@@ -2047,54 +2128,82 @@ def build_smart_axis_label_map(source_groups, target_groups, family_name):
         blockers.append(f"No target {family_name} axes were detected.")
         return [], blockers, warnings
 
-    if target_count < source_count:
+    pairs, omitted_source_indexes = smart_anchor_pairs(
+        source_groups,
+        target_groups,
+        anchor_tolerance_ratio=0.14,
+        force_endpoints=True,
+    )
+
+    if len(pairs) < 2 and source_count > 1 and target_count > 1:
         blockers.append(
-            f"{family_name.title()} axis count mismatch: found {target_count}, expected at least {source_count}. "
-            "Missing target axes cannot be safely inferred automatically."
+            f"Only {len(pairs)} reliable {family_name} geometry anchor was found. "
+            "At least 2 anchors are needed for smart sync."
         )
         return [], blockers, warnings
 
-    if target_count > source_count:
+    if target_count != source_count:
         warnings.append(
-            f"{family_name.title()} target has {target_count} axes but reference has {source_count}. "
-            "Smart subdivision labels will be generated for the extra target axes."
+            f"{family_name.title()} reference has {source_count} axes and target has {target_count}. "
+            "Smart proximity matching with omissions/subdivisions will be used."
+        )
+
+    for source_index in omitted_source_indexes:
+        label = clean_text(source_groups[source_index].get("label", ""))
+        warnings.append(
+            f"Reference {family_name} label {label} has no nearby target axis and will be treated as omitted."
         )
 
     rows_by_target_index = {}
 
-    if source_count == 1:
-        base_label = clean_text(source_groups[0].get("label", ""))
+    if len(pairs) == 1:
+        source_index, target_index = pairs[0]
+        base_label = clean_text(source_groups[source_index].get("label", ""))
 
-        for target_index, target_group in enumerate(target_groups):
-            if family_name == "numeric":
-                new_label = numeric_subdivision_label(base_label, target_index)
+        for i, target_group in enumerate(target_groups):
+            offset = i - target_index
+
+            if offset <= 0:
+                new_label = base_label
+            elif family_name == "numeric":
+                new_label = numeric_subdivision_label(base_label, offset)
             else:
-                new_label = alpha_subdivision_label(base_label, target_index)
+                new_label = alpha_subdivision_label(base_label, offset)
 
-            rows_by_target_index[target_index] = {
+            rows_by_target_index[i] = {
                 "target_group": target_group,
-                "target_index": target_index + 1,
+                "target_index": i + 1,
                 "source_start_label": base_label,
                 "source_end_label": "",
                 "new_label": new_label,
-                "subdivision_step": target_index,
+                "subdivision_step": max(offset, 0),
                 "subdivision_span": target_count - 1,
+                "omitted_source_labels": "",
+                "mapping_note": "single_anchor_fallback",
             }
 
         return [rows_by_target_index[i] for i in sorted(rows_by_target_index)], blockers, warnings
 
-    anchors = smart_anchor_indexes(source_groups, target_groups)
+    for pair_index in range(len(pairs) - 1):
+        source_start_index, target_start_index = pairs[pair_index]
+        source_end_index, target_end_index = pairs[pair_index + 1]
 
-    for source_index in range(source_count - 1):
-        start_target_index = anchors[source_index]
-        end_target_index = anchors[source_index + 1]
-        span = max(1, end_target_index - start_target_index)
+        if target_end_index < target_start_index:
+            continue
 
-        start_label = clean_text(source_groups[source_index].get("label", ""))
-        end_label = clean_text(source_groups[source_index + 1].get("label", ""))
+        span = max(1, target_end_index - target_start_index)
 
-        for target_index in range(start_target_index, end_target_index + 1):
-            step = target_index - start_target_index
+        start_label = clean_text(source_groups[source_start_index].get("label", ""))
+        end_label = clean_text(source_groups[source_end_index].get("label", ""))
+
+        omitted_between = [
+            clean_text(source_groups[i].get("label", ""))
+            for i in omitted_source_indexes
+            if source_start_index < i < source_end_index
+        ]
+
+        for target_index in range(target_start_index, target_end_index + 1):
+            step = target_index - target_start_index
             target_group = target_groups[target_index]
 
             new_label = smart_subdivision_label(
@@ -2113,34 +2222,33 @@ def build_smart_axis_label_map(source_groups, target_groups, family_name):
                 "new_label": new_label,
                 "subdivision_step": step,
                 "subdivision_span": span,
+                "omitted_source_labels": ", ".join([x for x in omitted_between if x]),
+                "mapping_note": "proximity_anchor" if not omitted_between else "omission_between_anchors",
             }
 
     return [rows_by_target_index[i] for i in sorted(rows_by_target_index)], blockers, warnings
 
 
 def select_axis_groups_for_smart_sync(source_groups, target_groups, family_name):
-    expected = len(source_groups)
-    found = len(target_groups)
-
     blockers = []
     warnings = []
 
-    if expected == 0:
+    if not source_groups:
         blockers.append(f"No source {family_name} axes were detected.")
         return [], blockers, warnings
 
-    if found < expected:
-        blockers.append(
-            f"{family_name.title()} axis count mismatch: found {found}, expected at least {expected}."
-        )
+    if not target_groups:
+        blockers.append(f"No target {family_name} axes were detected.")
         return [], blockers, warnings
 
-    if found > expected:
+    if len(source_groups) != len(target_groups):
         warnings.append(
-            f"{family_name.title()} target has extra axes. Smart subdivision labels will be used."
+            f"{family_name.title()} count differs. Reference={len(source_groups)}, Target={len(target_groups)}. "
+            "Smart omission/proximity mapping will be used."
         )
 
     return target_groups, blockers, warnings
+
 
 def get_region_sync_plan(
     region,
@@ -2444,6 +2552,8 @@ def build_clean_plan_for_region(region, source_numeric, source_alpha, numeric_gr
                 "new_label": new_label,
                 "subdivision_step": item["subdivision_step"],
                 "subdivision_span": item["subdivision_span"],
+                "omitted_source_labels": item.get("omitted_source_labels", ""),
+                "mapping_note": item.get("mapping_note", ""),
                 "target_axis_coord": t["coord"],
                 "target_markers": t["marker_count"],
                 "target_writable_markers": t["writable_marker_count"],
@@ -2454,6 +2564,7 @@ def build_clean_plan_for_region(region, source_numeric, source_alpha, numeric_gr
             })
 
     return rows
+
 
 
 
