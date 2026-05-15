@@ -185,6 +185,12 @@ def smart_subdivision_label(start_label, end_label, step, span, family_name):
 
 
 def axis_distance_for_marker(marker, orientation, coord):
+    try:
+        if marker.get("orientation") == orientation and marker.get("coord") is not None:
+            return abs(float(marker.get("coord")) - float(coord))
+    except Exception:
+        pass
+
     x, y = marker["circle_center"]
 
     if orientation == "vertical":
@@ -1534,13 +1540,6 @@ def build_regions(markers, axis_tol, expected_markers_per_region=None, forced_re
     if forced_region_count and forced_region_count > 0:
         k = int(forced_region_count)
         method_reason = "forced_region_count"
-    elif expected_markers_per_region and expected_markers_per_region > 0:
-        raw = total / expected_markers_per_region
-        rounded = int(round(raw))
-
-        if rounded >= 2 and abs(raw - rounded) <= 0.25:
-            k = rounded
-            method_reason = "marker_count_ratio"
 
     if k and k >= 1:
         clusters = kmeans_regions(markers, k)
@@ -2122,9 +2121,6 @@ def same_axis_markers_for_plan(plan):
         add_marker(marker)
 
     for marker in pool:
-        if marker.get("orientation") != orientation:
-            continue
-
         if axis_distance_for_marker(marker, orientation, coord) > tolerance:
             continue
 
