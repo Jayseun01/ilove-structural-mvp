@@ -2893,6 +2893,41 @@ def build_zip_bytes(file_items):
     return buffer.getvalue()
 
 
+def clone_floor_result_with_label(result, floor_label):
+    cloned = dict(result)
+    cloned["floor_label"] = floor_label
+
+    for key in [
+        "raw_segments",
+        "merged_segments",
+        "extended_segments",
+        "final_segments",
+        "removed_overlap_segments",
+        "region_segments",
+        "source_region_segments",
+        "output_wall_segments",
+    ]:
+        cloned[key] = [copy_segment(s) for s in result.get(key, [])]
+
+    for key in [
+        "raw_curved_segments",
+        "accepted_columns",
+        "rejected_columns",
+        "panels",
+        "panel_merge_log",
+        "topology_stats",
+        "structural_layouts",
+    ]:
+        cloned[key] = [dict(item) for item in result.get(key, [])]
+
+    cloned["regions"] = copy_regions(result.get("regions", []))
+    cloned["source_regions"] = copy_regions(result.get("source_regions", []))
+    cloned["output_regions_for_preview"] = copy_regions(result.get("output_regions_for_preview", []))
+    cloned["nodes"] = list(result.get("nodes", []))
+
+    return cloned
+
+
 # =========================================================
 # JUNCTION NODES
 # =========================================================
@@ -3605,13 +3640,70 @@ def analyze_floor_doc(doc, floor_label, settings):
 # STREAMLIT UI
 # =========================================================
 
-st.markdown("### 1. Upload Architectural DXF")
+st.markdown("### 1. Upload Floor Drawings In Structural Order")
 
-uploaded_dxf = st.file_uploader(
-    "Upload ground floor architectural DXF",
+st.info(
+    "Upload separate floor DXFs in this order: GF, First floor, Other floors only if they are different from First floor, then Roof. "
+    "Do not upload one combined full drawing unless it contains only the floor you are assigning to that slot."
+)
+
+upload_1, upload_2 = st.columns(2)
+
+uploaded_dxf = upload_1.file_uploader(
+    "1. Ground floor (GF) DXF - required",
     type=["dxf"],
     key="arch_centerline_upload",
+    help="This is the base/foundation reference floor.",
 )
+
+ff_dxf = upload_2.file_uploader(
+    "2. First floor (FF) DXF - upload when there is a floor above GF",
+    type=["dxf"],
+    key="first_floor_upload",
+    help="This is the first upper floor used for superimposition.",
+)
+
+upload_3, upload_4 = st.columns(2)
+
+typical_floor_dxfs = upload_3.file_uploader(
+    "3. Other floors DXF - optional; leave empty if identical to FF",
+    type=["dxf"],
+    accept_multiple_files=True,
+    key="typical_floor_uploads",
+    help="Only upload these when upper floors differ from the First floor. If they are identical, leave this empty.",
+)
+
+roof_dxf = upload_4.file_uploader(
+    "4. Roof DXF - optional",
+    type=["dxf"],
+    key="roof_upload",
+    help="Upload roof plan only when roof framing/load path differs from the floor below.",
+)
+
+mf_options_1, mf_options_2 = st.columns(2)
+
+other_floors_identical_to_ff = mf_options_1.checkbox(
+    "Other upper floors are identical to First floor",
+    value=True,
+    help="Keep this on when the second/third/etc. floors repeat the First floor. Leave Other floors empty in that case.",
+)
+
+superimposition_tolerance = mf_options_2.number_input(
+    "Column superimposition tolerance",
+    min_value=0.0,
+    value=300.0,
+    step=25.0,
+    help="Columns within this XY distance on different floors are treated as the same vertical column line.",
+)
+
+run_multifloor_superimposition = bool(
+    ff_dxf is not None or typical_floor_dxfs or roof_dxf is not None
+)
+
+if typical_floor_dxfs and other_floors_identical_to_ff:
+    st.warning(
+        "You uploaded Other floors while saying they are identical to FF. The app will analyze the uploaded Other floors because uploaded drawings take priority."
+    )
 
 if uploaded_dxf is None:
     st.stop()
@@ -3621,48 +3713,10 @@ try:
     layers = get_layer_names(doc)
     layer_summary = get_layer_entity_summary(doc)
     suggested_wall_layers = suggested_wall_layers_from_summary(layer_summary)
-    st.success("DXF loaded successfully.")
+    st.success("Ground floor DXF loaded successfully.")
 except Exception as e:
-    st.error(f"Could not read DXF: {e}")
+    st.error(f"Could not read Ground floor DXF: {e}")
     st.stop()
-
-with st.expander("Multi-floor superimposition order", expanded=False):
-    run_multifloor_superimposition = st.checkbox(
-        "Run multi-floor superimposition",
-        value=False,
-        help="Upload floors in structural order so columns and panels can be compared vertically.",
-    )
-
-    st.caption("Recommended order: Ground floor, First floor, repeated/typical floors, then roof.")
-
-    mf1, mf2, mf3 = st.columns(3)
-
-    ff_dxf = mf1.file_uploader(
-        "First floor DXF",
-        type=["dxf"],
-        key="first_floor_upload",
-    )
-
-    typical_floor_dxfs = mf2.file_uploader(
-        "Other / typical floors DXF",
-        type=["dxf"],
-        accept_multiple_files=True,
-        key="typical_floor_uploads",
-    )
-
-    roof_dxf = mf3.file_uploader(
-        "Roof DXF",
-        type=["dxf"],
-        key="roof_upload",
-    )
-
-    superimposition_tolerance = st.number_input(
-        "Column superimposition tolerance",
-        min_value=0.0,
-        value=300.0,
-        step=25.0,
-        help="Columns within this XY distance on different floors are treated as the same vertical column line.",
-    )
 
 
 st.markdown("### 2. Detection and Structural Settings")
@@ -3684,11 +3738,11 @@ with st.expander("Design code, floors, and preliminary structural rules", expand
     )
 
     floor_count = d3.number_input(
-        "Number of floors supported",
+        "Total occupied floors including GF",
         min_value=1,
         value=2,
         step=1,
-        help="Used to suggest a practical starting column size and to raise the column selection priority.",
+        help="Example: GF+FF = 2. If upper floors repeat FF, leave Other floors empty and set this count.",
     )
 
     profile = DESIGN_CODE_PROFILES[design_code]
@@ -4496,13 +4550,19 @@ floor_results = [{
 multifloor_errors = []
 
 if run_multifloor_superimposition:
+    ff_result_for_reuse = None
+
+    if typical_floor_dxfs and ff_dxf is None:
+        multifloor_errors.append("Other floors were uploaded without FF. Upload FF first so the superimposition order remains logical.")
+
     ordered_floor_uploads = []
 
     if ff_dxf is not None:
         ordered_floor_uploads.append(("FF", ff_dxf))
 
-    for idx, floor_file in enumerate(typical_floor_dxfs or [], start=1):
-        ordered_floor_uploads.append((f"OTHER_{idx}", floor_file))
+    if ff_dxf is not None:
+        for idx, floor_file in enumerate(typical_floor_dxfs or [], start=1):
+            ordered_floor_uploads.append((f"OTHER_{idx}", floor_file))
 
     if roof_dxf is not None:
         ordered_floor_uploads.append(("ROOF", roof_dxf))
@@ -4519,8 +4579,22 @@ if run_multifloor_superimposition:
                 multifloor_errors.append(f"{floor_label}: {floor_result['error']}")
             else:
                 floor_results.append(floor_result)
+                if floor_label == "FF":
+                    ff_result_for_reuse = floor_result
         except Exception as e:
             multifloor_errors.append(f"{floor_label}: {e}")
+
+    if (
+        ff_result_for_reuse is not None
+        and other_floors_identical_to_ff
+        and not typical_floor_dxfs
+        and int(floor_count) > 2
+    ):
+        for idx in range(2, int(floor_count)):
+            floor_results.insert(
+                -1 if roof_dxf is not None and len(floor_results) > 2 else len(floor_results),
+                clone_floor_result_with_label(ff_result_for_reuse, f"TYPICAL_{idx}"),
+            )
 
 column_superimposition_df = build_column_superimposition_schedule(
     floor_results,
