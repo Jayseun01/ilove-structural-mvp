@@ -2786,6 +2786,36 @@ def panel_merge_log_to_dataframe(merge_log):
     return pd.DataFrame(merge_log)
 
 
+def rectangular_model_panels(panels):
+    model_panels = []
+
+    for p in panels:
+        x1 = min(float(p["x1"]), float(p["x2"]))
+        x2 = max(float(p["x1"]), float(p["x2"]))
+        y1 = min(float(p["y1"]), float(p["y2"]))
+        y2 = max(float(p["y1"]), float(p["y2"]))
+        width = x2 - x1
+        height = y2 - y1
+
+        if width <= 0 or height <= 0:
+            continue
+
+        model_panels.append({
+            **p,
+            "x1": x1,
+            "y1": y1,
+            "x2": x2,
+            "y2": y2,
+            "width": width,
+            "height": height,
+            "area": width * height,
+            "method": "rectangular_model_panel",
+            "review_status": p.get("review_status", "rectangular_panel_for_modelling"),
+        })
+
+    return dedupe_panels(model_panels, tol=1.0)
+
+
 def floor_result_to_panel_rows(floor_results):
     rows = []
 
@@ -2914,6 +2944,7 @@ def clone_floor_result_with_label(result, floor_label):
         "accepted_columns",
         "rejected_columns",
         "panels",
+        "model_panels",
         "panel_merge_log",
         "topology_stats",
         "structural_layouts",
@@ -3144,7 +3175,7 @@ def build_output_dxf(
         safe_layer(new_doc, f"ILS_CURVED_WALL_CENTERLINE_{thickness}", color=layer_color_for_thickness(thickness))
 
     safe_layer(new_doc, "ILS_STRUCTURAL_GRID_REVIEW", color=1)
-    safe_layer(new_doc, "ILS_SLAB_PANEL_REVIEW", color=5)
+    safe_layer(new_doc, "ILS_SLAB_PANEL_REVIEW", color=1)
     safe_layer(new_doc, "ILS_JUNCTION_NODE_REVIEW", color=2)
 
     col_label = column_size_label(column_shape, column_width, column_depth).replace(" ", "_")
@@ -3604,6 +3635,7 @@ def analyze_floor_doc(doc, floor_label, settings):
             max_aspect_ratio=settings["max_panel_aspect_ratio"],
         )
 
+    model_panels = rectangular_model_panels(panels)
     nodes = collect_junction_nodes(output_wall_segments, axis_tol=settings["axis_tol"])
 
     return {
@@ -3631,6 +3663,7 @@ def analyze_floor_doc(doc, floor_label, settings):
         "accepted_columns": accepted_columns,
         "rejected_columns": rejected_columns,
         "panels": panels,
+        "model_panels": model_panels,
         "panel_merge_log": panel_merge_log,
         "nodes": nodes,
     }
@@ -3645,6 +3678,10 @@ st.markdown("### 1. Upload Floor Drawings In Structural Order")
 st.info(
     "Upload separate floor DXFs in this order: GF, First floor, Other floors only if they are different from First floor, then Roof. "
     "Do not upload one combined full drawing unless it contains only the floor you are assigning to that slot."
+)
+
+st.caption(
+    "Current best workflow: separate floor plans are safer than one combined DXF because the engine can compare floors without guessing which geometry belongs to which label."
 )
 
 upload_1, upload_2 = st.columns(2)
@@ -3962,7 +3999,28 @@ with st.expander("Output mode and cleanup", expanded=True):
         step=50.0,
     )
 
-    overlap_cleanup_enabled = o3.checkbox(
+    dxf_export_target = o3.selectbox(
+        "DXF export target",
+        ["Rectangular slab panel model", "Full structural review drawing"],
+        index=0,
+        help="Use panel model for Prota/Quick Civil-style modelling. Use full review when you want walls, columns, grids, and audit geometry.",
+    )
+
+    o3b, o3c = st.columns(2)
+
+    include_columns_in_panel_model = o3b.checkbox(
+        "Include columns in panel model",
+        value=False,
+        help="Keep off when exporting panels to software that should only read slab rectangles.",
+    )
+
+    export_review_wall_lines = o3c.checkbox(
+        "Export wall centerlines in review drawing",
+        value=True,
+        help="Applies to full review drawing only.",
+    )
+
+    overlap_cleanup_enabled = st.checkbox(
         "Remove overlapping duplicate centerlines",
         value=True,
     )
@@ -4473,6 +4531,7 @@ with st.spinner("Creating slab panels..."):
             max_aspect_ratio=max_panel_aspect_ratio,
         )
 
+    model_panels = rectangular_model_panels(panels)
     nodes = collect_junction_nodes(output_wall_segments, axis_tol=axis_tol)
 
 floor_analysis_settings = {
@@ -4543,6 +4602,7 @@ floor_results = [{
     "accepted_columns": accepted_columns,
     "rejected_columns": rejected_columns,
     "panels": panels,
+    "model_panels": model_panels,
     "panel_merge_log": panel_merge_log,
     "nodes": nodes,
 }]
@@ -4635,7 +4695,7 @@ t3.metric("Source geometry lock", "ON" if preserve_source_geometry else "OFF")
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Floors analyzed", len(floor_results))
-m2.metric("Merged panel operations", len(panel_merge_log))
+m2.metric("Rectangular model panels", len(model_panels))
 m3.metric("Column vertical lines", len(column_superimposition_df))
 m4.metric("Multi-floor errors", len(multifloor_errors))
 
@@ -4817,6 +4877,17 @@ with tab10:
             mime="text/csv",
         )
 
+    model_panels_df = panels_to_dataframe(model_panels)
+    if not model_panels_df.empty:
+        st.markdown("#### Rectangular Modelling Panels")
+        st.dataframe(model_panels_df, use_container_width=True)
+        st.download_button(
+            "Download Rectangular Modelling Panels CSV",
+            data=model_panels_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_RECTANGULAR_MODELLING_PANELS.csv",
+            mime="text/csv",
+        )
+
 with tab11:
     merge_df = panel_merge_log_to_dataframe(panel_merge_log)
     if merge_df.empty:
@@ -4859,12 +4930,23 @@ with tab12:
 
 st.markdown("### 6. Download Structural Review DXF")
 
+panel_model_export = dxf_export_target == "Rectangular slab panel model"
+
 if output_mode == "Review mode":
-    draw_raw_output = True
+    draw_raw_output = False if panel_model_export else True
     clean_length = 0.0
 else:
     draw_raw_output = False
     clean_length = min_output_centerline_length
+
+panels_for_dxf = model_panels if panel_model_export else panels
+draw_wall_centerlines_output = (not panel_model_export) and export_review_wall_lines
+draw_curved_centerlines_output = (not panel_model_export) and export_curved_centerlines
+draw_nodes_output = (not panel_model_export) and export_junction_nodes
+draw_columns_output = include_columns_in_panel_model if panel_model_export else export_columns
+draw_structural_grid_output = (not panel_model_export) and export_structural_grid
+draw_source_reference_output = (not panel_model_export) and export_source_reference
+draw_topology_audit_output = (not panel_model_export) and export_topology_audit
 
 output_doc = build_output_dxf(
     raw_segments=raw_segments,
@@ -4872,7 +4954,7 @@ output_doc = build_output_dxf(
     source_segments=source_region_segments,
     topology_segments=region_segments,
     curved_segments=raw_curved_segments,
-    panels=panels,
+    panels=panels_for_dxf,
     nodes=nodes,
     columns=accepted_columns,
     layouts=structural_layouts,
@@ -4881,14 +4963,14 @@ output_doc = build_output_dxf(
     column_shape=column_shape,
     axis_tol=axis_tol,
     draw_raw=draw_raw_output,
-    draw_source_reference=export_source_reference,
-    draw_topology_audit=export_topology_audit,
-    draw_wall_centerlines=True,
-    draw_curved_centerlines=export_curved_centerlines,
+    draw_source_reference=draw_source_reference_output,
+    draw_topology_audit=draw_topology_audit_output,
+    draw_wall_centerlines=draw_wall_centerlines_output,
+    draw_curved_centerlines=draw_curved_centerlines_output,
     draw_panels_enabled=export_slab_panels,
-    draw_nodes_enabled=export_junction_nodes,
-    draw_columns_enabled=export_columns,
-    draw_structural_grid_enabled=export_structural_grid,
+    draw_nodes_enabled=draw_nodes_output,
+    draw_columns_enabled=draw_columns_output,
+    draw_structural_grid_enabled=draw_structural_grid_output,
     min_output_centerline_length=clean_length,
     export_thicknesses=export_wall_thicknesses,
 )
@@ -4896,13 +4978,15 @@ output_doc = build_output_dxf(
 output_bytes = write_doc_to_bytes(output_doc)
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-if output_mode == "Clean structural mode":
+if panel_model_export:
+    output_filename = f"ILS_RECTANGULAR_SLAB_PANEL_MODEL_{timestamp}.dxf"
+elif output_mode == "Clean structural mode":
     output_filename = f"ILS_SMART_STRUCTURAL_LAYOUT_{timestamp}.dxf"
 else:
     output_filename = f"ILS_REVIEW_STRUCTURAL_LAYOUT_{timestamp}.dxf"
 
 st.download_button(
-    "Download Connected Centerlines + Columns + Room/Slab Polylines DXF",
+    "Download Rectangular Panel Model DXF" if panel_model_export else "Download Connected Centerlines + Columns + Room/Slab Polylines DXF",
     data=output_bytes,
     file_name=output_filename,
     mime="application/dxf",
@@ -4921,7 +5005,7 @@ if run_multifloor_superimposition and len(floor_results) > 1:
             source_segments=result.get("source_region_segments", []),
             topology_segments=result.get("region_segments", []),
             curved_segments=result.get("raw_curved_segments", []),
-            panels=result.get("panels", []),
+            panels=result.get("model_panels", []) if panel_model_export else result.get("panels", []),
             nodes=result.get("nodes", []),
             columns=result.get("accepted_columns", []),
             layouts=result.get("structural_layouts", []),
@@ -4930,14 +5014,14 @@ if run_multifloor_superimposition and len(floor_results) > 1:
             column_shape=column_shape,
             axis_tol=axis_tol,
             draw_raw=draw_raw_output,
-            draw_source_reference=export_source_reference,
-            draw_topology_audit=export_topology_audit,
-            draw_wall_centerlines=True,
-            draw_curved_centerlines=export_curved_centerlines,
+            draw_source_reference=draw_source_reference_output,
+            draw_topology_audit=draw_topology_audit_output,
+            draw_wall_centerlines=draw_wall_centerlines_output,
+            draw_curved_centerlines=draw_curved_centerlines_output,
             draw_panels_enabled=export_slab_panels,
-            draw_nodes_enabled=export_junction_nodes,
-            draw_columns_enabled=export_columns,
-            draw_structural_grid_enabled=export_structural_grid,
+            draw_nodes_enabled=draw_nodes_output,
+            draw_columns_enabled=draw_columns_output,
+            draw_structural_grid_enabled=draw_structural_grid_output,
             min_output_centerline_length=clean_length,
             export_thicknesses=export_wall_thicknesses,
         )
@@ -4962,5 +5046,5 @@ if run_multifloor_superimposition and len(floor_results) > 1:
     )
 
 st.success(
-    "Analysis complete. The DXF now exports a repaired centerline graph, support-grid columns, and closed room/slab panel polylines for modelling review."
+    "Analysis complete. Use the rectangular panel model DXF for structural modelling software, and the full review drawing only when you want to inspect walls, columns, grids, and audit geometry."
 )
