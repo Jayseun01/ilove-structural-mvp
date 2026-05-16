@@ -187,6 +187,153 @@ def get_layer_names(doc):
         return []
 
 
+WALL_LAYER_KEYWORDS = [
+    "wall",
+    "walls",
+    "a-wall",
+    "a_wall",
+    "arch-wall",
+    "partition",
+    "blockwork",
+    "masonry",
+    "external",
+    "internal",
+]
+
+NON_WALL_LAYER_KEYWORDS = [
+    "door",
+    "window",
+    "grid",
+    "axis",
+    "dim",
+    "dimension",
+    "text",
+    "anno",
+    "annotation",
+    "furn",
+    "furniture",
+    "fixture",
+    "toilet",
+    "stair",
+    "hatch",
+    "room",
+    "label",
+    "title",
+    "column",
+    "beam",
+    "slab",
+    "roof",
+    "plumb",
+    "elect",
+    "light",
+    "section",
+    "elevation",
+]
+
+
+def layer_wall_likelihood_score(layer_name, usable_count, text_like_count, block_count):
+    name = str(layer_name).lower()
+    score = 0
+
+    for word in WALL_LAYER_KEYWORDS:
+        if word in name:
+            score += 6
+
+    for word in NON_WALL_LAYER_KEYWORDS:
+        if word in name:
+            score -= 8
+
+    if usable_count > 0:
+        score += min(5, usable_count)
+
+    if text_like_count > 0:
+        score -= min(5, text_like_count)
+
+    if block_count > usable_count:
+        score -= 3
+
+    return score
+
+
+def get_layer_entity_summary(doc):
+    rows_by_layer = {}
+    usable_types = {"LINE", "LWPOLYLINE", "POLYLINE", "ARC", "CIRCLE"}
+    text_like_types = {"TEXT", "MTEXT", "DIMENSION", "LEADER", "MLEADER"}
+
+    try:
+        entities = list(doc.modelspace())
+    except Exception:
+        entities = []
+
+    for layer in get_layer_names(doc):
+        rows_by_layer[layer] = {
+            "layer": layer,
+            "total_entities": 0,
+            "usable_wall_entities": 0,
+            "line_entities": 0,
+            "polyline_entities": 0,
+            "arc_circle_entities": 0,
+            "text_dim_entities": 0,
+            "block_entities": 0,
+            "wall_score": 0,
+            "suggested_wall_layer": False,
+        }
+
+    for entity in entities:
+        try:
+            layer = entity.dxf.layer
+            dxftype = entity.dxftype()
+        except Exception:
+            continue
+
+        rows_by_layer.setdefault(layer, {
+            "layer": layer,
+            "total_entities": 0,
+            "usable_wall_entities": 0,
+            "line_entities": 0,
+            "polyline_entities": 0,
+            "arc_circle_entities": 0,
+            "text_dim_entities": 0,
+            "block_entities": 0,
+            "wall_score": 0,
+            "suggested_wall_layer": False,
+        })
+
+        row = rows_by_layer[layer]
+        row["total_entities"] += 1
+
+        if dxftype in usable_types:
+            row["usable_wall_entities"] += 1
+
+        if dxftype == "LINE":
+            row["line_entities"] += 1
+        elif dxftype in {"LWPOLYLINE", "POLYLINE"}:
+            row["polyline_entities"] += 1
+        elif dxftype in {"ARC", "CIRCLE"}:
+            row["arc_circle_entities"] += 1
+        elif dxftype in text_like_types:
+            row["text_dim_entities"] += 1
+        elif dxftype == "INSERT":
+            row["block_entities"] += 1
+
+    rows = []
+    for row in rows_by_layer.values():
+        row["wall_score"] = layer_wall_likelihood_score(
+            row["layer"],
+            row["usable_wall_entities"],
+            row["text_dim_entities"],
+            row["block_entities"],
+        )
+        row["suggested_wall_layer"] = row["usable_wall_entities"] > 0 and row["wall_score"] >= 6
+        rows.append(row)
+
+    return sorted(rows, key=lambda r: (-r["suggested_wall_layer"], -r["wall_score"], r["layer"]))
+
+
+def suggested_wall_layers_from_summary(layer_summary):
+    return [row["layer"] for row in layer_summary if row.get("suggested_wall_layer")]
+
+
 def safe_layer(doc, name, color=7):
     try:
         existing = [layer.dxf.name for layer in doc.layers]
@@ -2972,6 +3119,8 @@ if uploaded_dxf is None:
 try:
     doc = read_uploaded_dxf(uploaded_dxf)
     layers = get_layer_names(doc)
+    layer_summary = get_layer_entity_summary(doc)
+    suggested_wall_layers = suggested_wall_layers_from_summary(layer_summary)
     st.success("DXF loaded successfully.")
 except Exception as e:
     st.error(f"Could not read DXF: {e}")
@@ -3087,20 +3236,58 @@ with st.expander("Column type and sizing", expanded=True):
         "This is a starting size, not a completed design check."
     )
 
-with st.expander("Wall source layers", expanded=True):
-    use_all_layers = st.checkbox(
-        "Use all layers",
-        value=True,
-        help="If checked, all LINE/LWPOLYLINE/POLYLINE entities are scanned.",
+with st.expander("Wall isolation / source layers", expanded=True):
+    st.caption(
+        "The engine should read wall-face layers only. Door, window, grid, text, dimension, furniture, and annotation layers should stay out so openings remain clean gaps."
     )
 
-    if use_all_layers:
-        selected_layers = []
+    wall_iso_1, wall_iso_2 = st.columns(2)
+
+    use_wall_layer_isolation = wall_iso_1.checkbox(
+        "Analyze isolated wall layers only",
+        value=True if suggested_wall_layers else False,
+        help="Recommended. Only the selected wall layers feed centerline, room, panel, and column detection.",
+    )
+
+    show_layer_diagnostics = wall_iso_2.checkbox(
+        "Show layer diagnostics",
+        value=True,
+    )
+
+    if show_layer_diagnostics:
+        layer_summary_df = pd.DataFrame(layer_summary)
+        st.dataframe(layer_summary_df, use_container_width=True)
+        st.download_button(
+            "Download Layer Diagnostics CSV",
+            data=layer_summary_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_LAYER_DIAGNOSTICS.csv",
+            mime="text/csv",
+        )
+
+    if suggested_wall_layers:
+        st.success("Suggested wall layers: " + ", ".join(suggested_wall_layers))
     else:
+        st.warning(
+            "No obvious wall layer names were detected. Pick the wall-face layers manually, or temporarily disable isolation for a diagnostic run."
+        )
+
+    if use_wall_layer_isolation:
         selected_layers = st.multiselect(
-            "Select wall face layers",
+            "Wall layers to analyze",
             options=layers,
-            default=layers,
+            default=suggested_wall_layers if suggested_wall_layers else [],
+            help="Choose only layers that contain wall faces/centerlines. Do not include doors, windows, dimensions, text, grids, or furniture.",
+        )
+        use_all_layers = False
+
+        if not selected_layers:
+            st.warning("Select at least one wall layer, or disable wall layer isolation.")
+            st.stop()
+    else:
+        use_all_layers = True
+        selected_layers = []
+        st.warning(
+            "Wall isolation is OFF. The engine may mistake grids, symbols, dimensions, doors, or furniture for wall geometry."
         )
 
 with st.expander("Geometry tolerances", expanded=True):
@@ -3423,6 +3610,11 @@ e4, e5 = st.columns(2)
 e4.metric("Ignored / non-orthogonal", extracted["ignored"])
 e5.metric("Detected entity families", "Straight + curved" if curved_faces else "Straight only")
 
+if use_all_layers:
+    st.warning("Analysis used all layers. For production tests, isolate wall layers to avoid false geometry.")
+else:
+    st.caption("Analyzed wall layers: " + ", ".join(selected_layers))
+
 if len(horizontal_faces) + len(vertical_faces) + len(curved_faces) == 0:
     st.error("No usable wall face entities found. Check layer selection or entity types.")
     st.stop()
@@ -3678,6 +3870,8 @@ if warnings:
 
 st.info(
     f"Design profile: **{design_code}**. "
+    f"Wall isolation: **{'ON' if not use_all_layers else 'OFF'}**"
+    f"{' using ' + str(len(selected_layers)) + ' layer(s)' if not use_all_layers else ''}. "
     f"Floors: **{floor_count}**. "
     f"Column strategy: **{column_layout_strategy}**. "
     f"Column: **{column_shape} {column_size_label(column_shape, column_width, column_depth)}**. "
