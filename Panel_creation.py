@@ -1183,6 +1183,17 @@ def update_region_from_segments(region, segments):
     return region
 
 
+def copy_regions(regions):
+    copied = []
+
+    for region in regions:
+        rr = dict(region)
+        rr["segments"] = [copy_segment(s) for s in region.get("segments", [])]
+        copied.append(rr)
+
+    return copied
+
+
 def snap_segment_axes(segments, axis_tol):
     h_segments, v_segments = split_hv_segments(segments)
     xs = cluster_values([v["c"] for v in v_segments], axis_tol)
@@ -2193,6 +2204,8 @@ def draw_structural_grid_lines(msp, layouts, columns, axis_tol, layer):
 def build_output_dxf(
     raw_segments,
     final_segments,
+    source_segments,
+    topology_segments,
     panels,
     nodes,
     columns,
@@ -2202,6 +2215,8 @@ def build_output_dxf(
     column_shape,
     axis_tol,
     draw_raw=True,
+    draw_source_reference=False,
+    draw_topology_audit=False,
     draw_wall_centerlines=True,
     draw_panels_enabled=False,
     draw_nodes_enabled=False,
@@ -2217,15 +2232,24 @@ def build_output_dxf(
 
     raw_for_output = filter_segments_by_thickness(raw_segments, export_thicknesses)
     final_for_output = filter_segments_by_thickness(final_segments, export_thicknesses)
+    source_for_output = filter_segments_by_thickness(source_segments or [], export_thicknesses)
+    topology_for_output = filter_segments_by_thickness(topology_segments or [], export_thicknesses)
 
     clean_final_segments = filter_short_segments(final_for_output, min_output_centerline_length)
 
     all_thicknesses = sorted(
-        set([int(s["thickness"]) for s in raw_for_output] + [int(s["thickness"]) for s in clean_final_segments])
+        set(
+            [int(s["thickness"]) for s in raw_for_output]
+            + [int(s["thickness"]) for s in clean_final_segments]
+            + [int(s["thickness"]) for s in source_for_output]
+            + [int(s["thickness"]) for s in topology_for_output]
+        )
     )
 
     for thickness in all_thicknesses:
         safe_layer(new_doc, f"ILS_RAW_CENTERLINE_{thickness}", color=8)
+        safe_layer(new_doc, f"ILS_SOURCE_CENTERLINE_REFERENCE_{thickness}", color=9)
+        safe_layer(new_doc, f"ILS_TOPOLOGY_REPAIR_AUDIT_{thickness}", color=4)
         safe_layer(new_doc, f"ILS_WALL_CENTERLINE_{thickness}", color=layer_color_for_thickness(thickness))
 
     safe_layer(new_doc, "ILS_STRUCTURAL_GRID_REVIEW", color=1)
@@ -2238,6 +2262,12 @@ def build_output_dxf(
 
     if draw_raw:
         draw_segments_by_thickness(new_msp, raw_for_output, prefix="ILS_RAW_CENTERLINE")
+
+    if draw_source_reference:
+        draw_segments_by_thickness(new_msp, source_for_output, prefix="ILS_SOURCE_CENTERLINE_REFERENCE")
+
+    if draw_topology_audit:
+        draw_segments_by_thickness(new_msp, topology_for_output, prefix="ILS_TOPOLOGY_REPAIR_AUDIT")
 
     if draw_wall_centerlines:
         draw_segments_by_thickness(new_msp, clean_final_segments, prefix="ILS_WALL_CENTERLINE")
@@ -2723,6 +2753,27 @@ with st.expander("Multiple plan / region settings", expanded=True):
         help="Geometry farther apart than this is treated as separate regions.",
     )
 
+with st.expander("Geometry fidelity / source guard", expanded=True):
+    gf1, gf2, gf3 = st.columns(3)
+
+    preserve_source_geometry = gf1.checkbox(
+        "Preserve source wall geometry in output",
+        value=True,
+        help="Exports the original detected centerline geometry as the main wall model. Repairs are used for analysis and optional audit only.",
+    )
+
+    export_topology_audit = gf2.checkbox(
+        "Export topology repair audit layer",
+        value=False,
+        help="Shows repaired/noded analysis geometry on a separate layer so you can compare it against the source plan.",
+    )
+
+    export_source_reference = gf3.checkbox(
+        "Export source reference layer",
+        value=False,
+        help="Adds a faint source-reference copy of detected centerlines for visual QA.",
+    )
+
 with st.expander("Centerline graph and room topology", expanded=True):
     g1, g2, g3 = st.columns(3)
 
@@ -2783,8 +2834,8 @@ with st.expander("Smart column layout settings", expanded=True):
 
     export_structural_grid = col6.checkbox(
         "Export structural grid/beam lines",
-        value=True,
-        help="Draws review grid lines through accepted columns, useful for seeing the intended engineer-style layout.",
+        value=False,
+        help="Draws review grid lines through accepted columns. Keep off when checking source-geometry fidelity.",
     )
 
 with st.expander("Slab panel settings", expanded=True):
@@ -2792,7 +2843,7 @@ with st.expander("Slab panel settings", expanded=True):
 
     slab_panel_method = p1.selectbox(
         "Panel creation method",
-        ["Both", "Structural grid panels", "Wall-bounded graph panels"],
+        ["Wall-bounded graph panels", "Both", "Structural grid panels"],
         index=0,
     )
 
@@ -2957,6 +3008,8 @@ if not regions:
     st.error("No usable plan regions were created after filtering. Lower the output length filter or check wall thickness selection.")
     st.stop()
 
+source_regions = copy_regions(regions)
+source_region_segments = [copy_segment(s) for s in region_segments]
 topology_stats = []
 
 with st.spinner("Repairing centerline graph into connected room topology..."):
@@ -2977,6 +3030,9 @@ with st.spinner("Repairing centerline graph into connected room topology..."):
             }
             for r in regions
         ]
+
+output_wall_segments = source_region_segments if preserve_source_geometry else region_segments
+output_regions_for_preview = source_regions if preserve_source_geometry else regions
 
 with st.spinner("Building smart structural grid and economical columns..."):
     structural_layouts = []
@@ -3052,7 +3108,7 @@ with st.spinner("Creating slab panels..."):
         )
 
     panels = dedupe_panels(panels, tol=max(1.0, axis_tol))
-    nodes = collect_junction_nodes(region_segments, axis_tol=axis_tol)
+    nodes = collect_junction_nodes(output_wall_segments, axis_tol=axis_tol)
 
 
 # =========================================================
@@ -3068,8 +3124,8 @@ a3.metric("Max thickness error", round(accuracy["max_thickness_error"], 3))
 a4.metric("Near-perfect <= 1mm", accuracy["perfect_or_near_perfect"])
 
 r1, r2, r3, r4 = st.columns(4)
-r1.metric("Detected plan regions", len(regions))
-r2.metric("Final wall centerlines", len(region_segments))
+r1.metric("Detected plan regions", len(output_regions_for_preview))
+r2.metric("Output wall centerlines", len(output_wall_segments))
 r3.metric("Accepted columns", len(accepted_columns))
 r4.metric("Slab panels", len(panels))
 
@@ -3082,7 +3138,7 @@ c4.metric("Rejected column candidates", len(rejected_columns))
 t1, t2, t3 = st.columns(3)
 t1.metric("Topology graph segments", len(region_segments))
 t2.metric("Centerline graph repair", "ON" if repair_centerline_graph else "OFF")
-t3.metric("Room/slab closed polylines", len(panels))
+t3.metric("Source geometry lock", "ON" if preserve_source_geometry else "OFF")
 
 warnings = []
 for layout in structural_layouts:
@@ -3097,7 +3153,8 @@ st.info(
     f"Column strategy: **{column_layout_strategy}**. "
     f"Column: **{column_shape} {column_size_label(column_shape, column_width, column_depth)}**. "
     f"Output mode: **{output_mode}**. "
-    f"Panel method: **{slab_panel_method}**."
+    f"Panel method: **{slab_panel_method}**. "
+    f"Source geometry preservation: **{'ON' if preserve_source_geometry else 'OFF'}**."
 )
 
 
@@ -3113,7 +3170,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
         "Structural Grid",
         "Topology Repair",
         "Raw Centerlines",
-        "Final Region Centerlines",
+        "Output Wall Centerlines",
         "Removed Overlaps",
         "Accepted Columns",
         "Rejected Columns",
@@ -3122,7 +3179,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
 )
 
 with tab1:
-    regions_df = regions_to_dataframe(regions)
+    regions_df = regions_to_dataframe(output_regions_for_preview)
     if regions_df.empty:
         st.info("No regions.")
     else:
@@ -3174,15 +3231,15 @@ with tab4:
         )
 
 with tab5:
-    final_df = segments_to_dataframe(region_segments)
+    final_df = segments_to_dataframe(output_wall_segments)
     if final_df.empty:
-        st.info("No final region centerlines.")
+        st.info("No output wall centerlines.")
     else:
         st.dataframe(final_df, use_container_width=True)
         st.download_button(
-            "Download Final Region Centerlines CSV",
+            "Download Output Wall Centerlines CSV",
             data=final_df.to_csv(index=False).encode("utf-8"),
-            file_name="ILS_FINAL_REGION_CENTERLINES.csv",
+            file_name="ILS_OUTPUT_WALL_CENTERLINES.csv",
             mime="text/csv",
         )
 
@@ -3256,7 +3313,9 @@ else:
 
 output_doc = build_output_dxf(
     raw_segments=raw_segments,
-    final_segments=region_segments,
+    final_segments=output_wall_segments,
+    source_segments=source_region_segments,
+    topology_segments=region_segments,
     panels=panels,
     nodes=nodes,
     columns=accepted_columns,
@@ -3266,6 +3325,8 @@ output_doc = build_output_dxf(
     column_shape=column_shape,
     axis_tol=axis_tol,
     draw_raw=draw_raw_output,
+    draw_source_reference=export_source_reference,
+    draw_topology_audit=export_topology_audit,
     draw_wall_centerlines=True,
     draw_panels_enabled=export_slab_panels,
     draw_nodes_enabled=export_junction_nodes,
