@@ -2622,6 +2622,214 @@ def detect_structural_grid_panels(layouts, accepted_columns, axis_tol, min_width
     return panels
 
 
+def add_axis_value(values, value, tol):
+    if not values:
+        values.append(float(value))
+        return
+
+    if closest_value(value, values) is None or abs(closest_value(value, values) - value) > tol:
+        values.append(float(value))
+
+
+def panel_from_bounds(region_id, x1, y1, x2, y2, method, status, edge_count="", corner_count=""):
+    xx1 = min(float(x1), float(x2))
+    xx2 = max(float(x1), float(x2))
+    yy1 = min(float(y1), float(y2))
+    yy2 = max(float(y1), float(y2))
+    width = xx2 - xx1
+    height = yy2 - yy1
+
+    return {
+        "region_id": region_id,
+        "x1": xx1,
+        "y1": yy1,
+        "x2": xx2,
+        "y2": yy2,
+        "width": width,
+        "height": height,
+        "area": width * height,
+        "method": method,
+        "edge_support_count": edge_count,
+        "corner_support_count": corner_count,
+        "review_status": status,
+    }
+
+
+def detect_wall_axis_rectangular_panels(
+    regions,
+    axis_tol,
+    closure_tol,
+    min_panel_width,
+    min_panel_height,
+    max_panel_width,
+    max_panel_height,
+):
+    """
+    Lenient rectangular modeller for imperfect architectural DXFs.
+    It uses wall axes as grid lines, accepts rectangular cells with reasonable wall evidence,
+    and never creates non-rectangular panel geometry.
+    """
+
+    panels = []
+
+    for region in regions:
+        segments = region.get("segments", [])
+        xs, ys, h_map, v_map = build_axis_interval_maps(segments, axis_tol)
+
+        if not xs or not ys:
+            continue
+
+        add_axis_value(xs, region["min_x"], axis_tol)
+        add_axis_value(xs, region["max_x"], axis_tol)
+        add_axis_value(ys, region["min_y"], axis_tol)
+        add_axis_value(ys, region["max_y"], axis_tol)
+
+        xs = sorted(cluster_values(xs, axis_tol))
+        ys = sorted(cluster_values(ys, axis_tol))
+
+        region_panels = []
+
+        for i in range(len(xs) - 1):
+            x1 = xs[i]
+            x2 = xs[i + 1]
+            width = abs(x2 - x1)
+
+            if width < min_panel_width:
+                continue
+            if max_panel_width > 0 and width > max_panel_width:
+                continue
+
+            for j in range(len(ys) - 1):
+                y1 = ys[j]
+                y2 = ys[j + 1]
+                height = abs(y2 - y1)
+
+                if height < min_panel_height:
+                    continue
+                if max_panel_height > 0 and height > max_panel_height:
+                    continue
+
+                bottom = horizontal_edge_exists(h_map, y1, x1, x2, axis_tol, closure_tol)
+                top = horizontal_edge_exists(h_map, y2, x1, x2, axis_tol, closure_tol)
+                left = vertical_edge_exists(v_map, x1, y1, y2, axis_tol, closure_tol)
+                right = vertical_edge_exists(v_map, x2, y1, y2, axis_tol, closure_tol)
+                edge_count = sum([bottom, top, left, right])
+
+                # A perfect room has 4 edges. Imperfect architectural plans often have
+                # door gaps/open ends, so 2+ edges is enough for a rectangular modelling cell.
+                if edge_count >= 2:
+                    region_panels.append(
+                        panel_from_bounds(
+                            region["region_id"],
+                            x1,
+                            y1,
+                            x2,
+                            y2,
+                            "wall_axis_rectangular_cell",
+                            "rectangular_cell_from_wall_axis_grid",
+                            edge_count=edge_count,
+                        )
+                    )
+
+        if not region_panels:
+            # Second pass: use any wall evidence. This is intentionally lenient
+            # because an empty modelling DXF is worse than a reviewable coarse panel.
+            for i in range(len(xs) - 1):
+                x1 = xs[i]
+                x2 = xs[i + 1]
+                width = abs(x2 - x1)
+
+                if width < min_panel_width:
+                    continue
+                if max_panel_width > 0 and width > max_panel_width:
+                    continue
+
+                for j in range(len(ys) - 1):
+                    y1 = ys[j]
+                    y2 = ys[j + 1]
+                    height = abs(y2 - y1)
+
+                    if height < min_panel_height:
+                        continue
+                    if max_panel_height > 0 and height > max_panel_height:
+                        continue
+
+                    bottom = horizontal_edge_exists(h_map, y1, x1, x2, axis_tol, closure_tol)
+                    top = horizontal_edge_exists(h_map, y2, x1, x2, axis_tol, closure_tol)
+                    left = vertical_edge_exists(v_map, x1, y1, y2, axis_tol, closure_tol)
+                    right = vertical_edge_exists(v_map, x2, y1, y2, axis_tol, closure_tol)
+                    edge_count = sum([bottom, top, left, right])
+
+                    if edge_count >= 1:
+                        region_panels.append(
+                            panel_from_bounds(
+                                region["region_id"],
+                                x1,
+                                y1,
+                                x2,
+                                y2,
+                                "wall_axis_rectangular_cell_lenient",
+                                "lenient_rectangular_cell_from_wall_axis_grid",
+                                edge_count=edge_count,
+                            )
+                        )
+
+        panels.extend(region_panels)
+
+    return dedupe_panels(panels, tol=max(1.0, axis_tol))
+
+
+def fallback_region_span_panels(regions, max_panel_width, max_panel_height, min_panel_width, min_panel_height):
+    """
+    Last-resort panelization: split each plan-region bounding box into rectangular panels.
+    This guarantees a non-empty rectangular modelling output when wall topology is too broken.
+    """
+
+    panels = []
+
+    for region in regions:
+        width = max(float(region.get("width", 0.0)), 0.0)
+        height = max(float(region.get("height", 0.0)), 0.0)
+
+        if width <= 0 or height <= 0:
+            continue
+
+        panel_w = max_panel_width if max_panel_width > 0 else width
+        panel_h = max_panel_height if max_panel_height > 0 else height
+        panel_w = max(panel_w, min_panel_width)
+        panel_h = max(panel_h, min_panel_height)
+
+        nx = max(1, int(math.ceil(width / panel_w)))
+        ny = max(1, int(math.ceil(height / panel_h)))
+        dx = width / nx
+        dy = height / ny
+
+        for i in range(nx):
+            x1 = region["min_x"] + i * dx
+            x2 = region["min_x"] + (i + 1) * dx
+
+            for j in range(ny):
+                y1 = region["min_y"] + j * dy
+                y2 = region["min_y"] + (j + 1) * dy
+
+                if abs(x2 - x1) < min_panel_width or abs(y2 - y1) < min_panel_height:
+                    continue
+
+                panels.append(
+                    panel_from_bounds(
+                        region["region_id"],
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        "fallback_region_span_panel",
+                        "fallback_bounding_region_split_review",
+                    )
+                )
+
+    return panels
+
+
 def dedupe_panels(panels, tol=1.0):
     kept = []
     keys = set()
@@ -3624,6 +3832,27 @@ def analyze_floor_doc(doc, floor_label, settings):
         )
 
     panels = dedupe_panels(panels, tol=max(1.0, settings["axis_tol"]))
+
+    if not panels:
+        panels = detect_wall_axis_rectangular_panels(
+            regions,
+            axis_tol=settings["axis_tol"],
+            closure_tol=settings["panel_closure_tol"],
+            min_panel_width=settings["min_panel_width"],
+            min_panel_height=settings["min_panel_height"],
+            max_panel_width=settings["max_panel_width"],
+            max_panel_height=settings["max_panel_height"],
+        )
+
+    if not panels:
+        panels = fallback_region_span_panels(
+            regions,
+            max_panel_width=settings["max_merged_panel_width"],
+            max_panel_height=settings["max_merged_panel_height"],
+            min_panel_width=settings["min_panel_width"],
+            min_panel_height=settings["min_panel_height"],
+        )
+
     panel_merge_log = []
 
     if settings["merge_adjacent_panels"]:
@@ -4520,6 +4749,27 @@ with st.spinner("Creating slab panels..."):
         )
 
     panels = dedupe_panels(panels, tol=max(1.0, axis_tol))
+
+    if not panels:
+        panels = detect_wall_axis_rectangular_panels(
+            regions,
+            axis_tol=axis_tol,
+            closure_tol=panel_closure_tol,
+            min_panel_width=min_panel_width,
+            min_panel_height=min_panel_height,
+            max_panel_width=max_panel_width,
+            max_panel_height=max_panel_height,
+        )
+
+    if not panels:
+        panels = fallback_region_span_panels(
+            regions,
+            max_panel_width=max_merged_panel_width,
+            max_panel_height=max_merged_panel_height,
+            min_panel_width=min_panel_width,
+            min_panel_height=min_panel_height,
+        )
+
     panel_merge_log = []
 
     if merge_adjacent_panels:
@@ -4940,6 +5190,15 @@ else:
     clean_length = min_output_centerline_length
 
 panels_for_dxf = model_panels if panel_model_export else panels
+
+if panel_model_export and not panels_for_dxf:
+    st.error(
+        "No rectangular panels were generated, so the app will not export an empty panel-model DXF. "
+        "Switch to Full structural review drawing and inspect wall isolation/topology layers."
+    )
+    panel_model_export = False
+    panels_for_dxf = panels
+
 draw_wall_centerlines_output = (not panel_model_export) and export_review_wall_lines
 draw_curved_centerlines_output = (not panel_model_export) and export_curved_centerlines
 draw_nodes_output = (not panel_model_export) and export_junction_nodes
