@@ -2779,6 +2779,138 @@ def detect_wall_axis_rectangular_panels(
     return dedupe_panels(panels, tol=max(1.0, axis_tol))
 
 
+def combined_floor_plate_region(regions):
+    segments = []
+
+    for region in regions:
+        segments.extend([copy_segment(s) for s in region.get("segments", [])])
+
+    if not segments:
+        return None
+
+    bounds = region_bounds_from_segments(segments)
+
+    return {
+        "region_id": 1,
+        "segments": segments,
+        "segment_count": len(segments),
+        **bounds,
+    }
+
+
+def wall_axes_crossing_value(axis_map, value, tol):
+    axes = []
+
+    for axis_value, intervals in axis_map.items():
+        if point_on_intervals(merge_intervals(intervals, gap_tol=tol), value, tol):
+            axes.append(float(axis_value))
+
+    return sorted(axes)
+
+
+def detect_floor_plate_rectangular_panels(
+    regions,
+    axis_tol,
+    closure_tol,
+    min_panel_width,
+    min_panel_height,
+    max_panel_width,
+    max_panel_height,
+):
+    """
+    Builds rectangular slab cells from the apparent floor plate, not from isolated rooms.
+    A grid cell is kept when its centre sits inside the outer wall envelope in both
+    scan directions. This fills door/opening gaps while still avoiding free-floating
+    rectangles outside the main plan.
+    """
+
+    floor_region = combined_floor_plate_region(regions)
+
+    if not floor_region:
+        return []
+
+    segments = floor_region["segments"]
+    xs, ys, h_map, v_map = build_axis_interval_maps(segments, axis_tol)
+
+    if not xs or not ys:
+        return []
+
+    add_axis_value(xs, floor_region["min_x"], axis_tol)
+    add_axis_value(xs, floor_region["max_x"], axis_tol)
+    add_axis_value(ys, floor_region["min_y"], axis_tol)
+    add_axis_value(ys, floor_region["max_y"], axis_tol)
+
+    xs = sorted(cluster_values(xs, axis_tol))
+    ys = sorted(cluster_values(ys, axis_tol))
+    scan_tol = max(axis_tol * 2.0, closure_tol, 1.0)
+    panels = []
+
+    for i in range(len(xs) - 1):
+        x1 = xs[i]
+        x2 = xs[i + 1]
+        width = abs(x2 - x1)
+
+        if width < min_panel_width:
+            continue
+        if max_panel_width > 0 and width > max_panel_width:
+            continue
+
+        mid_x = (x1 + x2) / 2.0
+        horizontal_limits = wall_axes_crossing_value(h_map, mid_x, scan_tol)
+
+        if len(horizontal_limits) < 2:
+            continue
+
+        bottom_limit = min(horizontal_limits)
+        top_limit = max(horizontal_limits)
+
+        for j in range(len(ys) - 1):
+            y1 = ys[j]
+            y2 = ys[j + 1]
+            height = abs(y2 - y1)
+
+            if height < min_panel_height:
+                continue
+            if max_panel_height > 0 and height > max_panel_height:
+                continue
+
+            mid_y = (y1 + y2) / 2.0
+            vertical_limits = wall_axes_crossing_value(v_map, mid_y, scan_tol)
+
+            if len(vertical_limits) < 2:
+                continue
+
+            left_limit = min(vertical_limits)
+            right_limit = max(vertical_limits)
+
+            inside_horizontal_envelope = left_limit - scan_tol <= mid_x <= right_limit + scan_tol
+            inside_vertical_envelope = bottom_limit - scan_tol <= mid_y <= top_limit + scan_tol
+
+            if not (inside_horizontal_envelope and inside_vertical_envelope):
+                continue
+
+            bottom = horizontal_edge_exists(h_map, y1, x1, x2, axis_tol, closure_tol)
+            top = horizontal_edge_exists(h_map, y2, x1, x2, axis_tol, closure_tol)
+            left = vertical_edge_exists(v_map, x1, y1, y2, axis_tol, closure_tol)
+            right = vertical_edge_exists(v_map, x2, y1, y2, axis_tol, closure_tol)
+            edge_count = sum([bottom, top, left, right])
+
+            panels.append(
+                panel_from_bounds(
+                    floor_region["region_id"],
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    "floor_plate_scanline_cell",
+                    "rectangular_cell_inside_wall_envelope",
+                    edge_count=edge_count,
+                )
+            )
+
+    return dedupe_panels(panels, tol=max(1.0, axis_tol))
+
+
 def fallback_region_span_panels(regions, max_panel_width, max_panel_height, min_panel_width, min_panel_height):
     """
     Last-resort panelization: split each plan-region bounding box into rectangular panels.
@@ -2828,6 +2960,156 @@ def fallback_region_span_panels(regions, max_panel_width, max_panel_height, min_
                 )
 
     return panels
+
+
+def panel_support_count(panel):
+    try:
+        return int(panel.get("edge_support_count", 0))
+    except Exception:
+        return 0
+
+
+def panel_interval_overlap(a1, b1, a2, b2):
+    start = max(min(a1, b1), min(a2, b2))
+    end = min(max(a1, b1), max(a2, b2))
+    return max(0.0, end - start)
+
+
+def panels_connected_for_mass(p1, p2, tol):
+    x_overlap = panel_interval_overlap(p1["x1"], p1["x2"], p2["x1"], p2["x2"])
+    y_overlap = panel_interval_overlap(p1["y1"], p1["y2"], p2["y1"], p2["y2"])
+
+    if x_overlap > tol and y_overlap > tol:
+        return True
+
+    vertical_touch = (
+        abs(p1["x2"] - p2["x1"]) <= tol
+        or abs(p2["x2"] - p1["x1"]) <= tol
+    )
+    horizontal_touch = (
+        abs(p1["y2"] - p2["y1"]) <= tol
+        or abs(p2["y2"] - p1["y1"]) <= tol
+    )
+
+    if vertical_touch and y_overlap > tol:
+        return True
+
+    if horizontal_touch and x_overlap > tol:
+        return True
+
+    return False
+
+
+def connected_panel_components(panels, tol):
+    if not panels:
+        return []
+
+    visited = [False] * len(panels)
+    components = []
+
+    for start in range(len(panels)):
+        if visited[start]:
+            continue
+
+        stack = [start]
+        visited[start] = True
+        component = []
+
+        while stack:
+            idx = stack.pop()
+            component.append(idx)
+
+            for other in range(len(panels)):
+                if visited[other]:
+                    continue
+                if panels_connected_for_mass(panels[idx], panels[other], tol):
+                    visited[other] = True
+                    stack.append(other)
+
+        components.append(component)
+
+    return components
+
+
+def clean_panel_mass_for_modelling(
+    panels,
+    axis_tol,
+    min_panel_width,
+    min_panel_height,
+    keep_area_ratio=0.10,
+):
+    """
+    Removes isolated fallback rectangles before export.
+    The intended slab model should read as one or more connected floor plates,
+    not scattered boxes from tiny wall fragments.
+    """
+
+    if not panels:
+        return [], []
+
+    tol = max(axis_tol * 2.0, 1.0)
+    working = rectangular_model_panels(dedupe_panels(panels, tol=max(axis_tol, 1.0)))
+
+    if len(working) <= 1:
+        return working, []
+
+    components = connected_panel_components(working, tol=tol)
+
+    if len(components) <= 1:
+        return sorted(
+            working,
+            key=lambda p: (p.get("region_id", 0), p["x1"], p["y1"], p["x2"], p["y2"]),
+        ), []
+
+    stats = []
+    for component in components:
+        component_panels = [working[idx] for idx in component]
+        area = sum(float(p.get("area", 0.0)) for p in component_panels)
+        strong_panels = len([p for p in component_panels if panel_support_count(p) >= 2])
+        stats.append({
+            "component": component,
+            "area": area,
+            "panel_count": len(component_panels),
+            "strong_panels": strong_panels,
+        })
+
+    stats = sorted(stats, key=lambda s: (s["area"], s["panel_count"]), reverse=True)
+    largest_area = max(stats[0]["area"], 1.0)
+    minimum_real_cluster_area = max(float(min_panel_width) * float(min_panel_height) * 3.0, 1.0)
+
+    kept = []
+    cleanup_log = []
+
+    for rank, stat in enumerate(stats, start=1):
+        keep = False
+
+        if rank == 1:
+            keep = True
+        elif stat["area"] >= largest_area * keep_area_ratio:
+            keep = True
+        elif stat["area"] >= minimum_real_cluster_area and stat["panel_count"] >= 2:
+            keep = True
+
+        if stat["strong_panels"] == 0 and stat["area"] < largest_area * 0.40 and rank != 1:
+            keep = False
+
+        if keep:
+            kept.extend([working[idx] for idx in stat["component"]])
+        else:
+            cleanup_log.append({
+                "reason": "removed_isolated_panel_fragment",
+                "component_rank": rank,
+                "panel_count": stat["panel_count"],
+                "component_area": round(stat["area"], 3),
+                "largest_component_area": round(largest_area, 3),
+            })
+
+    kept = dedupe_panels(kept, tol=max(axis_tol, 1.0))
+
+    return sorted(
+        kept,
+        key=lambda p: (p.get("region_id", 0), p["x1"], p["y1"], p["x2"], p["y2"]),
+    ), cleanup_log
 
 
 def dedupe_panels(panels, tol=1.0):
@@ -2994,6 +3276,10 @@ def panel_merge_log_to_dataframe(merge_log):
     return pd.DataFrame(merge_log)
 
 
+def panel_cleanup_log_to_dataframe(cleanup_log):
+    return pd.DataFrame(cleanup_log)
+
+
 def rectangular_model_panels(panels):
     model_panels = []
 
@@ -3154,6 +3440,7 @@ def clone_floor_result_with_label(result, floor_label):
         "panels",
         "model_panels",
         "panel_merge_log",
+        "panel_cleanup_log",
         "topology_stats",
         "structural_layouts",
     ]:
@@ -3834,6 +4121,17 @@ def analyze_floor_doc(doc, floor_label, settings):
     panels = dedupe_panels(panels, tol=max(1.0, settings["axis_tol"]))
 
     if not panels:
+        panels = detect_floor_plate_rectangular_panels(
+            regions,
+            axis_tol=settings["axis_tol"],
+            closure_tol=settings["panel_closure_tol"],
+            min_panel_width=settings["min_panel_width"],
+            min_panel_height=settings["min_panel_height"],
+            max_panel_width=settings["max_panel_width"],
+            max_panel_height=settings["max_panel_height"],
+        )
+
+    if not panels:
         panels = detect_wall_axis_rectangular_panels(
             regions,
             axis_tol=settings["axis_tol"],
@@ -3853,6 +4151,15 @@ def analyze_floor_doc(doc, floor_label, settings):
             min_panel_height=settings["min_panel_height"],
         )
 
+    panel_cleanup_log = []
+    panels, cleanup_log = clean_panel_mass_for_modelling(
+        panels,
+        axis_tol=settings["axis_tol"],
+        min_panel_width=settings["min_panel_width"],
+        min_panel_height=settings["min_panel_height"],
+    )
+    panel_cleanup_log.extend(cleanup_log)
+
     panel_merge_log = []
 
     if settings["merge_adjacent_panels"]:
@@ -3863,6 +4170,14 @@ def analyze_floor_doc(doc, floor_label, settings):
             max_merge_height=settings["max_merged_panel_height"],
             max_aspect_ratio=settings["max_panel_aspect_ratio"],
         )
+
+        panels, cleanup_log = clean_panel_mass_for_modelling(
+            panels,
+            axis_tol=settings["axis_tol"],
+            min_panel_width=settings["min_panel_width"],
+            min_panel_height=settings["min_panel_height"],
+        )
+        panel_cleanup_log.extend(cleanup_log)
 
     model_panels = rectangular_model_panels(panels)
     nodes = collect_junction_nodes(output_wall_segments, axis_tol=settings["axis_tol"])
@@ -3894,6 +4209,7 @@ def analyze_floor_doc(doc, floor_label, settings):
         "panels": panels,
         "model_panels": model_panels,
         "panel_merge_log": panel_merge_log,
+        "panel_cleanup_log": panel_cleanup_log,
         "nodes": nodes,
     }
 
@@ -4751,6 +5067,17 @@ with st.spinner("Creating slab panels..."):
     panels = dedupe_panels(panels, tol=max(1.0, axis_tol))
 
     if not panels:
+        panels = detect_floor_plate_rectangular_panels(
+            regions,
+            axis_tol=axis_tol,
+            closure_tol=panel_closure_tol,
+            min_panel_width=min_panel_width,
+            min_panel_height=min_panel_height,
+            max_panel_width=max_panel_width,
+            max_panel_height=max_panel_height,
+        )
+
+    if not panels:
         panels = detect_wall_axis_rectangular_panels(
             regions,
             axis_tol=axis_tol,
@@ -4770,6 +5097,15 @@ with st.spinner("Creating slab panels..."):
             min_panel_height=min_panel_height,
         )
 
+    panel_cleanup_log = []
+    panels, cleanup_log = clean_panel_mass_for_modelling(
+        panels,
+        axis_tol=axis_tol,
+        min_panel_width=min_panel_width,
+        min_panel_height=min_panel_height,
+    )
+    panel_cleanup_log.extend(cleanup_log)
+
     panel_merge_log = []
 
     if merge_adjacent_panels:
@@ -4780,6 +5116,14 @@ with st.spinner("Creating slab panels..."):
             max_merge_height=max_merged_panel_height,
             max_aspect_ratio=max_panel_aspect_ratio,
         )
+
+        panels, cleanup_log = clean_panel_mass_for_modelling(
+            panels,
+            axis_tol=axis_tol,
+            min_panel_width=min_panel_width,
+            min_panel_height=min_panel_height,
+        )
+        panel_cleanup_log.extend(cleanup_log)
 
     model_panels = rectangular_model_panels(panels)
     nodes = collect_junction_nodes(output_wall_segments, axis_tol=axis_tol)
@@ -4854,6 +5198,7 @@ floor_results = [{
     "panels": panels,
     "model_panels": model_panels,
     "panel_merge_log": panel_merge_log,
+    "panel_cleanup_log": panel_cleanup_log,
     "nodes": nodes,
 }]
 
@@ -4943,11 +5288,12 @@ t1.metric("Topology graph segments", len(region_segments))
 t2.metric("Centerline graph repair", "ON" if repair_centerline_graph else "OFF")
 t3.metric("Source geometry lock", "ON" if preserve_source_geometry else "OFF")
 
-m1, m2, m3, m4 = st.columns(4)
+m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Floors analyzed", len(floor_results))
 m2.metric("Rectangular model panels", len(model_panels))
 m3.metric("Column vertical lines", len(column_superimposition_df))
-m4.metric("Multi-floor errors", len(multifloor_errors))
+m4.metric("Panel islands removed", len(panel_cleanup_log))
+m5.metric("Multi-floor errors", len(multifloor_errors))
 
 if multifloor_errors:
     st.warning("Multi-floor review messages: " + " | ".join(multifloor_errors))
@@ -5148,6 +5494,17 @@ with tab11:
             "Download Panel Merge Log CSV",
             data=merge_df.to_csv(index=False).encode("utf-8"),
             file_name="ILS_PANEL_MERGE_LOG.csv",
+            mime="text/csv",
+        )
+
+    cleanup_df = panel_cleanup_log_to_dataframe(panel_cleanup_log)
+    if not cleanup_df.empty:
+        st.markdown("#### Panel Cleanup")
+        st.dataframe(cleanup_df, use_container_width=True)
+        st.download_button(
+            "Download Panel Cleanup Log CSV",
+            data=cleanup_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_PANEL_CLEANUP_LOG.csv",
             mime="text/csv",
         )
 
