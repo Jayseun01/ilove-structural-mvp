@@ -1140,6 +1140,224 @@ def detect_graph_slab_panels(
 
 
 # =========================================================
+# CENTERLINE TOPOLOGY / ROOM GRAPH REPAIR
+# =========================================================
+
+def region_bounds_from_segments(segments):
+    xs = []
+    ys = []
+
+    for s in segments:
+        if s["orientation"] == "H":
+            xs.extend([s["a"], s["b"]])
+            ys.append(s["c"])
+        else:
+            xs.append(s["c"])
+            ys.extend([s["a"], s["b"]])
+
+    if not xs or not ys:
+        return {
+            "min_x": 0.0,
+            "max_x": 0.0,
+            "min_y": 0.0,
+            "max_y": 0.0,
+            "width": 0.0,
+            "height": 0.0,
+        }
+
+    return {
+        "min_x": min(xs),
+        "max_x": max(xs),
+        "min_y": min(ys),
+        "max_y": max(ys),
+        "width": max(xs) - min(xs),
+        "height": max(ys) - min(ys),
+    }
+
+
+def update_region_from_segments(region, segments):
+    bounds = region_bounds_from_segments(segments)
+    region["segments"] = segments
+    region["segment_count"] = len(segments)
+    region.update(bounds)
+    return region
+
+
+def snap_segment_axes(segments, axis_tol):
+    h_segments, v_segments = split_hv_segments(segments)
+    xs = cluster_values([v["c"] for v in v_segments], axis_tol)
+    ys = cluster_values([h["c"] for h in h_segments], axis_tol)
+
+    snapped = []
+    for s in segments:
+        ss = copy_segment(s)
+        if ss["orientation"] == "H":
+            ss["c"] = nearest_axis(ss["c"], ys, axis_tol)
+        else:
+            ss["c"] = nearest_axis(ss["c"], xs, axis_tol)
+        snapped.append(ss)
+
+    return snapped
+
+
+def extend_segments_to_crossing_axes(segments, extend_tol):
+    if extend_tol <= 0:
+        return [copy_segment(s) for s in segments]
+
+    working = [copy_segment(s) for s in segments]
+    h_segments, v_segments = split_hv_segments(working)
+
+    for h in h_segments:
+        hy = h["c"]
+        for v in v_segments:
+            vx = v["c"]
+
+            x_close_to_h = h["a"] - extend_tol <= vx <= h["b"] + extend_tol
+            y_close_to_v = v["a"] - extend_tol <= hy <= v["b"] + extend_tol
+
+            if not (x_close_to_h and y_close_to_v):
+                continue
+
+            h["a"] = min(h["a"], vx)
+            h["b"] = max(h["b"], vx)
+            v["a"] = min(v["a"], hy)
+            v["b"] = max(v["b"], hy)
+
+    return working
+
+
+def add_short_connection_segments(segments, axis_tol, connect_tol, default_thickness=225):
+    """
+    Adds tiny centerline connectors where one wall almost reaches a crossing wall axis.
+    This turns a visual near-miss into an actual graph node for panel and room creation.
+    """
+
+    if connect_tol <= 0:
+        return [copy_segment(s) for s in segments]
+
+    working = [copy_segment(s) for s in segments]
+    h_segments, v_segments = split_hv_segments(working)
+    xs, ys, h_map, v_map = build_axis_interval_maps(working, axis_tol)
+    additions = []
+
+    for h in h_segments:
+        hy = nearest_axis(h["c"], ys, axis_tol)
+        for vx in xs:
+            if point_on_intervals(v_map.get(vx, []), hy, connect_tol):
+                if h["b"] < vx and vx - h["b"] <= connect_tol:
+                    additions.append(
+                        make_centerline_segment(
+                            "H",
+                            hy,
+                            h["b"],
+                            vx,
+                            h.get("thickness", default_thickness),
+                            region_id=h.get("region_id"),
+                        )
+                    )
+                elif vx < h["a"] and h["a"] - vx <= connect_tol:
+                    additions.append(
+                        make_centerline_segment(
+                            "H",
+                            hy,
+                            vx,
+                            h["a"],
+                            h.get("thickness", default_thickness),
+                            region_id=h.get("region_id"),
+                        )
+                    )
+
+    for v in v_segments:
+        vx = nearest_axis(v["c"], xs, axis_tol)
+        for hy in ys:
+            if point_on_intervals(h_map.get(hy, []), vx, connect_tol):
+                if v["b"] < hy and hy - v["b"] <= connect_tol:
+                    additions.append(
+                        make_centerline_segment(
+                            "V",
+                            vx,
+                            v["b"],
+                            hy,
+                            v.get("thickness", default_thickness),
+                            region_id=v.get("region_id"),
+                        )
+                    )
+                elif hy < v["a"] and v["a"] - hy <= connect_tol:
+                    additions.append(
+                        make_centerline_segment(
+                            "V",
+                            vx,
+                            hy,
+                            v["a"],
+                            v.get("thickness", default_thickness),
+                            region_id=v.get("region_id"),
+                        )
+                    )
+
+    return working + additions
+
+
+def repair_centerline_topology(segments, axis_tol, gap_tol, connect_tol, iterations=4):
+    """
+    Converts extracted centerline fragments into a cleaner noded graph:
+    snap axes, bridge small wall gaps, extend near-miss endpoints, and merge again.
+    """
+
+    if not segments:
+        return []
+
+    working = [copy_segment(s) for s in segments]
+
+    for _ in range(max(1, int(iterations))):
+        working = snap_segment_axes(working, axis_tol)
+        working = merge_collinear_segments(working, axis_tol=axis_tol, bridge_gap=gap_tol)
+        working = extend_segments_to_crossing_axes(working, extend_tol=connect_tol)
+        working = add_short_connection_segments(
+            working,
+            axis_tol=axis_tol,
+            connect_tol=connect_tol,
+            default_thickness=max([int(s.get("thickness", 225)) for s in working] or [225]),
+        )
+        working = merge_collinear_segments(working, axis_tol=axis_tol, bridge_gap=gap_tol)
+
+    return sorted(
+        working,
+        key=lambda s: (s.get("region_id", 0), s["orientation"], s["c"], s["a"], s["b"]),
+    )
+
+
+def repair_regions_topology(regions, axis_tol, gap_tol, connect_tol):
+    repaired_regions = []
+    repaired_segments = []
+    stats = []
+
+    for region in regions:
+        before = len(region.get("segments", []))
+        repaired = repair_centerline_topology(
+            region.get("segments", []),
+            axis_tol=axis_tol,
+            gap_tol=gap_tol,
+            connect_tol=connect_tol,
+            iterations=4,
+        )
+
+        for s in repaired:
+            s["region_id"] = region["region_id"]
+
+        updated = update_region_from_segments(dict(region), repaired)
+        repaired_regions.append(updated)
+        repaired_segments.extend(repaired)
+        stats.append({
+            "region_id": region["region_id"],
+            "segments_before": before,
+            "segments_after": len(repaired),
+            "added_or_merged_delta": len(repaired) - before,
+        })
+
+    return repaired_regions, repaired_segments, stats
+
+
+# =========================================================
 # SMART STRUCTURAL LAYOUT ENGINE
 # =========================================================
 
@@ -1262,7 +1480,34 @@ def find_best_axis_in_gap(axis_infos, left, right, min_spacing):
     )
 
 
-def select_support_axes(axis_infos, low_bound, high_bound, max_spacing, min_spacing, axis_tol, strategy):
+def synthetic_axis_info(axis_name, value):
+    return {
+        "axis": axis_name,
+        "value": float(value),
+        "coverage": 0.0,
+        "coverage_ratio": 0.0,
+        "segment_count": 0,
+        "max_thickness": 0,
+        "intervals": [],
+        "is_outer": False,
+        "is_major": True,
+        "is_synthetic": True,
+        "score": 0.0,
+        "selected_reason": "",
+    }
+
+
+def merge_axis_infos_unique(axis_infos, selected_infos, axis_tol):
+    merged = [dict(a) for a in axis_infos]
+
+    for selected in selected_infos:
+        if find_axis_info_by_value(merged, selected["value"], axis_tol) is None:
+            merged.append(dict(selected))
+
+    return sorted(merged, key=lambda a: a["value"])
+
+
+def select_support_axes(axis_infos, low_bound, high_bound, max_spacing, min_spacing, axis_tol, strategy, axis_name):
     if not axis_infos:
         return []
 
@@ -1275,7 +1520,9 @@ def select_support_axes(axis_infos, low_bound, high_bound, max_spacing, min_spac
     if high_axis:
         add_axis_if_spaced(selected, high_axis, 0.0, axis_tol, "outer_edge")
 
-    if strategy == "Dense review":
+    if strategy == "Safety first":
+        major_threshold = 0.20
+    elif strategy == "Dense review":
         major_threshold = 0.30
     elif strategy == "Balanced":
         major_threshold = 0.48
@@ -1309,7 +1556,7 @@ def select_support_axes(axis_infos, low_bound, high_bound, max_spacing, min_spac
         best = find_best_axis_in_gap(axis_infos, left, right, min_spacing)
 
         if best is None:
-            break
+            best = synthetic_axis_info(axis_name, (left + right) / 2.0)
 
         if not add_axis_if_spaced(selected, best, min_spacing, axis_tol, "span_control"):
             break
@@ -1403,6 +1650,13 @@ def should_accept_structural_candidate(candidate, strategy):
     if not candidate["on_selected_support_grid"]:
         return False, "not_on_economical_support_grid"
 
+    if strategy == "Safety first":
+        if candidate["role"] == "corner":
+            return True, "corner_support"
+        if candidate["role"] == "perimeter":
+            return True, "perimeter_support_grid"
+        return True, "safety_span_control_grid"
+
     if not candidate["has_wall_junction"]:
         return False, "not_confirmed_wall_grid_junction"
 
@@ -1453,6 +1707,7 @@ def build_region_structural_layout(
         min_spacing=min_spacing,
         axis_tol=axis_tol,
         strategy=strategy,
+        axis_name="X",
     )
     selected_y_infos = select_support_axes(
         y_infos,
@@ -1462,20 +1717,23 @@ def build_region_structural_layout(
         min_spacing=min_spacing,
         axis_tol=axis_tol,
         strategy=strategy,
+        axis_name="Y",
     )
 
     selected_x_values = [a["value"] for a in selected_x_infos]
     selected_y_values = [a["value"] for a in selected_y_infos]
+    candidate_x_infos = merge_axis_infos_unique(x_infos, selected_x_infos, axis_tol)
+    candidate_y_infos = merge_axis_infos_unique(y_infos, selected_y_infos, axis_tol)
 
     candidates = []
     rejected = []
 
-    for x_info in x_infos:
+    for x_info in candidate_x_infos:
         x = x_info["value"]
         x_selected_info = find_axis_info_by_value(selected_x_infos, x, axis_tol)
         x_selected = x_selected_info is not None
 
-        for y_info in y_infos:
+        for y_info in candidate_y_infos:
             y = y_info["value"]
             y_selected_info = find_axis_info_by_value(selected_y_infos, y, axis_tol)
             y_selected = y_selected_info is not None
@@ -1774,6 +2032,26 @@ def detect_structural_grid_panels(layouts, accepted_columns, axis_tol, min_width
                 })
 
     return panels
+
+
+def dedupe_panels(panels, tol=1.0):
+    kept = []
+    keys = set()
+
+    for panel in panels:
+        x1 = round(min(panel["x1"], panel["x2"]) / max(tol, 1e-9))
+        x2 = round(max(panel["x1"], panel["x2"]) / max(tol, 1e-9))
+        y1 = round(min(panel["y1"], panel["y2"]) / max(tol, 1e-9))
+        y2 = round(max(panel["y1"], panel["y2"]) / max(tol, 1e-9))
+        key = (panel.get("region_id"), x1, y1, x2, y2)
+
+        if key in keys:
+            continue
+
+        keys.add(key)
+        kept.append(panel)
+
+    return kept
 
 
 # =========================================================
@@ -2383,7 +2661,7 @@ with st.expander("Output mode and cleanup", expanded=True):
     min_output_centerline_length = o2.number_input(
         "Minimum output centerline length",
         min_value=0.0,
-        value=750.0,
+        value=0.0,
         step=50.0,
     )
 
@@ -2445,6 +2723,31 @@ with st.expander("Multiple plan / region settings", expanded=True):
         help="Geometry farther apart than this is treated as separate regions.",
     )
 
+with st.expander("Centerline graph and room topology", expanded=True):
+    g1, g2, g3 = st.columns(3)
+
+    repair_centerline_graph = g1.checkbox(
+        "Repair and node centerline graph",
+        value=True,
+        help="Keeps short connector walls, snaps near axes, bridges small gaps, and makes intersections usable for room/panel creation.",
+    )
+
+    graph_gap_tol = g2.number_input(
+        "Room/wall closure gap",
+        min_value=0.0,
+        value=max(1200.0, bridge_gap),
+        step=100.0,
+        help="Small gaps up to this value are bridged in the centerline graph. Use this for doors, openings, and near-miss wall fragments.",
+    )
+
+    graph_connect_tol = g3.number_input(
+        "Endpoint connection tolerance",
+        min_value=0.0,
+        value=max(600.0, intersection_extend_tol),
+        step=50.0,
+        help="Extends near-miss centerline endpoints to crossing axes so the exported graph is connected.",
+    )
+
 with st.expander("Smart column layout settings", expanded=True):
     col1, col2, col3 = st.columns(3)
 
@@ -2452,15 +2755,17 @@ with st.expander("Smart column layout settings", expanded=True):
 
     column_layout_strategy = col2.selectbox(
         "Column economy strategy",
-        ["Economical", "Balanced", "Dense review"],
+        ["Safety first", "Balanced", "Economical", "Dense review"],
         index=0,
-        help="Economical filters minor partitions hardest. Dense review keeps more selected-grid intersections for checking.",
+        help="Safety first adds support-grid intersections to control spans. Economical filters minor partitions hardest.",
     )
+
+    default_column_spacing_filter = 1200.0 if column_layout_strategy == "Safety first" else max(1800.0, float(profile["min_column_spacing"]))
 
     min_column_spacing = col3.number_input(
         "Minimum column spacing",
         min_value=0.0,
-        value=max(1800.0, float(profile["min_column_spacing"])),
+        value=default_column_spacing_filter,
         step=100.0,
     )
 
@@ -2487,14 +2792,14 @@ with st.expander("Slab panel settings", expanded=True):
 
     slab_panel_method = p1.selectbox(
         "Panel creation method",
-        ["Structural grid panels", "Wall-bounded graph panels", "Both"],
+        ["Both", "Structural grid panels", "Wall-bounded graph panels"],
         index=0,
     )
 
     export_slab_panels = p2.checkbox(
-        "Export slab panels",
+        "Export closed room/slab polylines",
         value=True,
-        help="Exports slab panel review rectangles to ILS_SLAB_PANEL_REVIEW.",
+        help="Exports closed LWPOLYLINE panels so modelling software reads rooms/slabs, not only loose wall lines.",
     )
 
     panel_closure_tol = p3.number_input(
@@ -2606,21 +2911,20 @@ with st.spinner("Cleaning duplicate centerlines..."):
 
 selected_final_segments = filter_segments_by_thickness(final_segments, export_wall_thicknesses)
 
-if output_mode == "Clean structural mode":
-    clean_export_segments = filter_short_segments(selected_final_segments, min_output_centerline_length)
-else:
-    clean_export_segments = filter_short_segments(selected_final_segments, 0.0)
+# Do not remove short centerline fragments before topology repair.
+# Small return walls and short corridor pieces are often the exact segments that close rooms.
+analysis_centerline_segments = list(selected_final_segments)
 
 with st.spinner("Separating plan regions..."):
     if auto_separate_regions:
         regions, region_segments = split_segments_into_regions(
-            clean_export_segments,
+            analysis_centerline_segments,
             axis_tol=axis_tol,
             region_gap=region_gap,
         )
     else:
         region_segments = []
-        for s in clean_export_segments:
+        for s in analysis_centerline_segments:
             ss = copy_segment(s)
             ss["region_id"] = 1
             region_segments.append(ss)
@@ -2652,6 +2956,27 @@ with st.spinner("Separating plan regions..."):
 if not regions:
     st.error("No usable plan regions were created after filtering. Lower the output length filter or check wall thickness selection.")
     st.stop()
+
+topology_stats = []
+
+with st.spinner("Repairing centerline graph into connected room topology..."):
+    if repair_centerline_graph:
+        regions, region_segments, topology_stats = repair_regions_topology(
+            regions,
+            axis_tol=axis_tol,
+            gap_tol=graph_gap_tol,
+            connect_tol=graph_connect_tol,
+        )
+    else:
+        topology_stats = [
+            {
+                "region_id": r["region_id"],
+                "segments_before": len(r.get("segments", [])),
+                "segments_after": len(r.get("segments", [])),
+                "added_or_merged_delta": 0,
+            }
+            for r in regions
+        ]
 
 with st.spinner("Building smart structural grid and economical columns..."):
     structural_layouts = []
@@ -2726,6 +3051,7 @@ with st.spinner("Creating slab panels..."):
             )
         )
 
+    panels = dedupe_panels(panels, tol=max(1.0, axis_tol))
     nodes = collect_junction_nodes(region_segments, axis_tol=axis_tol)
 
 
@@ -2753,6 +3079,11 @@ c2.metric("After extension", len(extended_segments))
 c3.metric("Removed overlaps", len(removed_overlap_segments))
 c4.metric("Rejected column candidates", len(rejected_columns))
 
+t1, t2, t3 = st.columns(3)
+t1.metric("Topology graph segments", len(region_segments))
+t2.metric("Centerline graph repair", "ON" if repair_centerline_graph else "OFF")
+t3.metric("Room/slab closed polylines", len(panels))
+
 warnings = []
 for layout in structural_layouts:
     warnings.extend([f"Region {layout['region_id']}: {w}" for w in layout.get("warnings", [])])
@@ -2776,10 +3107,11 @@ st.info(
 
 st.markdown("### 5. Preview Tables")
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
     [
         "Regions",
         "Structural Grid",
+        "Topology Repair",
         "Raw Centerlines",
         "Final Region Centerlines",
         "Removed Overlaps",
@@ -2816,6 +3148,19 @@ with tab2:
         )
 
 with tab3:
+    topology_df = pd.DataFrame(topology_stats)
+    if topology_df.empty:
+        st.info("No topology repair data.")
+    else:
+        st.dataframe(topology_df, use_container_width=True)
+        st.download_button(
+            "Download Topology Repair CSV",
+            data=topology_df.to_csv(index=False).encode("utf-8"),
+            file_name="ILS_TOPOLOGY_REPAIR.csv",
+            mime="text/csv",
+        )
+
+with tab4:
     raw_df = segments_to_dataframe(raw_segments)
     if raw_df.empty:
         st.info("No raw centerlines.")
@@ -2828,7 +3173,7 @@ with tab3:
             mime="text/csv",
         )
 
-with tab4:
+with tab5:
     final_df = segments_to_dataframe(region_segments)
     if final_df.empty:
         st.info("No final region centerlines.")
@@ -2841,7 +3186,7 @@ with tab4:
             mime="text/csv",
         )
 
-with tab5:
+with tab6:
     removed_df = removed_segments_to_dataframe(removed_overlap_segments)
     if removed_df.empty:
         st.info("No overlapping centerlines removed.")
@@ -2854,7 +3199,7 @@ with tab5:
             mime="text/csv",
         )
 
-with tab6:
+with tab7:
     accepted_columns_df = columns_to_dataframe(accepted_columns)
     if accepted_columns_df.empty:
         st.info("No accepted columns.")
@@ -2868,7 +3213,7 @@ with tab6:
             mime="text/csv",
         )
 
-with tab7:
+with tab8:
     rejected_columns_df = columns_to_dataframe(rejected_columns)
     if rejected_columns_df.empty:
         st.info("No rejected columns.")
@@ -2881,7 +3226,7 @@ with tab7:
             mime="text/csv",
         )
 
-with tab8:
+with tab9:
     panels_df = panels_to_dataframe(panels)
     if panels_df.empty:
         st.info("No slab panels detected.")
@@ -2939,12 +3284,12 @@ else:
     output_filename = f"ILS_REVIEW_STRUCTURAL_LAYOUT_{timestamp}.dxf"
 
 st.download_button(
-    "Download Centerlines + Smart Columns + Slab Panels DXF",
+    "Download Connected Centerlines + Columns + Room/Slab Polylines DXF",
     data=output_bytes,
     file_name=output_filename,
     mime="application/dxf",
 )
 
 st.success(
-    "Analysis complete. The DXF now separates wall centerlines from a smarter structural grid, economical column suggestions, and slab panel review geometry."
+    "Analysis complete. The DXF now exports a repaired centerline graph, support-grid columns, and closed room/slab panel polylines for modelling review."
 )
