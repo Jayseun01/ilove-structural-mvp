@@ -187,153 +187,6 @@ def get_layer_names(doc):
         return []
 
 
-WALL_LAYER_KEYWORDS = [
-    "wall",
-    "walls",
-    "a-wall",
-    "a_wall",
-    "arch-wall",
-    "partition",
-    "blockwork",
-    "masonry",
-    "external",
-    "internal",
-]
-
-NON_WALL_LAYER_KEYWORDS = [
-    "door",
-    "window",
-    "grid",
-    "axis",
-    "dim",
-    "dimension",
-    "text",
-    "anno",
-    "annotation",
-    "furn",
-    "furniture",
-    "fixture",
-    "toilet",
-    "stair",
-    "hatch",
-    "room",
-    "label",
-    "title",
-    "column",
-    "beam",
-    "slab",
-    "roof",
-    "plumb",
-    "elect",
-    "light",
-    "section",
-    "elevation",
-]
-
-
-def layer_wall_likelihood_score(layer_name, usable_count, text_like_count, block_count):
-    name = str(layer_name).lower()
-    score = 0
-
-    for word in WALL_LAYER_KEYWORDS:
-        if word in name:
-            score += 6
-
-    for word in NON_WALL_LAYER_KEYWORDS:
-        if word in name:
-            score -= 8
-
-    if usable_count > 0:
-        score += min(5, usable_count)
-
-    if text_like_count > 0:
-        score -= min(5, text_like_count)
-
-    if block_count > usable_count:
-        score -= 3
-
-    return score
-
-
-def get_layer_entity_summary(doc):
-    rows_by_layer = {}
-    usable_types = {"LINE", "LWPOLYLINE", "POLYLINE", "ARC", "CIRCLE"}
-    text_like_types = {"TEXT", "MTEXT", "DIMENSION", "LEADER", "MLEADER"}
-
-    try:
-        entities = list(doc.modelspace())
-    except Exception:
-        entities = []
-
-    for layer in get_layer_names(doc):
-        rows_by_layer[layer] = {
-            "layer": layer,
-            "total_entities": 0,
-            "usable_wall_entities": 0,
-            "line_entities": 0,
-            "polyline_entities": 0,
-            "arc_circle_entities": 0,
-            "text_dim_entities": 0,
-            "block_entities": 0,
-            "wall_score": 0,
-            "suggested_wall_layer": False,
-        }
-
-    for entity in entities:
-        try:
-            layer = entity.dxf.layer
-            dxftype = entity.dxftype()
-        except Exception:
-            continue
-
-        rows_by_layer.setdefault(layer, {
-            "layer": layer,
-            "total_entities": 0,
-            "usable_wall_entities": 0,
-            "line_entities": 0,
-            "polyline_entities": 0,
-            "arc_circle_entities": 0,
-            "text_dim_entities": 0,
-            "block_entities": 0,
-            "wall_score": 0,
-            "suggested_wall_layer": False,
-        })
-
-        row = rows_by_layer[layer]
-        row["total_entities"] += 1
-
-        if dxftype in usable_types:
-            row["usable_wall_entities"] += 1
-
-        if dxftype == "LINE":
-            row["line_entities"] += 1
-        elif dxftype in {"LWPOLYLINE", "POLYLINE"}:
-            row["polyline_entities"] += 1
-        elif dxftype in {"ARC", "CIRCLE"}:
-            row["arc_circle_entities"] += 1
-        elif dxftype in text_like_types:
-            row["text_dim_entities"] += 1
-        elif dxftype == "INSERT":
-            row["block_entities"] += 1
-
-    rows = []
-    for row in rows_by_layer.values():
-        row["wall_score"] = layer_wall_likelihood_score(
-            row["layer"],
-            row["usable_wall_entities"],
-            row["text_dim_entities"],
-            row["block_entities"],
-        )
-        row["suggested_wall_layer"] = row["usable_wall_entities"] > 0 and row["wall_score"] >= 6
-        rows.append(row)
-
-    return sorted(rows, key=lambda r: (-r["suggested_wall_layer"], -r["wall_score"], r["layer"]))
-
-
-def suggested_wall_layers_from_summary(layer_summary):
-    return [row["layer"] for row in layer_summary if row.get("suggested_wall_layer")]
-
-
 def safe_layer(doc, name, color=7):
     try:
         existing = [layer.dxf.name for layer in doc.layers]
@@ -545,178 +398,6 @@ def is_near_any(value, values, tol):
     return value_in_list(value, values, tol)
 
 
-def normalize_angle(angle):
-    a = float(angle) % 360.0
-    if abs(a - 360.0) <= 1e-9:
-        return 0.0
-    return a
-
-
-def positive_sweep(start_angle, end_angle):
-    start = normalize_angle(start_angle)
-    end = normalize_angle(end_angle)
-    sweep = end - start
-    if sweep <= 0:
-        sweep += 360.0
-    return sweep
-
-
-def angle_to_xy(cx, cy, radius, angle_deg):
-    a = math.radians(angle_deg)
-    return (
-        float(cx) + float(radius) * math.cos(a),
-        float(cy) + float(radius) * math.sin(a),
-    )
-
-
-def arc_angle_intervals(start_angle, end_angle, full_circle=False):
-    if full_circle:
-        return [(0.0, 360.0)]
-
-    start = normalize_angle(start_angle)
-    sweep = positive_sweep(start_angle, end_angle)
-
-    if sweep >= 360.0 - 1e-9:
-        return [(0.0, 360.0)]
-
-    end = start + sweep
-
-    if end <= 360.0:
-        return [(start, end)]
-
-    return [(start, 360.0), (0.0, end - 360.0)]
-
-
-def angle_interval_overlaps(face1, face2):
-    intervals1 = arc_angle_intervals(
-        face1.get("start_angle", 0.0),
-        face1.get("end_angle", 360.0),
-        full_circle=face1.get("curve_type") == "CIRCLE",
-    )
-    intervals2 = arc_angle_intervals(
-        face2.get("start_angle", 0.0),
-        face2.get("end_angle", 360.0),
-        full_circle=face2.get("curve_type") == "CIRCLE",
-    )
-
-    overlaps = []
-    for a1, b1 in intervals1:
-        for a2, b2 in intervals2:
-            a = max(a1, a2)
-            b = min(b1, b2)
-            if b > a:
-                overlaps.append((a, b))
-
-    return overlaps
-
-
-def make_curve_face(curve_type, cx, cy, radius, start_angle, end_angle, layer, source_type, handle):
-    return {
-        "curve_type": curve_type,
-        "cx": float(cx),
-        "cy": float(cy),
-        "radius": float(radius),
-        "start_angle": float(start_angle),
-        "end_angle": float(end_angle),
-        "layer": layer,
-        "source_type": source_type,
-        "handle": handle,
-    }
-
-
-def make_curved_centerline(
-    curve_type,
-    cx,
-    cy,
-    radius,
-    start_angle,
-    end_angle,
-    thickness,
-    actual_thickness=None,
-    thickness_error=None,
-    overlap_angle=None,
-    overlap_length=None,
-    source_count=1,
-    region_id=None,
-):
-    if actual_thickness is None:
-        actual_thickness = thickness
-
-    if thickness_error is None:
-        thickness_error = abs(float(actual_thickness) - float(thickness))
-
-    if overlap_angle is None:
-        overlap_angle = 360.0 if curve_type == "CIRCLE" else positive_sweep(start_angle, end_angle)
-
-    if overlap_length is None:
-        overlap_length = abs(float(radius) * math.radians(float(overlap_angle)))
-
-    quality_score = float(overlap_length) - float(thickness_error) * 100.0
-
-    return {
-        "curve_type": curve_type,
-        "cx": float(cx),
-        "cy": float(cy),
-        "radius": float(radius),
-        "start_angle": float(start_angle),
-        "end_angle": float(end_angle),
-        "thickness": int(thickness),
-        "actual_thickness": float(actual_thickness),
-        "thickness_error": float(thickness_error),
-        "overlap_angle": float(overlap_angle),
-        "overlap_length": float(overlap_length),
-        "source_count": int(source_count),
-        "quality_score": float(quality_score),
-        "region_id": region_id,
-    }
-
-
-def bulge_to_arc_face(x1, y1, x2, y2, bulge, layer, source_type, handle):
-    b = float(bulge)
-    if abs(b) <= 1e-12:
-        return None
-
-    dx = float(x2) - float(x1)
-    dy = float(y2) - float(y1)
-    chord = math.hypot(dx, dy)
-
-    if chord <= 1e-9:
-        return None
-
-    theta = 4.0 * math.atan(b)
-    radius = chord / (2.0 * abs(math.sin(theta / 2.0)))
-    mid_x = (float(x1) + float(x2)) / 2.0
-    mid_y = (float(y1) + float(y2)) / 2.0
-    left_nx = -dy / chord
-    left_ny = dx / chord
-    center_offset = radius * math.cos(abs(theta) / 2.0)
-    sign = 1.0 if b > 0 else -1.0
-    cx = mid_x + sign * center_offset * left_nx
-    cy = mid_y + sign * center_offset * left_ny
-
-    a1 = math.degrees(math.atan2(float(y1) - cy, float(x1) - cx))
-    a2 = math.degrees(math.atan2(float(y2) - cy, float(x2) - cx))
-
-    if b > 0:
-        start_angle = normalize_angle(a1)
-        end_angle = normalize_angle(a2)
-    else:
-        start_angle = normalize_angle(a2)
-        end_angle = normalize_angle(a1)
-
-    return make_curve_face(
-        "ARC",
-        cx,
-        cy,
-        radius,
-        start_angle,
-        end_angle,
-        layer,
-        source_type,
-        handle,
-    )
-
-
 # =========================================================
 # DXF WALL FACE EXTRACTION
 # =========================================================
@@ -726,7 +407,6 @@ def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_l
 
     horizontal = []
     vertical = []
-    curved = []
     ignored = 0
 
     def add_segment(x1, y1, x2, y2, layer, source_type, handle):
@@ -746,31 +426,6 @@ def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_l
             vertical.append(make_face_line("V", x, y1, y2, layer, source_type, handle))
         else:
             ignored += 1
-
-    def add_curve_face(face):
-        nonlocal ignored
-
-        if not face:
-            ignored += 1
-            return
-
-        radius = float(face.get("radius", 0.0))
-        if radius <= 0:
-            ignored += 1
-            return
-
-        if face.get("curve_type") == "CIRCLE":
-            length = 2.0 * math.pi * radius
-        else:
-            length = radius * math.radians(
-                positive_sweep(face.get("start_angle", 0.0), face.get("end_angle", 0.0))
-            )
-
-        if length < min_line_length:
-            ignored += 1
-            return
-
-        curved.append(face)
 
     for e in msp:
         try:
@@ -796,57 +451,21 @@ def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_l
             elif dxftype == "LWPOLYLINE":
                 pts = []
                 try:
-                    for p in e.get_points("xyseb"):
-                        pts.append((
-                            float(p[0]),
-                            float(p[1]),
-                            float(p[4]) if len(p) >= 5 else 0.0,
-                        ))
+                    for p in e.get_points():
+                        pts.append((float(p[0]), float(p[1])))
                 except Exception:
-                    try:
-                        for p in e.get_points():
-                            pts.append((float(p[0]), float(p[1]), 0.0))
-                    except Exception:
-                        pts = []
+                    pts = []
 
                 for i in range(len(pts) - 1):
-                    x1, y1, bulge = pts[i]
-                    x2, y2, _ = pts[i + 1]
-                    if abs(bulge) > 1e-12:
-                        add_curve_face(
-                            bulge_to_arc_face(
-                                x1,
-                                y1,
-                                x2,
-                                y2,
-                                bulge,
-                                layer,
-                                "LWPOLYLINE_BULGE",
-                                entity_handle(e),
-                            )
-                        )
-                    else:
-                        add_segment(x1, y1, x2, y2, layer, "LWPOLYLINE", entity_handle(e))
+                    x1, y1 = pts[i]
+                    x2, y2 = pts[i + 1]
+                    add_segment(x1, y1, x2, y2, layer, "LWPOLYLINE", entity_handle(e))
 
                 try:
                     if e.closed and len(pts) >= 2:
-                        x1, y1, bulge = pts[-1]
-                        x2, y2, _ = pts[0]
-                        if abs(bulge) > 1e-12:
-                            add_curve_face(
-                                bulge_to_arc_face(
-                                    x1,
-                                    y1,
-                                    x2,
-                                    y2,
-                                    bulge,
-                                    layer,
-                                    "LWPOLYLINE_CLOSED_BULGE",
-                                    entity_handle(e),
-                                )
-                            )
-                        else:
-                            add_segment(x1, y1, x2, y2, layer, "LWPOLYLINE_CLOSED", entity_handle(e))
+                        x1, y1 = pts[-1]
+                        x2, y2 = pts[0]
+                        add_segment(x1, y1, x2, y2, layer, "LWPOLYLINE_CLOSED", entity_handle(e))
                 except Exception:
                     pass
 
@@ -855,82 +474,22 @@ def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_l
                 try:
                     for v in e.vertices:
                         loc = v.dxf.location
-                        pts.append((float(loc.x), float(loc.y), float(getattr(v.dxf, "bulge", 0.0))))
+                        pts.append((float(loc.x), float(loc.y)))
                 except Exception:
                     pts = []
 
                 for i in range(len(pts) - 1):
-                    x1, y1, bulge = pts[i]
-                    x2, y2, _ = pts[i + 1]
-                    if abs(bulge) > 1e-12:
-                        add_curve_face(
-                            bulge_to_arc_face(
-                                x1,
-                                y1,
-                                x2,
-                                y2,
-                                bulge,
-                                layer,
-                                "POLYLINE_BULGE",
-                                entity_handle(e),
-                            )
-                        )
-                    else:
-                        add_segment(x1, y1, x2, y2, layer, "POLYLINE", entity_handle(e))
+                    x1, y1 = pts[i]
+                    x2, y2 = pts[i + 1]
+                    add_segment(x1, y1, x2, y2, layer, "POLYLINE", entity_handle(e))
 
                 try:
                     if e.is_closed and len(pts) >= 2:
-                        x1, y1, bulge = pts[-1]
-                        x2, y2, _ = pts[0]
-                        if abs(bulge) > 1e-12:
-                            add_curve_face(
-                                bulge_to_arc_face(
-                                    x1,
-                                    y1,
-                                    x2,
-                                    y2,
-                                    bulge,
-                                    layer,
-                                    "POLYLINE_CLOSED_BULGE",
-                                    entity_handle(e),
-                                )
-                            )
-                        else:
-                            add_segment(x1, y1, x2, y2, layer, "POLYLINE_CLOSED", entity_handle(e))
+                        x1, y1 = pts[-1]
+                        x2, y2 = pts[0]
+                        add_segment(x1, y1, x2, y2, layer, "POLYLINE_CLOSED", entity_handle(e))
                 except Exception:
                     pass
-
-            elif dxftype == "ARC":
-                center = e.dxf.center
-                add_curve_face(
-                    make_curve_face(
-                        "ARC",
-                        float(center.x),
-                        float(center.y),
-                        float(e.dxf.radius),
-                        float(e.dxf.start_angle),
-                        float(e.dxf.end_angle),
-                        layer,
-                        "ARC",
-                        entity_handle(e),
-                    )
-                )
-
-            elif dxftype == "CIRCLE":
-                center = e.dxf.center
-                add_curve_face(
-                    make_curve_face(
-                        "CIRCLE",
-                        float(center.x),
-                        float(center.y),
-                        float(e.dxf.radius),
-                        0.0,
-                        360.0,
-                        layer,
-                        "CIRCLE",
-                        entity_handle(e),
-                    )
-                )
 
         except Exception:
             ignored += 1
@@ -939,7 +498,6 @@ def extract_line_entities(doc, selected_layers, use_all_layers, ortho_tol, min_l
     return {
         "horizontal": horizontal,
         "vertical": vertical,
-        "curved": curved,
         "ignored": ignored,
     }
 
@@ -1036,139 +594,6 @@ def detect_centerlines_from_face_pairs(
                 )
 
     return raw_segments
-
-
-def detect_curved_centerlines_from_face_pairs(
-    curved_faces,
-    wall_thicknesses,
-    thickness_tol,
-    min_overlap,
-    center_tol,
-):
-    curved_segments = []
-
-    if not curved_faces:
-        return curved_segments
-
-    for thickness in wall_thicknesses:
-        for i, c1 in enumerate(curved_faces):
-            for c2 in curved_faces[i + 1:]:
-                center_distance = point_distance((c1["cx"], c1["cy"]), (c2["cx"], c2["cy"]))
-
-                if center_distance > center_tol:
-                    continue
-
-                actual_thickness = abs(float(c1["radius"]) - float(c2["radius"]))
-                thickness_error = abs(actual_thickness - float(thickness))
-
-                if thickness_error > thickness_tol:
-                    continue
-
-                center_x = (float(c1["cx"]) + float(c2["cx"])) / 2.0
-                center_y = (float(c1["cy"]) + float(c2["cy"])) / 2.0
-                center_radius = (float(c1["radius"]) + float(c2["radius"])) / 2.0
-
-                if c1.get("curve_type") == "CIRCLE" and c2.get("curve_type") == "CIRCLE":
-                    overlap_angle = 360.0
-                    overlap_length = 2.0 * math.pi * center_radius
-
-                    if overlap_length < min_overlap:
-                        continue
-
-                    curved_segments.append(
-                        make_curved_centerline(
-                            "CIRCLE",
-                            center_x,
-                            center_y,
-                            center_radius,
-                            0.0,
-                            360.0,
-                            thickness,
-                            actual_thickness=actual_thickness,
-                            thickness_error=thickness_error,
-                            overlap_angle=overlap_angle,
-                            overlap_length=overlap_length,
-                        )
-                    )
-                    continue
-
-                for start_angle, end_angle in angle_interval_overlaps(c1, c2):
-                    overlap_angle = end_angle - start_angle
-                    overlap_length = center_radius * math.radians(overlap_angle)
-
-                    if overlap_length < min_overlap:
-                        continue
-
-                    curve_type = "CIRCLE" if overlap_angle >= 360.0 - 1e-6 else "ARC"
-
-                    curved_segments.append(
-                        make_curved_centerline(
-                            curve_type,
-                            center_x,
-                            center_y,
-                            center_radius,
-                            start_angle,
-                            end_angle,
-                            thickness,
-                            actual_thickness=actual_thickness,
-                            thickness_error=thickness_error,
-                            overlap_angle=overlap_angle,
-                            overlap_length=overlap_length,
-                        )
-                    )
-
-    return dedupe_curved_centerlines(curved_segments, center_tol=max(center_tol, 1.0))
-
-
-def dedupe_curved_centerlines(curved_segments, center_tol):
-    if not curved_segments:
-        return []
-
-    sorted_segments = sorted(
-        curved_segments,
-        key=lambda c: (
-            -float(c.get("quality_score", 0.0)),
-            float(c.get("thickness_error", 0.0)),
-            -float(c.get("overlap_length", 0.0)),
-        ),
-    )
-
-    kept = []
-
-    for candidate in sorted_segments:
-        duplicate = False
-
-        for existing in kept:
-            if int(candidate.get("thickness", 0)) != int(existing.get("thickness", 0)):
-                continue
-            if candidate.get("curve_type") != existing.get("curve_type"):
-                continue
-            if point_distance((candidate["cx"], candidate["cy"]), (existing["cx"], existing["cy"])) > center_tol:
-                continue
-            if abs(candidate["radius"] - existing["radius"]) > center_tol:
-                continue
-            if abs(normalize_angle(candidate["start_angle"]) - normalize_angle(existing["start_angle"])) > 1.0:
-                continue
-            if abs(normalize_angle(candidate["end_angle"]) - normalize_angle(existing["end_angle"])) > 1.0:
-                continue
-
-            duplicate = True
-            break
-
-        if not duplicate:
-            kept.append(candidate)
-
-    return sorted(
-        kept,
-        key=lambda c: (
-            c.get("region_id", 0) or 0,
-            c["curve_type"],
-            c["cx"],
-            c["cy"],
-            c["radius"],
-            c["start_angle"],
-        ),
-    )
 
 
 # =========================================================
@@ -2695,29 +2120,6 @@ def draw_segments_by_thickness(msp, segments, prefix):
         draw_segment(msp, seg, layer)
 
 
-def draw_curved_centerline(msp, curve, layer):
-    if curve["curve_type"] == "CIRCLE":
-        msp.add_circle(
-            center=(curve["cx"], curve["cy"]),
-            radius=curve["radius"],
-            dxfattribs={"layer": layer},
-        )
-    else:
-        msp.add_arc(
-            center=(curve["cx"], curve["cy"]),
-            radius=curve["radius"],
-            start_angle=curve["start_angle"],
-            end_angle=curve["end_angle"],
-            dxfattribs={"layer": layer},
-        )
-
-
-def draw_curved_centerlines_by_thickness(msp, curved_segments, prefix):
-    for curve in curved_segments:
-        layer = f"{prefix}_{curve['thickness']}"
-        draw_curved_centerline(msp, curve, layer)
-
-
 def draw_panels(msp, panels, layer):
     for p in panels:
         x1 = p["x1"]
@@ -2804,7 +2206,6 @@ def build_output_dxf(
     final_segments,
     source_segments,
     topology_segments,
-    curved_segments,
     panels,
     nodes,
     columns,
@@ -2817,7 +2218,6 @@ def build_output_dxf(
     draw_source_reference=False,
     draw_topology_audit=False,
     draw_wall_centerlines=True,
-    draw_curved_centerlines=True,
     draw_panels_enabled=False,
     draw_nodes_enabled=False,
     draw_columns_enabled=True,
@@ -2834,7 +2234,6 @@ def build_output_dxf(
     final_for_output = filter_segments_by_thickness(final_segments, export_thicknesses)
     source_for_output = filter_segments_by_thickness(source_segments or [], export_thicknesses)
     topology_for_output = filter_segments_by_thickness(topology_segments or [], export_thicknesses)
-    curved_for_output = filter_segments_by_thickness(curved_segments or [], export_thicknesses)
 
     clean_final_segments = filter_short_segments(final_for_output, min_output_centerline_length)
 
@@ -2844,7 +2243,6 @@ def build_output_dxf(
             + [int(s["thickness"]) for s in clean_final_segments]
             + [int(s["thickness"]) for s in source_for_output]
             + [int(s["thickness"]) for s in topology_for_output]
-            + [int(s["thickness"]) for s in curved_for_output]
         )
     )
 
@@ -2853,7 +2251,6 @@ def build_output_dxf(
         safe_layer(new_doc, f"ILS_SOURCE_CENTERLINE_REFERENCE_{thickness}", color=9)
         safe_layer(new_doc, f"ILS_TOPOLOGY_REPAIR_AUDIT_{thickness}", color=4)
         safe_layer(new_doc, f"ILS_WALL_CENTERLINE_{thickness}", color=layer_color_for_thickness(thickness))
-        safe_layer(new_doc, f"ILS_CURVED_WALL_CENTERLINE_{thickness}", color=layer_color_for_thickness(thickness))
 
     safe_layer(new_doc, "ILS_STRUCTURAL_GRID_REVIEW", color=1)
     safe_layer(new_doc, "ILS_SLAB_PANEL_REVIEW", color=5)
@@ -2874,13 +2271,6 @@ def build_output_dxf(
 
     if draw_wall_centerlines:
         draw_segments_by_thickness(new_msp, clean_final_segments, prefix="ILS_WALL_CENTERLINE")
-
-    if draw_curved_centerlines:
-        draw_curved_centerlines_by_thickness(
-            new_msp,
-            curved_for_output,
-            prefix="ILS_CURVED_WALL_CENTERLINE",
-        )
 
     if draw_structural_grid_enabled:
         draw_structural_grid_lines(
@@ -2959,31 +2349,6 @@ def removed_segments_to_dataframe(segments):
         df[col] = [s.get(col, "") for s in segments]
 
     return df
-
-
-def curved_centerlines_to_dataframe(curved_segments):
-    rows = []
-
-    for idx, c in enumerate(curved_segments, start=1):
-        rows.append({
-            "id": idx,
-            "region_id": c.get("region_id", ""),
-            "curve_type": c.get("curve_type", ""),
-            "thickness": c.get("thickness", ""),
-            "actual_thickness": round(float(c.get("actual_thickness", c.get("thickness", 0))), 3),
-            "thickness_error": round(float(c.get("thickness_error", 0.0)), 3),
-            "cx": round(float(c.get("cx", 0.0)), 3),
-            "cy": round(float(c.get("cy", 0.0)), 3),
-            "radius": round(float(c.get("radius", 0.0)), 3),
-            "start_angle": round(float(c.get("start_angle", 0.0)), 3),
-            "end_angle": round(float(c.get("end_angle", 0.0)), 3),
-            "overlap_angle": round(float(c.get("overlap_angle", 0.0)), 3),
-            "arc_length": round(float(c.get("overlap_length", 0.0)), 3),
-            "source_count": int(c.get("source_count", 1)),
-            "quality_score": round(float(c.get("quality_score", 0.0)), 3),
-        })
-
-    return pd.DataFrame(rows)
 
 
 def panels_to_dataframe(panels):
@@ -3119,8 +2484,6 @@ if uploaded_dxf is None:
 try:
     doc = read_uploaded_dxf(uploaded_dxf)
     layers = get_layer_names(doc)
-    layer_summary = get_layer_entity_summary(doc)
-    suggested_wall_layers = suggested_wall_layers_from_summary(layer_summary)
     st.success("DXF loaded successfully.")
 except Exception as e:
     st.error(f"Could not read DXF: {e}")
@@ -3236,58 +2599,20 @@ with st.expander("Column type and sizing", expanded=True):
         "This is a starting size, not a completed design check."
     )
 
-with st.expander("Wall isolation / source layers", expanded=True):
-    st.caption(
-        "The engine should read wall-face layers only. Door, window, grid, text, dimension, furniture, and annotation layers should stay out so openings remain clean gaps."
-    )
-
-    wall_iso_1, wall_iso_2 = st.columns(2)
-
-    use_wall_layer_isolation = wall_iso_1.checkbox(
-        "Analyze isolated wall layers only",
-        value=True if suggested_wall_layers else False,
-        help="Recommended. Only the selected wall layers feed centerline, room, panel, and column detection.",
-    )
-
-    show_layer_diagnostics = wall_iso_2.checkbox(
-        "Show layer diagnostics",
+with st.expander("Wall source layers", expanded=True):
+    use_all_layers = st.checkbox(
+        "Use all layers",
         value=True,
+        help="If checked, all LINE/LWPOLYLINE/POLYLINE entities are scanned.",
     )
 
-    if show_layer_diagnostics:
-        layer_summary_df = pd.DataFrame(layer_summary)
-        st.dataframe(layer_summary_df, use_container_width=True)
-        st.download_button(
-            "Download Layer Diagnostics CSV",
-            data=layer_summary_df.to_csv(index=False).encode("utf-8"),
-            file_name="ILS_LAYER_DIAGNOSTICS.csv",
-            mime="text/csv",
-        )
-
-    if suggested_wall_layers:
-        st.success("Suggested wall layers: " + ", ".join(suggested_wall_layers))
-    else:
-        st.warning(
-            "No obvious wall layer names were detected. Pick the wall-face layers manually, or temporarily disable isolation for a diagnostic run."
-        )
-
-    if use_wall_layer_isolation:
-        selected_layers = st.multiselect(
-            "Wall layers to analyze",
-            options=layers,
-            default=suggested_wall_layers if suggested_wall_layers else [],
-            help="Choose only layers that contain wall faces/centerlines. Do not include doors, windows, dimensions, text, grids, or furniture.",
-        )
-        use_all_layers = False
-
-        if not selected_layers:
-            st.warning("Select at least one wall layer, or disable wall layer isolation.")
-            st.stop()
-    else:
-        use_all_layers = True
+    if use_all_layers:
         selected_layers = []
-        st.warning(
-            "Wall isolation is OFF. The engine may mistake grids, symbols, dimensions, doors, or furniture for wall geometry."
+    else:
+        selected_layers = st.multiselect(
+            "Select wall face layers",
+            options=layers,
+            default=layers,
         )
 
 with st.expander("Geometry tolerances", expanded=True):
@@ -3474,28 +2799,6 @@ with st.expander("Centerline graph and room topology", expanded=True):
         help="Extends near-miss centerline endpoints to crossing axes so the exported graph is connected.",
     )
 
-with st.expander("Curved wall / arc support", expanded=True):
-    cw1, cw2, cw3 = st.columns(3)
-
-    detect_curved_walls = cw1.checkbox(
-        "Detect circular/arc wall centerlines",
-        value=True,
-        help="Pairs concentric ARC/CIRCLE/bulged-polyline wall faces and exports true curved centerline geometry.",
-    )
-
-    curved_center_tol = cw2.number_input(
-        "Concentric center tolerance",
-        min_value=0.0,
-        value=max(25.0, axis_tol * 2.0),
-        step=5.0,
-        help="Maximum distance between two arc/circle centers for them to be treated as faces of the same curved wall.",
-    )
-
-    export_curved_centerlines = cw3.checkbox(
-        "Export curved centerlines",
-        value=True,
-    )
-
 with st.expander("Smart column layout settings", expanded=True):
     col1, col2, col3 = st.columns(3)
 
@@ -3597,30 +2900,16 @@ with st.spinner("Extracting wall face lines..."):
 
 horizontal_faces = extracted["horizontal"]
 vertical_faces = extracted["vertical"]
-curved_faces = extracted.get("curved", [])
 
 st.markdown("### 3. Extraction Summary")
 
 e1, e2, e3 = st.columns(3)
 e1.metric("Horizontal wall-face lines", len(horizontal_faces))
 e2.metric("Vertical wall-face lines", len(vertical_faces))
-e3.metric("Curved wall-face arcs/circles", len(curved_faces))
-
-e4, e5 = st.columns(2)
-e4.metric("Ignored / non-orthogonal", extracted["ignored"])
-e5.metric("Detected entity families", "Straight + curved" if curved_faces else "Straight only")
-
-if use_all_layers:
-    st.warning("Analysis used all layers. For production tests, isolate wall layers to avoid false geometry.")
-else:
-    st.caption("Analyzed wall layers: " + ", ".join(selected_layers))
-
-if len(horizontal_faces) + len(vertical_faces) + len(curved_faces) == 0:
-    st.error("No usable wall face entities found. Check layer selection or entity types.")
-    st.stop()
+e3.metric("Ignored / non-orthogonal", extracted["ignored"])
 
 if len(horizontal_faces) + len(vertical_faces) == 0:
-    st.error("Only curved wall faces were found. The current room/column engine still needs at least some straight wall centerlines.")
+    st.error("No horizontal/vertical wall face lines found. Check layer selection or entity types.")
     st.stop()
 
 with st.spinner("Detecting midpoint wall centerlines..."):
@@ -3631,16 +2920,6 @@ with st.spinner("Detecting midpoint wall centerlines..."):
         thickness_tol=thickness_tol,
         min_overlap=min_overlap,
     )
-
-    raw_curved_segments = []
-    if detect_curved_walls:
-        raw_curved_segments = detect_curved_centerlines_from_face_pairs(
-            curved_faces=curved_faces,
-            wall_thicknesses=wall_thicknesses,
-            thickness_tol=thickness_tol,
-            min_overlap=min_overlap,
-            center_tol=curved_center_tol,
-        )
 
 accuracy = centerline_accuracy_summary(raw_segments)
 
@@ -3840,8 +3119,8 @@ st.markdown("### 4. Accuracy / Structural Layout Summary")
 
 a1, a2, a3, a4 = st.columns(4)
 a1.metric("Raw midpoint centerlines", len(raw_segments))
-a2.metric("Curved centerlines", len(raw_curved_segments))
-a3.metric("Avg thickness error", round(accuracy["avg_thickness_error"], 3))
+a2.metric("Avg thickness error", round(accuracy["avg_thickness_error"], 3))
+a3.metric("Max thickness error", round(accuracy["max_thickness_error"], 3))
 a4.metric("Near-perfect <= 1mm", accuracy["perfect_or_near_perfect"])
 
 r1, r2, r3, r4 = st.columns(4)
@@ -3870,8 +3149,6 @@ if warnings:
 
 st.info(
     f"Design profile: **{design_code}**. "
-    f"Wall isolation: **{'ON' if not use_all_layers else 'OFF'}**"
-    f"{' using ' + str(len(selected_layers)) + ' layer(s)' if not use_all_layers else ''}. "
     f"Floors: **{floor_count}**. "
     f"Column strategy: **{column_layout_strategy}**. "
     f"Column: **{column_shape} {column_size_label(column_shape, column_width, column_depth)}**. "
@@ -3887,13 +3164,12 @@ st.info(
 
 st.markdown("### 5. Preview Tables")
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
     [
         "Regions",
         "Structural Grid",
         "Topology Repair",
         "Raw Centerlines",
-        "Curved Centerlines",
         "Output Wall Centerlines",
         "Removed Overlaps",
         "Accepted Columns",
@@ -3955,19 +3231,6 @@ with tab4:
         )
 
 with tab5:
-    curved_df = curved_centerlines_to_dataframe(raw_curved_segments)
-    if curved_df.empty:
-        st.info("No curved wall centerlines detected.")
-    else:
-        st.dataframe(curved_df, use_container_width=True)
-        st.download_button(
-            "Download Curved Centerlines CSV",
-            data=curved_df.to_csv(index=False).encode("utf-8"),
-            file_name="ILS_CURVED_WALL_CENTERLINES.csv",
-            mime="text/csv",
-        )
-
-with tab6:
     final_df = segments_to_dataframe(output_wall_segments)
     if final_df.empty:
         st.info("No output wall centerlines.")
@@ -3980,7 +3243,7 @@ with tab6:
             mime="text/csv",
         )
 
-with tab7:
+with tab6:
     removed_df = removed_segments_to_dataframe(removed_overlap_segments)
     if removed_df.empty:
         st.info("No overlapping centerlines removed.")
@@ -3993,7 +3256,7 @@ with tab7:
             mime="text/csv",
         )
 
-with tab8:
+with tab7:
     accepted_columns_df = columns_to_dataframe(accepted_columns)
     if accepted_columns_df.empty:
         st.info("No accepted columns.")
@@ -4007,7 +3270,7 @@ with tab8:
             mime="text/csv",
         )
 
-with tab9:
+with tab8:
     rejected_columns_df = columns_to_dataframe(rejected_columns)
     if rejected_columns_df.empty:
         st.info("No rejected columns.")
@@ -4020,7 +3283,7 @@ with tab9:
             mime="text/csv",
         )
 
-with tab10:
+with tab9:
     panels_df = panels_to_dataframe(panels)
     if panels_df.empty:
         st.info("No slab panels detected.")
@@ -4053,7 +3316,6 @@ output_doc = build_output_dxf(
     final_segments=output_wall_segments,
     source_segments=source_region_segments,
     topology_segments=region_segments,
-    curved_segments=raw_curved_segments,
     panels=panels,
     nodes=nodes,
     columns=accepted_columns,
@@ -4066,7 +3328,6 @@ output_doc = build_output_dxf(
     draw_source_reference=export_source_reference,
     draw_topology_audit=export_topology_audit,
     draw_wall_centerlines=True,
-    draw_curved_centerlines=export_curved_centerlines,
     draw_panels_enabled=export_slab_panels,
     draw_nodes_enabled=export_junction_nodes,
     draw_columns_enabled=export_columns,
