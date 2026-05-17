@@ -5664,4 +5664,3 @@ if run_multifloor_superimposition and len(floor_results) > 1:
 st.success(
     "Analysis complete. Use the rectangular panel model DXF for structural modelling software, and the full review drawing only when you want to inspect walls, columns, grids, and audit geometry."
 )
- 
