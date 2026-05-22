@@ -170,6 +170,15 @@ def zip_source_to_file(zip_source):
     return zip_source
 
 
+def describe_file_head(path, length=120):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(length)
+        return head.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
 @st.cache_data(show_spinner=False)
 def load_catalogue(catalogue_source, zip_source):
     if isinstance(catalogue_source, (bytes, bytearray)):
@@ -1018,6 +1027,21 @@ except Exception as e:
     st.error("The staircase catalogue could not be loaded. Please contact the app administrator.")
     with st.expander("Technical error", expanded=False):
         st.write(str(e))
+        st.write("Catalogue JSON path:", catalogue_source)
+        st.write("Catalogue ZIP path:", zip_source)
+        if zip_source:
+            try:
+                st.write("Catalogue ZIP size:", os.path.getsize(zip_source))
+                head = describe_file_head(zip_source)
+                if "git-lfs.github.com/spec" in head:
+                    st.warning(
+                        "This looks like a Git LFS pointer, not the real ZIP file. "
+                        "The actual ZIP was not downloaded by Streamlit."
+                    )
+                elif head:
+                    st.code(head[:300], language="text")
+            except Exception:
+                pass
     st.stop()
 
 catalogue_df = catalogue_dataframe(catalogue)
