@@ -39,6 +39,51 @@ CATALOGUE_JSON = ASSET_DIR / "stair_catalogue.json"
 CATALOGUE_ZIP = ASSET_DIR / "stair_catalogue_package.zip"
 
 
+def find_catalogue_asset_paths():
+    """
+    Streamlit Cloud may run the app from a subfolder while the assets sit at repo root.
+    Search a few safe repo locations before reporting that the catalogue is missing.
+    """
+
+    roots = []
+    for root in [APP_DIR, APP_DIR.parent, Path.cwd(), Path.cwd().parent]:
+        try:
+            resolved = root.resolve()
+        except Exception:
+            continue
+        if resolved not in roots:
+            roots.append(resolved)
+
+    for root in roots:
+        candidate_dirs = [
+            root / "tool5_catalogue_assets",
+            root,
+        ]
+        for directory in candidate_dirs:
+            json_path = directory / "stair_catalogue.json"
+            zip_path = directory / "stair_catalogue_package.zip"
+            if json_path.exists() and zip_path.exists():
+                return json_path, zip_path
+
+    for root in roots:
+        try:
+            json_matches = list(root.rglob("stair_catalogue.json"))
+        except Exception:
+            json_matches = []
+
+        for json_path in json_matches:
+            possible_zips = [
+                json_path.parent / "stair_catalogue_package.zip",
+                json_path.parent.parent / "stair_catalogue_package.zip",
+                json_path.parent.parent / "tool5_catalogue_assets" / "stair_catalogue_package.zip",
+            ]
+            for zip_path in possible_zips:
+                if zip_path.exists():
+                    return json_path, zip_path
+
+    return None, None
+
+
 # =========================================================
 # BASIC HELPERS
 # =========================================================
@@ -947,10 +992,11 @@ animate();
 # UI
 # =========================================================
 
-catalogue_source = str(CATALOGUE_JSON)
-zip_source = str(CATALOGUE_ZIP)
+catalogue_json_path, catalogue_zip_path = find_catalogue_asset_paths()
+catalogue_source = str(catalogue_json_path) if catalogue_json_path else ""
+zip_source = str(catalogue_zip_path) if catalogue_zip_path else ""
 
-if not CATALOGUE_JSON.exists() or not CATALOGUE_ZIP.exists():
+if not catalogue_json_path or not catalogue_zip_path:
     st.error(
         "The staircase catalogue is not installed with this app. "
         "Please contact the app administrator."
@@ -962,6 +1008,8 @@ if not CATALOGUE_JSON.exists() or not CATALOGUE_ZIP.exists():
             "    stair_catalogue_package.zip",
             language="text",
         )
+        st.write("App folder checked:", str(APP_DIR))
+        st.write("Working folder checked:", str(Path.cwd()))
     st.stop()
 
 try:
