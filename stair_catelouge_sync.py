@@ -127,13 +127,22 @@ def box_plan_corners(step):
 # CATALOGUE LOADING
 # =========================================================
 
+def zip_source_to_file(zip_source):
+    if isinstance(zip_source, (bytes, bytearray)):
+        return io.BytesIO(zip_source)
+    return zip_source
+
+
 @st.cache_data(show_spinner=False)
-def load_catalogue(catalogue_path, zip_path):
-    with open(catalogue_path, "r", encoding="utf-8") as f:
-        catalogue = json.load(f)
+def load_catalogue(catalogue_source, zip_source):
+    if isinstance(catalogue_source, (bytes, bytearray)):
+        catalogue = json.loads(catalogue_source.decode("utf-8"))
+    else:
+        with open(catalogue_source, "r", encoding="utf-8") as f:
+            catalogue = json.load(f)
 
     entries = []
-    with zipfile.ZipFile(zip_path, "r") as zf:
+    with zipfile.ZipFile(zip_source_to_file(zip_source), "r") as zf:
         entries = zf.namelist()
 
     return catalogue, entries
@@ -152,18 +161,18 @@ def find_package_entry(entries, folder, item_id, item_name, extension):
 
 
 @st.cache_data(show_spinner=False)
-def read_package_text(zip_path, entry_name):
+def read_package_text(zip_source, entry_name):
     if not entry_name:
         return ""
-    with zipfile.ZipFile(zip_path, "r") as zf:
+    with zipfile.ZipFile(zip_source_to_file(zip_source), "r") as zf:
         return zf.read(entry_name).decode("utf-8", errors="replace")
 
 
 @st.cache_data(show_spinner=False)
-def read_package_bytes(zip_path, entry_name):
+def read_package_bytes(zip_source, entry_name):
     if not entry_name:
         return b""
-    with zipfile.ZipFile(zip_path, "r") as zf:
+    with zipfile.ZipFile(zip_source_to_file(zip_source), "r") as zf:
         return zf.read(entry_name)
 
 
@@ -806,19 +815,43 @@ animate();
 
 st.markdown("### 1. Catalogue Source")
 
-if not CATALOGUE_JSON.exists() or not CATALOGUE_ZIP.exists():
-    st.error(
-        "Catalogue assets were not found. Put stair_catalogue.json and stair_catalogue_package.zip "
-        "inside tool5_catalogue_assets."
-    )
-    st.stop()
+asset_mode = "Bundled catalogue assets"
+catalogue_source = None
+zip_source = None
+zip_size_mb = 0.0
 
-catalogue, package_entries = load_catalogue(str(CATALOGUE_JSON), str(CATALOGUE_ZIP))
+if CATALOGUE_JSON.exists() and CATALOGUE_ZIP.exists():
+    catalogue_source = str(CATALOGUE_JSON)
+    zip_source = str(CATALOGUE_ZIP)
+    zip_size_mb = CATALOGUE_ZIP.stat().st_size / (1024 * 1024)
+else:
+    st.warning(
+        "Bundled catalogue assets were not found in this deployed app. "
+        "Upload the generated stair_catalogue.json and stair_catalogue_package.zip below."
+    )
+    asset_mode = "Uploaded catalogue assets"
+    up1, up2 = st.columns(2)
+    uploaded_catalogue = up1.file_uploader("Upload stair_catalogue.json", type=["json"])
+    uploaded_package = up2.file_uploader("Upload stair_catalogue_package.zip", type=["zip"])
+
+    if uploaded_catalogue is None or uploaded_package is None:
+        st.stop()
+
+    catalogue_source = uploaded_catalogue.getvalue()
+    zip_source = uploaded_package.getvalue()
+    zip_size_mb = len(zip_source) / (1024 * 1024)
+
+try:
+    catalogue, package_entries = load_catalogue(catalogue_source, zip_source)
+except Exception as e:
+    st.error(f"Could not load staircase catalogue assets: {e}")
+    st.stop()
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Catalogue items", len(catalogue))
 c2.metric("Package files", len(package_entries))
-c3.metric("Asset ZIP size", f"{CATALOGUE_ZIP.stat().st_size / (1024 * 1024):.2f} MB")
+c3.metric("Asset ZIP size", f"{zip_size_mb:.2f} MB")
+st.caption(f"Catalogue source mode: {asset_mode}")
 
 catalogue_df = catalogue_dataframe(catalogue)
 
@@ -881,7 +914,7 @@ with source_tab:
     with left:
         st.caption("Original extracted 2D detail preview")
         if preview_entry:
-            source_svg = read_package_text(str(CATALOGUE_ZIP), preview_entry)
+            source_svg = read_package_text(zip_source, preview_entry)
             components.html(source_svg, height=480, scrolling=True)
         else:
             st.warning("No source SVG preview was found for this catalogue item.")
@@ -897,7 +930,7 @@ with source_tab:
         if dxf_entry:
             st.download_button(
                 "Download Original Cropped Detail DXF",
-                data=read_package_bytes(str(CATALOGUE_ZIP), dxf_entry),
+                data=read_package_bytes(zip_source, dxf_entry),
                 file_name=f"{safe_filename(selected_item['id'] + '_' + selected_item['name'])}_source.dxf",
                 mime="application/dxf",
             )
