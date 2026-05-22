@@ -1,0 +1,2038 @@
+[
+  {
+    "id": "ST-001",
+    "name": "Staircase Detail 01",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DATAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7640872.784930032,
+      "max_x": 7670872.784930032,
+      "min_y": -785383.7261072383,
+      "max_y": -766383.7261072383
+    },
+    "label": {
+      "x": 7652872.784930032,
+      "y": -771383.7261072383,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAIL",
+      "STAIRCASE DATAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-002",
+    "name": "Reinforcement Detail 02",
+    "stair_type": "reinforcement_detail",
+    "source_title": "STAIRS REINFORCEMENT",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7700397.195313513,
+      "max_x": 7730397.195313513,
+      "min_y": -784935.1596205691,
+      "max_y": -765935.1596205691
+    },
+    "label": {
+      "x": 7712397.195313513,
+      "y": -770935.1596205691,
+      "layer": "text"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRS REINFORCEMENT",
+      "STAIR CASE 2 PLAN",
+      "STAIR CASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-003",
+    "name": "Staircase 2 03",
+    "stair_type": "staircase_2",
+    "source_title": "STAIR CASE 2 PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7691086.956668329,
+      "max_x": 7721086.956668329,
+      "min_y": -784042.4355345034,
+      "max_y": -765042.4355345034
+    },
+    "label": {
+      "x": 7703086.956668329,
+      "y": -770042.4355345034,
+      "layer": "Planes"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRS REINFORCEMENT",
+      "STAIR CASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-004",
+    "name": "Staircase Detail 04",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIR CASE PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7665768.51338043,
+      "max_x": 7695768.51338043,
+      "min_y": -783445.1295333632,
+      "max_y": -764445.1295333632
+    },
+    "label": {
+      "x": 7677768.51338043,
+      "y": -769445.1295333632,
+      "layer": "RBarLabel_TOP"
+    },
+    "nearby_titles": [
+      "STAIR CASE PLAN",
+      "STAIR CASE PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-005",
+    "name": "Reinforcement Detail 05",
+    "stair_type": "reinforcement_detail",
+    "source_title": "STAIRS REINFORCEMENT",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7725845.547448497,
+      "max_x": 7755845.547448497,
+      "min_y": -783056.36024128,
+      "max_y": -764056.36024128
+    },
+    "label": {
+      "x": 7737845.547448497,
+      "y": -769056.36024128,
+      "layer": "text"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRS REINFORCEMENT",
+      "STAIR CASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-006",
+    "name": "Staircase Detail 06",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAIL",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7645035.219338996,
+      "max_x": 7675035.219338996,
+      "min_y": -782577.866295597,
+      "max_y": -763577.866295597
+    },
+    "label": {
+      "x": 7657035.219338996,
+      "y": -768577.866295597,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAIL",
+      "STAIRCASE DATAILS",
+      "STAIR CASE PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-007",
+    "name": "Staircase Detail 07",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7705634.553622395,
+      "max_x": 7735634.553622395,
+      "min_y": -782156.4967691945,
+      "max_y": -763156.4967691945
+    },
+    "label": {
+      "x": 7717634.553622395,
+      "y": -768156.4967691945,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRS REINFORCEMENT",
+      "STAIR CASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-008",
+    "name": "Staircase 2 08",
+    "stair_type": "staircase_2",
+    "source_title": "STAIR CASE 2 PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7716990.281003889,
+      "max_x": 7746990.281003889,
+      "min_y": -781660.7201581845,
+      "max_y": -762660.7201581845
+    },
+    "label": {
+      "x": 7728990.281003889,
+      "y": -767660.7201581845,
+      "layer": "Planes"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRCASE DETAILS",
+      "STAIRS REINFORCEMENT",
+      "STAIR CASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-009",
+    "name": "Staircase Detail 09",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7731344.773672824,
+      "max_x": 7761344.773672824,
+      "min_y": -780138.7642473369,
+      "max_y": -761138.7642473369
+    },
+    "label": {
+      "x": 7743344.773672824,
+      "y": -766138.7642473369,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRS REINFORCEMENT"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-010",
+    "name": "Staircase Detail 10",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIR CASE PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7656615.976888068,
+      "max_x": 7686615.976888068,
+      "min_y": -780090.4990666859,
+      "max_y": -761090.4990666859
+    },
+    "label": {
+      "x": 7668615.976888068,
+      "y": -766090.4990666859,
+      "layer": "RBarLabel_TOP"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAIL",
+      "STAIR CASE PLAN",
+      "STAIR CASE PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-011",
+    "name": "Staircase Detail 11",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIR CASE PLAN 2",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7810726.071626548,
+      "max_x": 7840726.071626548,
+      "min_y": -761862.1421612385,
+      "max_y": -742862.1421612385
+    },
+    "label": {
+      "x": 7822726.071626548,
+      "y": -747862.1421612385,
+      "layer": "RBarLabel_TOP"
+    },
+    "nearby_titles": [
+      "STAIR CASE PLAN 2"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-012",
+    "name": "Staircase Detail 12",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIR 01",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7574239.943220233,
+      "max_x": 7604239.943220233,
+      "min_y": -761757.6378654666,
+      "max_y": -742757.6378654666
+    },
+    "label": {
+      "x": 7586239.943220233,
+      "y": -747757.6378654666,
+      "layer": "text"
+    },
+    "nearby_titles": [
+      "STAIRS REINFORCEMENT DETAILS",
+      "STAIRS REINFORCEMENT",
+      "STAIR 01",
+      "STAIRS REINFORCEMENT"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-013",
+    "name": "Staircase 1 13",
+    "stair_type": "staircase_1",
+    "source_title": "STAIRCASE 1 PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7881624.542632433,
+      "max_x": 7911624.542632433,
+      "min_y": -761715.3972393232,
+      "max_y": -742715.3972393232
+    },
+    "label": {
+      "x": 7893624.542632433,
+      "y": -747715.3972393232,
+      "layer": "waII"
+    },
+    "nearby_titles": [
+      "STAIRCASE",
+      "STAIRCASE 1 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-014",
+    "name": "Staircase Detail 14",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7923905.72776856,
+      "max_x": 7953905.72776856,
+      "min_y": -761665.0394467101,
+      "max_y": -742665.0394467101
+    },
+    "label": {
+      "x": 7935905.72776856,
+      "y": -747665.0394467101,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-015",
+    "name": "Reinforcement Detail 15",
+    "stair_type": "reinforcement_detail",
+    "source_title": "STAIRS REINFORCEMENT",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7599529.85405182,
+      "max_x": 7629529.85405182,
+      "min_y": -761598.8674742193,
+      "max_y": -742598.8674742193
+    },
+    "label": {
+      "x": 7611529.85405182,
+      "y": -747598.8674742193,
+      "layer": "text"
+    },
+    "nearby_titles": [
+      "STAIRS REINFORCEMENT DETAILS",
+      "STAIRS REINFORCEMENT",
+      "10-Equal Risers at 175=1750",
+      "STAIR CASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-016",
+    "name": "Staircase Detail 16",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7767207.137703187,
+      "max_x": 7797207.137703187,
+      "min_y": -761582.9281038581,
+      "max_y": -742582.9281038581
+    },
+    "label": {
+      "x": 7779207.137703187,
+      "y": -747582.9281038581,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-017",
+    "name": "Reinforcement Detail 17",
+    "stair_type": "reinforcement_detail",
+    "source_title": "STAIRS REINFORCEMENT",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7861224.946713884,
+      "max_x": 7891224.946713884,
+      "min_y": -761384.6564269369,
+      "max_y": -742384.6564269369
+    },
+    "label": {
+      "x": 7873224.946713884,
+      "y": -747384.6564269369,
+      "layer": "text"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRS REINFORCEMENT",
+      "STAIR CASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-018",
+    "name": "Reinforcement Detail 18",
+    "stair_type": "reinforcement_detail",
+    "source_title": "STAIRS REINFORCEMENT",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7622299.970180782,
+      "max_x": 7652299.970180782,
+      "min_y": -761384.6542856476,
+      "max_y": -742384.6542856476
+    },
+    "label": {
+      "x": 7634299.970180782,
+      "y": -747384.6542856476,
+      "layer": "text"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRS REINFORCEMENT",
+      "STAIR CASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-019",
+    "name": "Staircase Detail 19",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7897962.026973474,
+      "max_x": 7927962.026973474,
+      "min_y": -761296.5645135096,
+      "max_y": -742296.5645135096
+    },
+    "label": {
+      "x": 7909962.026973474,
+      "y": -747296.5645135096,
+      "layer": "text"
+    },
+    "nearby_titles": [
+      "STAIRCASE"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-020",
+    "name": "Staircase Detail 20",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIR CASE PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7725080.049712427,
+      "max_x": 7755080.049712427,
+      "min_y": -760985.2866494986,
+      "max_y": -741985.2866494986
+    },
+    "label": {
+      "x": 7737080.049712427,
+      "y": -746985.2866494986,
+      "layer": "RBarLabel_TOP"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAIL",
+      "STAIR CASE PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-021",
+    "name": "Reinforcement Detail 21",
+    "stair_type": "reinforcement_detail",
+    "source_title": "STAIRS REINFORCEMENT",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7645742.264354982,
+      "max_x": 7675742.264354982,
+      "min_y": -760771.9200419883,
+      "max_y": -741771.9200419883
+    },
+    "label": {
+      "x": 7657742.264354982,
+      "y": -746771.9200419883,
+      "layer": "text"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAIL",
+      "STAIRS REINFORCEMENT",
+      "STAIRCASE 1 DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-022",
+    "name": "Staircase 2 22",
+    "stair_type": "staircase_2",
+    "source_title": "STAIRCASE 2 DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7684480.397457709,
+      "max_x": 7714480.397457709,
+      "min_y": -760589.3873622533,
+      "max_y": -741589.3873622533
+    },
+    "label": {
+      "x": 7696480.397457709,
+      "y": -746589.3873622533,
+      "layer": "waII"
+    },
+    "nearby_titles": [
+      "STAIRCASE 2 DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-023",
+    "name": "Staircase 2 23",
+    "stair_type": "staircase_2",
+    "source_title": "STAIR CASE 2 PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7751717.446537959,
+      "max_x": 7781717.446537959,
+      "min_y": -760549.1027837875,
+      "max_y": -741549.1027837875
+    },
+    "label": {
+      "x": 7763717.446537959,
+      "y": -746549.1027837875,
+      "layer": "BEAMS TEXT"
+    },
+    "nearby_titles": [
+      "STAIR CASE 2 PLAN",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-024",
+    "name": "Staircase 2 24",
+    "stair_type": "staircase_2",
+    "source_title": "STAIR CASE 2 PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7852921.460109402,
+      "max_x": 7882921.460109402,
+      "min_y": -760158.6933165475,
+      "max_y": -741158.6933165475
+    },
+    "label": {
+      "x": 7864921.460109402,
+      "y": -746158.6933165475,
+      "layer": "Planes"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRCASE DETAILS",
+      "STAIRS REINFORCEMENT",
+      "STAIR CASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-025",
+    "name": "Staircase 2 25",
+    "stair_type": "staircase_2",
+    "source_title": "STAIR CASE 2 PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7613996.4835763,
+      "max_x": 7643996.4835763,
+      "min_y": -760158.6911752583,
+      "max_y": -741158.6911752583
+    },
+    "label": {
+      "x": 7625996.4835763,
+      "y": -746158.6911752583,
+      "layer": "Planes"
+    },
+    "nearby_titles": [
+      "STAIRS REINFORCEMENT DETAILS",
+      "STAIRCASE DETAILS",
+      "STAIRS REINFORCEMENT",
+      "STAIR CASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-026",
+    "name": "Reinforcement Detail 26",
+    "stair_type": "reinforcement_detail",
+    "source_title": "STAIRS REINFORCEMENT DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7581690.576443208,
+      "max_x": 7611690.576443208,
+      "min_y": -759309.0447770297,
+      "max_y": -740309.0447770297
+    },
+    "label": {
+      "x": 7593690.576443208,
+      "y": -745309.0447770297,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRS REINFORCEMENT DETAILS",
+      "STAIRS REINFORCEMENT",
+      "STAIR 01",
+      "STAIRS REINFORCEMENT",
+      "10-Equal Risers at 175=1750"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-027",
+    "name": "Staircase Detail 27",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAIL",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7650394.541684147,
+      "max_x": 7680394.541684147,
+      "min_y": -758736.3061946444,
+      "max_y": -739736.3061946444
+    },
+    "label": {
+      "x": 7662394.541684147,
+      "y": -744736.3061946444,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAIL",
+      "STAIRS REINFORCEMENT",
+      "STAIRCASE 1 DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-028",
+    "name": "Staircase Detail 28",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7866462.305022766,
+      "max_x": 7896462.305022766,
+      "min_y": -758605.9935755624,
+      "max_y": -739605.9935755624
+    },
+    "label": {
+      "x": 7878462.305022766,
+      "y": -744605.9935755624,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRS REINFORCEMENT",
+      "STAIRCASE 1 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-029",
+    "name": "Staircase Detail 29",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7627537.328489662,
+      "max_x": 7657537.328489662,
+      "min_y": -758605.9914342728,
+      "max_y": -739605.9914342728
+    },
+    "label": {
+      "x": 7639537.328489662,
+      "y": -744605.9914342728,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRS REINFORCEMENT"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-030",
+    "name": "Staircase Detail 30",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7929080.652943449,
+      "max_x": 7959080.652943449,
+      "min_y": -758566.5164577008,
+      "max_y": -739566.5164577008
+    },
+    "label": {
+      "x": 7941080.652943449,
+      "y": -744566.5164577008,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-031",
+    "name": "Staircase Detail 31",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAIL",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7738388.851409589,
+      "max_x": 7768388.851409589,
+      "min_y": -758380.0793729718,
+      "max_y": -739380.0793729718
+    },
+    "label": {
+      "x": 7750388.851409589,
+      "y": -744380.0793729718,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAIL",
+      "STAIR CASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-032",
+    "name": "Reinforcement Detail 32",
+    "stair_type": "reinforcement_detail",
+    "source_title": "STAIRS REINFORCEMENT DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7603688.324384453,
+      "max_x": 7633688.324384453,
+      "min_y": -758340.1992871682,
+      "max_y": -739340.1992871682
+    },
+    "label": {
+      "x": 7615688.324384453,
+      "y": -744340.1992871682,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRS REINFORCEMENT DETAILS",
+      "STAIRS REINFORCEMENT",
+      "10-Equal Risers at 175=1750",
+      "STAIR CASE 2 PLAN",
+      "10-Equal Risers at 175=1750"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-033",
+    "name": "Staircase Detail 33",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7843809.934651472,
+      "max_x": 7873809.934651472,
+      "min_y": -758257.7584682149,
+      "max_y": -739257.7584682149
+    },
+    "label": {
+      "x": 7855809.934651472,
+      "y": -744257.7584682149,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRS REINFORCEMENT",
+      "STAIR CASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-034",
+    "name": "Staircase 1 34",
+    "stair_type": "staircase_1",
+    "source_title": "STAIRCASE 1 DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7661171.045229253,
+      "max_x": 7691171.045229253,
+      "min_y": -757852.225588899,
+      "max_y": -738852.225588899
+    },
+    "label": {
+      "x": 7673171.045229253,
+      "y": -743852.225588899,
+      "layer": "waII"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAIL",
+      "STAIRCASE 1 DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-035",
+    "name": "Staircase Detail 35",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7818877.313964594,
+      "max_x": 7848877.313964594,
+      "min_y": -756674.3489102476,
+      "max_y": -737674.3489102476
+    },
+    "label": {
+      "x": 7830877.313964594,
+      "y": -742674.3489102476,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIR CASE PLAN 2"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-036",
+    "name": "Staircase Detail 36",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7770203.844980296,
+      "max_x": 7800203.844980296,
+      "min_y": -756551.341044406,
+      "max_y": -737551.341044406
+    },
+    "label": {
+      "x": 7782203.844980296,
+      "y": -742551.341044406,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIR CASE PLAN 2",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-037",
+    "name": "Staircase Detail 37",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7902351.853125834,
+      "max_x": 7932351.853125834,
+      "min_y": -755658.7578749894,
+      "max_y": -736658.7578749894
+    },
+    "label": {
+      "x": 7914351.853125834,
+      "y": -741658.7578749894,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-038",
+    "name": "Staircase Detail 38",
+    "stair_type": "staircase_detail",
+    "source_title": "8-Equal Risers at 175=1400",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7600975.724842494,
+      "max_x": 7630975.724842494,
+      "min_y": -752842.1232650117,
+      "max_y": -733842.1232650117
+    },
+    "label": {
+      "x": 7612975.724842494,
+      "y": -738842.1232650117,
+      "layer": "Planes"
+    },
+    "nearby_titles": [
+      "STAIRS REINFORCEMENT DETAILS",
+      "STAIRS REINFORCEMENT",
+      "8-Equal Risers at 175=1400",
+      "10-Equal Risers at 175=1750",
+      "STAIR CASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-039",
+    "name": "Staircase Detail 39",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIR CASE PLAN 1",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7801591.16142885,
+      "max_x": 7831591.16142885,
+      "min_y": -752771.6421612385,
+      "max_y": -733771.6421612385
+    },
+    "label": {
+      "x": 7813591.16142885,
+      "y": -738771.6421612385,
+      "layer": "RBarLabel_TOP"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIR CASE PLAN 1",
+      "STAIR CASE PLAN 2"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-040",
+    "name": "Staircase Detail 40",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIR CASE PLAN 2",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7780883.593291626,
+      "max_x": 7810883.593291626,
+      "min_y": -751845.6479466591,
+      "max_y": -732845.6479466591
+    },
+    "label": {
+      "x": 7792883.593291626,
+      "y": -737845.6479466591,
+      "layer": "RBarLabel_TOP"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIR CASE PLAN 2"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-041",
+    "name": "Staircase 1 41",
+    "stair_type": "staircase_1",
+    "source_title": "STAIR CASE 1 PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7751367.446537959,
+      "max_x": 7781367.446537959,
+      "min_y": -749927.6027837876,
+      "max_y": -730927.6027837876
+    },
+    "label": {
+      "x": 7763367.446537959,
+      "y": -735927.6027837876,
+      "layer": "BEAMS TEXT"
+    },
+    "nearby_titles": [
+      "Landing BEAM",
+      "STAIR CASE 1 PLAN",
+      "Landing beam",
+      "STAIR CASE 2 PLAN",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-042",
+    "name": "Staircase Detail 42",
+    "stair_type": "staircase_detail",
+    "source_title": "Landing beam",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7757023.144734537,
+      "max_x": 7787023.144734537,
+      "min_y": -748639.6724146936,
+      "max_y": -729639.6724146936
+    },
+    "label": {
+      "x": 7769023.144734537,
+      "y": -734639.6724146936,
+      "layer": "OUTLINE"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "Landing BEAM",
+      "STAIR CASE 1 PLAN",
+      "Landing beam",
+      "STAIR CASE 2 PLAN",
+      "STAIRCASE DETAILS",
+      "Landing BEAM"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-043",
+    "name": "Staircase 2 43",
+    "stair_type": "staircase_2",
+    "source_title": "STAIRCASE 2 PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7881507.526477971,
+      "max_x": 7911507.526477971,
+      "min_y": -747949.9870174485,
+      "max_y": -728949.9870174485
+    },
+    "label": {
+      "x": 7893507.526477971,
+      "y": -733949.9870174485,
+      "layer": "waII"
+    },
+    "nearby_titles": [
+      "STAIRCASE",
+      "STAIRCASE 1 PLAN",
+      "STAIRCASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-044",
+    "name": "Tread Section 44",
+    "stair_type": "tread_section",
+    "source_title": "TREAD SECTION",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7888194.320980305,
+      "max_x": 7918194.320980305,
+      "min_y": -735169.4480545805,
+      "max_y": -716169.4480545805
+    },
+    "label": {
+      "x": 7900194.320980305,
+      "y": -721169.4480545805,
+      "layer": "DEFAULTLAYER"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIR CASE PLAN",
+      "SPIRAL COLUMN",
+      "SPIRAL STAIR",
+      "TREAD SECTION",
+      "STAIR CASE PLAN",
+      "STAIRCASE 2 PLAN",
+      "SPIRAL COLUMN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-045",
+    "name": "Staircase 2 45",
+    "stair_type": "staircase_2",
+    "source_title": "STAIRCASE 2 DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7911485.28732924,
+      "max_x": 7941485.28732924,
+      "min_y": -734959.3671640004,
+      "max_y": -715959.3671640004
+    },
+    "label": {
+      "x": 7923485.28732924,
+      "y": -720959.3671640004,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE 2 DETAILS",
+      "STAIR CASE PLAN",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-046",
+    "name": "Staircase Detail 46",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIR CASE PLAN 2",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7699086.491229531,
+      "max_x": 7729086.491229531,
+      "min_y": -734562.2268021596,
+      "max_y": -715562.2268021596
+    },
+    "label": {
+      "x": 7711086.491229531,
+      "y": -720562.2268021596,
+      "layer": "RBarLabel_TOP"
+    },
+    "nearby_titles": [
+      "STAIR CASE PLAN 2",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-047",
+    "name": "Staircase Detail 47",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIR CASE PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7843624.690427721,
+      "max_x": 7873624.690427721,
+      "min_y": -734533.141612166,
+      "max_y": -715533.141612166
+    },
+    "label": {
+      "x": 7855624.690427721,
+      "y": -720533.141612166,
+      "layer": "RBarLabel_TOP"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAIL",
+      "STAIRCASE DETAILS",
+      "STAIR CASE PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-048",
+    "name": "Spiral 48",
+    "stair_type": "spiral",
+    "source_title": "; DETAILS SHOWING SPIRAL STAIR TYPE B",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7770750.122397334,
+      "max_x": 7800750.122397334,
+      "min_y": -734416.8088244251,
+      "max_y": -715416.8088244251
+    },
+    "label": {
+      "x": 7782750.122397334,
+      "y": -720416.8088244251,
+      "layer": "Planes"
+    },
+    "nearby_titles": [
+      "STAIRS REINFORCEMENT DETAILS",
+      "STAIRS REINFORCEMENT",
+      "BASE REINFORCEMENT",
+      "; DETAILS SHOWING SPIRAL STAIR TYPE B",
+      "STAIRS REINFORCEMENT"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-049",
+    "name": "Staircase 2 49",
+    "stair_type": "staircase_2",
+    "source_title": "STAIR CASE 2 PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7863875.638226723,
+      "max_x": 7893875.638226723,
+      "min_y": -734224.0956611153,
+      "max_y": -715224.0956611153
+    },
+    "label": {
+      "x": 7875875.638226723,
+      "y": -720224.0956611153,
+      "layer": "RBarLabel_TOP"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRCASE DETAILS",
+      "STAIR CASE 2 PLAN",
+      "STAIR CASE PLAN",
+      "STAIRCASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-050",
+    "name": "Staircase Detail 50",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIR CASE PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7903975.49872862,
+      "max_x": 7933975.49872862,
+      "min_y": -734020.3233283168,
+      "max_y": -715020.3233283168
+    },
+    "label": {
+      "x": 7915975.49872862,
+      "y": -720020.3233283168,
+      "layer": "BEAMS TEXT"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "SPIRAL STAIR",
+      "STAIRCASE 2 DETAILS",
+      "STAIR CASE PLAN",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-051",
+    "name": "Staircase 1 51",
+    "stair_type": "staircase_1",
+    "source_title": "STAIR CASE 1 PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7718612.435196974,
+      "max_x": 7748612.435196974,
+      "min_y": -734013.4063841607,
+      "max_y": -715013.4063841607
+    },
+    "label": {
+      "x": 7730612.435196974,
+      "y": -720013.4063841607,
+      "layer": "BEAMS TEXT"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "Landing beam",
+      "STAIR CASE 1 PLAN",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-052",
+    "name": "Tread Section 52",
+    "stair_type": "tread_section",
+    "source_title": "TREAD SECTION",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7670694.95181252,
+      "max_x": 7700694.95181252,
+      "min_y": -734005.5260372031,
+      "max_y": -715005.5260372031
+    },
+    "label": {
+      "x": 7682694.95181252,
+      "y": -720005.5260372031,
+      "layer": "DEFAULTLAYER"
+    },
+    "nearby_titles": [
+      "SPIRAL COLUMN",
+      "SPIRAL STAIR",
+      "TREAD SECTION",
+      "STAIRCASE DETAILS",
+      "STAIRCASE DETAILS",
+      "SPIRAL COLUMN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-053",
+    "name": "Staircase Detail 53",
+    "stair_type": "staircase_detail",
+    "source_title": "Landing BEAM",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7741942.207468355,
+      "max_x": 7771942.207468355,
+      "min_y": -733743.2885355778,
+      "max_y": -714743.2885355778
+    },
+    "label": {
+      "x": 7753942.207468355,
+      "y": -719743.2885355778,
+      "layer": "RBarLabel_TOP"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "Landing BEAM",
+      "STAIRCASE DETAILS",
+      "STAIR CASE PLAN",
+      "Landing BEAM"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-054",
+    "name": "Staircase Detail 54",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIR CASE PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7595664.261738786,
+      "max_x": 7625664.261738786,
+      "min_y": -733545.0448770582,
+      "max_y": -714545.0448770582
+    },
+    "label": {
+      "x": 7607664.261738786,
+      "y": -719545.0448770582,
+      "layer": "RBarLabel_TOP"
+    },
+    "nearby_titles": [
+      "STAIR CASE PLAN",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-055",
+    "name": "Staircase Detail 55",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7873722.33220896,
+      "max_x": 7903722.33220896,
+      "min_y": -733283.360142398,
+      "max_y": -714283.360142398
+    },
+    "label": {
+      "x": 7885722.33220896,
+      "y": -719283.360142398,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIR CASE 2 PLAN",
+      "STAIR CASE PLAN",
+      "SPIRAL COLUMN",
+      "TREAD SECTION"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-056",
+    "name": "Staircase Detail 56",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7678458.699191943,
+      "max_x": 7708458.699191943,
+      "min_y": -732878.098642875,
+      "max_y": -713878.098642875
+    },
+    "label": {
+      "x": 7690458.699191943,
+      "y": -718878.098642875,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "SPIRAL COLUMN",
+      "SPIRAL STAIR",
+      "TREAD SECTION",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-057",
+    "name": "Staircase Detail 57",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7915308.841398081,
+      "max_x": 7945308.841398081,
+      "min_y": -732803.5078151734,
+      "max_y": -713803.5078151734
+    },
+    "label": {
+      "x": 7927308.841398081,
+      "y": -718803.5078151734,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE 2 DETAILS",
+      "STAIR CASE PLAN",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-058",
+    "name": "Staircase Detail 58",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7824774.318762018,
+      "max_x": 7854774.318762018,
+      "min_y": -732748.9638558687,
+      "max_y": -713748.9638558687
+    },
+    "label": {
+      "x": 7836774.318762018,
+      "y": -718748.9638558687,
+      "layer": "G-ANNO-TEXT"
+    },
+    "nearby_titles": [
+      "STAIRCASE",
+      "STAIRCASE DETAIL"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-059",
+    "name": "Staircase Detail 59",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7749040.908997083,
+      "max_x": 7779040.908997083,
+      "min_y": -732443.651111688,
+      "max_y": -713443.651111688
+    },
+    "label": {
+      "x": 7761040.908997083,
+      "y": -718443.651111688,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "Landing BEAM",
+      "STAIRCASE DETAILS",
+      "STAIR CASE PLAN",
+      "Landing BEAM"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-060",
+    "name": "Staircase Detail 60",
+    "stair_type": "staircase_detail",
+    "source_title": "COLUMN / STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7935174.829697465,
+      "max_x": 7965174.829697465,
+      "min_y": -732390.1816318012,
+      "max_y": -713390.1816318012
+    },
+    "label": {
+      "x": 7947174.829697465,
+      "y": -718390.1816318012,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "COLUMN / STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-061",
+    "name": "Staircase Detail 61",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIR CASE PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7881314.294977646,
+      "max_x": 7911314.294977646,
+      "min_y": -732385.7308191736,
+      "max_y": -713385.7308191736
+    },
+    "label": {
+      "x": 7893314.294977646,
+      "y": -718385.7308191736,
+      "layer": "RBarLabel_TOP"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRCASE DETAILS",
+      "STAIR CASE PLAN",
+      "SPIRAL COLUMN",
+      "SPIRAL STAIR",
+      "TREAD SECTION"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-062",
+    "name": "Staircase Detail 62",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7856903.99930598,
+      "max_x": 7886903.99930598,
+      "min_y": -731948.185554979,
+      "max_y": -712948.185554979
+    },
+    "label": {
+      "x": 7868903.99930598,
+      "y": -717948.185554979,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "STAIRCASE DETAILS",
+      "STAIR CASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-063",
+    "name": "Staircase Detail 63",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIR CASE PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7738356.454444671,
+      "max_x": 7768356.454444671,
+      "min_y": -731891.1736468705,
+      "max_y": -712891.1736468705
+    },
+    "label": {
+      "x": 7750356.454444671,
+      "y": -717891.1736468705,
+      "layer": "BEAMS TEXT"
+    },
+    "nearby_titles": [
+      "Landing beam",
+      "STAIRCASE DETAILS",
+      "Landing BEAM",
+      "STAIRCASE DETAILS",
+      "STAIR CASE PLAN",
+      "Landing beam"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-064",
+    "name": "Staircase Detail 64",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAIL",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7835193.107245309,
+      "max_x": 7865193.107245309,
+      "min_y": -731891.0793729719,
+      "max_y": -712891.0793729719
+    },
+    "label": {
+      "x": 7847193.107245309,
+      "y": -717891.0793729719,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE",
+      "STAIRCASE DETAIL",
+      "STAIR CASE PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-065",
+    "name": "Staircase Detail 65",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7897058.00368221,
+      "max_x": 7927058.00368221,
+      "min_y": -731720.0556727495,
+      "max_y": -712720.0556727495
+    },
+    "label": {
+      "x": 7909058.00368221,
+      "y": -717720.0556727495,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "SPIRAL COLUMN",
+      "SPIRAL STAIR",
+      "TREAD SECTION",
+      "STAIRCASE 2 DETAILS",
+      "STAIR CASE PLAN",
+      "SPIRAL STAIR"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-066",
+    "name": "Staircase Detail 66",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7730838.161429426,
+      "max_x": 7760838.161429426,
+      "min_y": -731383.3112963954,
+      "max_y": -712383.3112963954
+    },
+    "label": {
+      "x": 7742838.161429426,
+      "y": -717383.3112963954,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "Landing beam",
+      "STAIRCASE DETAILS",
+      "Landing BEAM",
+      "STAIR CASE PLAN",
+      "Landing beam",
+      "Landing beam"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-067",
+    "name": "Staircase Detail 67",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7663180.661429426,
+      "max_x": 7693180.661429426,
+      "min_y": -731247.3112963955,
+      "max_y": -712247.3112963955
+    },
+    "label": {
+      "x": 7675180.661429426,
+      "y": -717247.3112963955,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "SPIRAL COLUMN",
+      "SPIRAL STAIR",
+      "TREAD SECTION",
+      "STAIR CASE 1 PLAN",
+      "STAIRCASE DETAILS",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-068",
+    "name": "Staircase Detail 68",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7611340.150713345,
+      "max_x": 7641340.150713345,
+      "min_y": -731212.8112963955,
+      "max_y": -712212.8112963955
+    },
+    "label": {
+      "x": 7623340.150713345,
+      "y": -717212.8112963955,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-069",
+    "name": "Staircase 1 69",
+    "stair_type": "staircase_1",
+    "source_title": "STAIR CASE 1 PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7654982.152835798,
+      "max_x": 7684982.152835798,
+      "min_y": -731181.5654201783,
+      "max_y": -712181.5654201783
+    },
+    "label": {
+      "x": 7666982.152835798,
+      "y": -717181.5654201783,
+      "layer": "RBarLabel_TOP"
+    },
+    "nearby_titles": [
+      "SPIRAL COLUMN",
+      "TREAD SECTION",
+      "STAIR CASE 1 PLAN",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-070",
+    "name": "Staircase Detail 70",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7638773.642548166,
+      "max_x": 7668773.642548166,
+      "min_y": -730451.667623156,
+      "max_y": -711451.667623156
+    },
+    "label": {
+      "x": 7650773.642548166,
+      "y": -716451.667623156,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIR CASE 1 PLAN",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-071",
+    "name": "Staircase Detail 71",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7811855.205116706,
+      "max_x": 7841855.205116706,
+      "min_y": -730243.1584018925,
+      "max_y": -711243.1584018925
+    },
+    "label": {
+      "x": 7823855.205116706,
+      "y": -716243.1584018925,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIRCASE",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-072",
+    "name": "Reinforcement Detail 72",
+    "stair_type": "reinforcement_detail",
+    "source_title": "BASE REINFORCEMENT",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7775193.350139001,
+      "max_x": 7805193.350139001,
+      "min_y": -729953.2717220229,
+      "max_y": -710953.2717220229
+    },
+    "label": {
+      "x": 7787193.350139001,
+      "y": -715953.2717220229,
+      "layer": "Planes"
+    },
+    "nearby_titles": [
+      "STAIRS REINFORCEMENT DETAILS",
+      "STAIRS REINFORCEMENT",
+      "BASE REINFORCEMENT",
+      "; DETAILS SHOWING SPIRAL STAIR TYPE B",
+      "STAIRS REINFORCEMENT DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-073",
+    "name": "Spiral 73",
+    "stair_type": "spiral",
+    "source_title": "SPIRAL STAIR",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7675269.95181252,
+      "max_x": 7705269.95181252,
+      "min_y": -729899.5260372031,
+      "max_y": -710899.5260372031
+    },
+    "label": {
+      "x": 7687269.95181252,
+      "y": -715899.5260372031,
+      "layer": "DEFAULTLAYER"
+    },
+    "nearby_titles": [
+      "SPIRAL COLUMN",
+      "SPIRAL STAIR",
+      "TREAD SECTION",
+      "STAIR CASE PLAN 1",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-074",
+    "name": "Staircase Detail 74",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIRCASE DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7707546.119890657,
+      "max_x": 7737546.119890657,
+      "min_y": -729568.4952152685,
+      "max_y": -710568.4952152685
+    },
+    "label": {
+      "x": 7719546.119890657,
+      "y": -715568.4952152685,
+      "layer": "Title"
+    },
+    "nearby_titles": [
+      "STAIR CASE PLAN 2",
+      "STAIRCASE DETAILS",
+      "STAIR CASE 1 PLAN",
+      "STAIR CASE 2 PLAN"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-075",
+    "name": "Staircase Detail 75",
+    "stair_type": "staircase_detail",
+    "source_title": "Landing beam",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7742580.513540862,
+      "max_x": 7772580.513540862,
+      "min_y": -727336.4436410513,
+      "max_y": -708336.4436410513
+    },
+    "label": {
+      "x": 7754580.513540862,
+      "y": -713336.4436410513,
+      "layer": "OUTLINE"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "Landing BEAM",
+      "STAIRCASE DETAILS",
+      "STAIR CASE PLAN",
+      "Landing beam"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-076",
+    "name": "Staircase 2 76",
+    "stair_type": "staircase_2",
+    "source_title": "STAIR CASE 2 PLAN",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7716513.815336989,
+      "max_x": 7746513.815336989,
+      "min_y": -727101.959313021,
+      "max_y": -708101.959313021
+    },
+    "label": {
+      "x": 7728513.815336989,
+      "y": -713101.959313021,
+      "layer": "BEAMS TEXT"
+    },
+    "nearby_titles": [
+      "STAIRCASE DETAILS",
+      "Landing beam",
+      "STAIR CASE 1 PLAN",
+      "STAIR CASE 2 PLAN",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-077",
+    "name": "Staircase Detail 77",
+    "stair_type": "staircase_detail",
+    "source_title": "STAIR CASE PLAN 1",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7689951.581031833,
+      "max_x": 7719951.581031833,
+      "min_y": -725471.7268021596,
+      "max_y": -706471.7268021596
+    },
+    "label": {
+      "x": 7701951.581031833,
+      "y": -711471.7268021596,
+      "layer": "RBarLabel_TOP"
+    },
+    "nearby_titles": [
+      "STAIR CASE PLAN 1",
+      "STAIR CASE PLAN 2",
+      "STAIRCASE DETAILS",
+      "STAIRCASE DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-078",
+    "name": "Staircase Detail 78",
+    "stair_type": "staircase_detail",
+    "source_title": "10-Equal Risers at 175=1750",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7770591.107284956,
+      "max_x": 7800591.107284956,
+      "min_y": -723674.6463281712,
+      "max_y": -704674.6463281712
+    },
+    "label": {
+      "x": 7782591.107284956,
+      "y": -709674.6463281712,
+      "layer": "Planes"
+    },
+    "nearby_titles": [
+      "STAIRS REINFORCEMENT DETAILS",
+      "STAIRS REINFORCEMENT",
+      "10-Equal Risers at 175=1750",
+      "BASE REINFORCEMENT",
+      "; DETAILS SHOWING SPIRAL STAIR TYPE B"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-079",
+    "name": "Staircase Detail 79",
+    "stair_type": "staircase_detail",
+    "source_title": "8-Equal Risers at 175=1400",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 7773064.237561895,
+      "max_x": 7803064.237561895,
+      "min_y": -718344.2443258943,
+      "max_y": -699344.2443258943
+    },
+    "label": {
+      "x": 7785064.237561895,
+      "y": -704344.2443258943,
+      "layer": "Planes"
+    },
+    "nearby_titles": [
+      "STAIRS REINFORCEMENT DETAILS",
+      "8-Equal Risers at 175=1400",
+      "10-Equal Risers at 175=1750",
+      "BASE REINFORCEMENT"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  },
+  {
+    "id": "ST-080",
+    "name": "Reinforcement Detail 80",
+    "stair_type": "reinforcement_detail",
+    "source_title": "REINFORCEMENT DETAILS",
+    "source_file": "STAIRCASE DETAILS.dxf",
+    "bbox": {
+      "min_x": 8759208.988835998,
+      "max_x": 8789208.988835998,
+      "min_y": 15860349.38083599,
+      "max_y": 15879349.38083599
+    },
+    "label": {
+      "x": 8771208.988835998,
+      "y": 15874349.38083599,
+      "layer": "text"
+    },
+    "nearby_titles": [
+      "REINFORCEMENT DETAILS"
+    ],
+    "status": "approved_for_catalogue_review",
+    "generator_status": "needs_parametric_mapping"
+  }
+]
