@@ -4,6 +4,7 @@ import io
 import json
 import math
 import os
+import re
 import tempfile
 import zipfile
 from pathlib import Path
@@ -24,17 +25,8 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("iLoveStructural")
-st.subheader("Tool 5 V2: Staircase Detail Catalogue and Generator")
-st.caption(
-    "Reviewed staircase catalogue -> selectable stair template -> floor-height-driven 2D plan and 3D model."
-)
-
-st.info(
-    "This version uses the extracted catalogue as the visual source library, then creates a clean parametric stair layout "
-    "from floor height and stair rules. Final detailing, reinforcement, headroom, fire code, and site constraints still "
-    "require engineering and architectural review."
-)
+st.title("Staircase Detail Generator")
+st.caption("Pick a staircase visually, enter floor height, then download the generated 2D and 3D outputs.")
 
 
 # =========================================================
@@ -187,6 +179,29 @@ def catalogue_dataframe(catalogue):
             "generator_status": item.get("generator_status", ""),
         })
     return pd.DataFrame(rows)
+
+
+def readable_stair_type(value):
+    labels = {
+        "staircase_detail": "Stair detail",
+        "staircase_1": "Staircase 1",
+        "staircase_2": "Staircase 2",
+        "reinforcement_detail": "Reinforcement",
+        "spiral": "Spiral",
+        "tread_section": "Tread section",
+    }
+    return labels.get(str(value or ""), str(value or "Other").replace("_", " ").title())
+
+
+def fit_source_svg(svg, height=220):
+    if not svg:
+        return ""
+
+    fitted = re.sub(r'\swidth="[^"]+"', ' width="100%"', svg, count=1)
+    fitted = re.sub(r'\sheight="[^"]+"', f' height="{int(height)}"', fitted, count=1)
+    if "preserveAspectRatio" not in fitted[:250]:
+        fitted = fitted.replace("<svg ", '<svg preserveAspectRatio="xMidYMid meet" ', 1)
+    return fitted
 
 
 def default_generator_type(stair_type):
@@ -552,6 +567,9 @@ SHAPE_COLORS = {
     "landing": "#93c5fd",
     "treads": "#fbbf24",
     "arrow": "#34d399",
+    "section": "#f8fafc",
+    "rebar": "#fb7185",
+    "dimension": "#a7f3d0",
     "text": "#f8fafc",
 }
 
@@ -562,8 +580,7 @@ def svg_xy(x, y, bbox, width, height, pad):
     return sx, sy
 
 
-def generated_plan_svg(layout, width=720, height=460):
-    bbox = layout["bbox"]
+def shapes_svg(shapes, bbox, width=720, height=460):
     pad = 28.0
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
@@ -571,14 +588,14 @@ def generated_plan_svg(layout, width=720, height=460):
         '<rect x="0" y="0" width="100%" height="100%" fill="#0f172a"/>',
     ]
 
-    for shape in layout["shapes"]:
+    for shape in shapes:
         layer = shape.get("layer", "outline")
         color = SHAPE_COLORS.get(layer, "#e5e7eb")
 
         if shape["type"] == "line":
             x1, y1 = svg_xy(*shape["start"], bbox, width, height, pad)
             x2, y2 = svg_xy(*shape["end"], bbox, width, height, pad)
-            stroke_width = 2 if layer in {"outline", "arrow"} else 1
+            stroke_width = 2 if layer in {"outline", "arrow", "section", "rebar"} else 1
             parts.append(
                 f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" '
                 f'stroke="{color}" stroke-width="{stroke_width}"/>'
@@ -615,6 +632,113 @@ def generated_plan_svg(layout, width=720, height=460):
     return "\n".join(parts)
 
 
+def generated_plan_svg(layout, width=720, height=460):
+    return shapes_svg(layout["shapes"], layout["bbox"], width=width, height=height)
+
+
+def build_detail_sheet(layout):
+    plan_shapes = [dict(shape) for shape in layout["shapes"]]
+    summary = layout["summary"]
+    params = layout["params"]
+
+    floor_height = float(summary["floor_height"])
+    riser_count = int(summary["riser_count"])
+    riser_height = float(summary["riser_height"])
+    tread_depth = float(summary["tread_depth"])
+    stair_width = float(summary["stair_width"])
+    total_going = max(float(summary.get("total_going", 0.0)), tread_depth * max(1, riser_count - 1))
+    treads = max(1, riser_count - 1)
+
+    section_x0 = layout["bbox"]["min_x"]
+    section_y0 = layout["bbox"]["min_y"] - floor_height - 2400.0
+    section_x1 = section_x0 + total_going
+    section_y1 = section_y0 + floor_height
+
+    detail_shapes = []
+    add_text_shape(
+        detail_shapes,
+        f"Generated stair detail - {summary['generator_type']}",
+        layout["bbox"]["min_x"],
+        layout["bbox"]["max_y"] + 550.0,
+        height=220.0,
+    )
+
+    add_text_shape(
+        detail_shapes,
+        f"{riser_count} risers @ {riser_height:.1f} mm | going {tread_depth:.0f} mm | width {stair_width:.0f} mm",
+        layout["bbox"]["min_x"],
+        layout["bbox"]["max_y"] + 250.0,
+        height=170.0,
+    )
+
+    stair_points = [(section_x0, section_y0)]
+    tread_run = total_going / treads
+    for i in range(treads):
+        x_next = section_x0 + (i + 1) * tread_run
+        y_current = section_y0 + i * riser_height
+        y_next = section_y0 + (i + 1) * riser_height
+        stair_points.append((x_next, y_current))
+        stair_points.append((x_next, y_next))
+
+    if stair_points[-1][1] < section_y1:
+        stair_points.append((section_x1, section_y1))
+
+    detail_shapes.append({
+        "type": "polyline",
+        "points": stair_points,
+        "closed": False,
+        "layer": "section",
+    })
+
+    waist_offset = max(175.0, floor_height * 0.045)
+    add_line_shape(detail_shapes, section_x0, section_y0 - waist_offset, section_x1, section_y1 - waist_offset, "section")
+    add_line_shape(detail_shapes, section_x0, section_y0 + 110.0, section_x1, section_y1 + 110.0, "rebar")
+    add_line_shape(detail_shapes, section_x0, section_y0 - 500.0, section_x1, section_y0 - 500.0, "dimension")
+    add_line_shape(detail_shapes, section_x1 + 450.0, section_y0, section_x1 + 450.0, section_y1, "dimension")
+
+    main_bar_count = max(3, int(math.ceil(stair_width / 150.0)) + 1)
+    distribution_spacing = 200 if riser_count <= 18 else 175
+    landing_bar_count = max(4, int(math.ceil(float(params.get("landing_length", 1200.0)) / 200.0)))
+    extra_top_bars = max(2, int(math.ceil(riser_count / 8.0)))
+
+    note_x = section_x0
+    note_y = section_y0 - 1050.0
+    add_text_shape(detail_shapes, f"Main waist bars: {main_bar_count}Y12 continuous along flight", note_x, note_y, 160.0)
+    add_text_shape(detail_shapes, f"Distribution bars: Y10 @ {distribution_spacing} c/c", note_x, note_y - 260.0, 160.0)
+    add_text_shape(detail_shapes, f"Landing/top support bars: {landing_bar_count}Y12 + {extra_top_bars} extra top bars", note_x, note_y - 520.0, 160.0)
+    add_text_shape(detail_shapes, "Reinforcement shown is preliminary; verify by structural design.", note_x, note_y - 780.0, 150.0)
+
+    all_shapes = plan_shapes + detail_shapes
+    all_points = []
+    for shape in all_shapes:
+        if shape["type"] == "line":
+            all_points.extend([shape["start"], shape["end"]])
+        elif shape["type"] == "polyline":
+            all_points.extend(shape.get("points", []))
+        elif shape["type"] == "circle":
+            cx, cy = shape["center"]
+            r = shape["radius"]
+            all_points.extend([(cx - r, cy - r), (cx + r, cy + r)])
+        elif shape["type"] == "text":
+            all_points.append(shape["point"])
+
+    return {
+        "shapes": all_shapes,
+        "bbox": expand_bbox(bbox_from_points(all_points), 900.0),
+        "reinforcement": {
+            "main_bar_count": main_bar_count,
+            "distribution_spacing": distribution_spacing,
+            "landing_bar_count": landing_bar_count,
+            "extra_top_bars": extra_top_bars,
+        },
+    }
+
+
+def generated_detail_svg(layout, width=860, height=620):
+    detail = build_detail_sheet(layout)
+    return shapes_svg(detail["shapes"], detail["bbox"], width=width, height=height)
+
+
 def safe_layer(doc, name, color=7):
     if name not in [layer.dxf.name for layer in doc.layers]:
         doc.layers.new(name=name, dxfattribs={"color": color})
@@ -644,6 +768,9 @@ def build_plan_dxf(layout):
     safe_layer(doc, "ILS_STAIR_TREADS", color=2)
     safe_layer(doc, "ILS_STAIR_LANDING", color=4)
     safe_layer(doc, "ILS_STAIR_ARROW", color=3)
+    safe_layer(doc, "ILS_STAIR_SECTION", color=7)
+    safe_layer(doc, "ILS_STAIR_REBAR", color=1)
+    safe_layer(doc, "ILS_STAIR_DIMENSION", color=3)
     safe_layer(doc, "ILS_STAIR_TEXT", color=7)
 
     layer_map = {
@@ -651,10 +778,15 @@ def build_plan_dxf(layout):
         "treads": "ILS_STAIR_TREADS",
         "landing": "ILS_STAIR_LANDING",
         "arrow": "ILS_STAIR_ARROW",
+        "section": "ILS_STAIR_SECTION",
+        "rebar": "ILS_STAIR_REBAR",
+        "dimension": "ILS_STAIR_DIMENSION",
         "text": "ILS_STAIR_TEXT",
     }
 
-    for shape in layout["shapes"]:
+    detail = build_detail_sheet(layout)
+
+    for shape in detail["shapes"]:
         layer = layer_map.get(shape.get("layer", "outline"), "ILS_STAIR_OUTLINE")
 
         if shape["type"] == "line":
@@ -714,11 +846,13 @@ def build_obj(layout):
 
 
 def build_calc_json(layout, selected_item):
+    detail = build_detail_sheet(layout)
     payload = {
         "source_catalogue_item": selected_item,
         "generated_layout": {
             "summary": layout["summary"],
             "params": layout["params"],
+            "reinforcement": detail["reinforcement"],
             "created_at": layout["created_at"],
         },
     }
@@ -747,7 +881,7 @@ const camera = new THREE.PerspectiveCamera(45, width / height, 1, 200000);
 const bw = Math.max(1, data.bbox.max_x - data.bbox.min_x);
 const bh = Math.max(1, data.bbox.max_y - data.bbox.min_y);
 const maxDim = Math.max(bw, bh, data.summary.floor_height || 3000);
-camera.position.set(maxDim * 0.85, maxDim * 0.85, maxDim * 1.05);
+camera.position.set(maxDim * 1.45, maxDim * 1.20, maxDim * 1.65);
 camera.lookAt(0, 0, 0);
 
 const renderer = new THREE.WebGLRenderer({{ antialias: true }});
@@ -793,7 +927,7 @@ const centerX = (data.bbox.min_x + data.bbox.max_x) / 2;
 const centerY = (data.bbox.min_y + data.bbox.max_y) / 2;
 group.position.set(-centerX, 0, centerY);
 
-const padGeom = new THREE.CylinderGeometry(maxDim * 0.48, maxDim * 0.48, 35, 96);
+const padGeom = new THREE.CylinderGeometry(maxDim * 0.70, maxDim * 0.70, 35, 96);
 const padMat = new THREE.MeshStandardMaterial({{ color: 0x111827, roughness: 0.7 }});
 const pad = new THREE.Mesh(padGeom, padMat);
 pad.position.y = -25;
@@ -813,54 +947,43 @@ animate();
 # UI
 # =========================================================
 
-st.markdown("### 1. Catalogue Source")
+catalogue_source = str(CATALOGUE_JSON)
+zip_source = str(CATALOGUE_ZIP)
 
-asset_mode = "Bundled catalogue assets"
-catalogue_source = None
-zip_source = None
-zip_size_mb = 0.0
-
-if CATALOGUE_JSON.exists() and CATALOGUE_ZIP.exists():
-    catalogue_source = str(CATALOGUE_JSON)
-    zip_source = str(CATALOGUE_ZIP)
-    zip_size_mb = CATALOGUE_ZIP.stat().st_size / (1024 * 1024)
-else:
-    st.warning(
-        "Bundled catalogue assets were not found in this deployed app. "
-        "Upload the generated stair_catalogue.json and stair_catalogue_package.zip below."
+if not CATALOGUE_JSON.exists() or not CATALOGUE_ZIP.exists():
+    st.error(
+        "The staircase catalogue is not installed with this app. "
+        "Please contact the app administrator."
     )
-    asset_mode = "Uploaded catalogue assets"
-    up1, up2 = st.columns(2)
-    uploaded_catalogue = up1.file_uploader("Upload stair_catalogue.json", type=["json"])
-    uploaded_package = up2.file_uploader("Upload stair_catalogue_package.zip", type=["zip"])
-
-    if uploaded_catalogue is None or uploaded_package is None:
-        st.stop()
-
-    catalogue_source = uploaded_catalogue.getvalue()
-    zip_source = uploaded_package.getvalue()
-    zip_size_mb = len(zip_source) / (1024 * 1024)
+    with st.expander("Administrator setup", expanded=False):
+        st.code(
+            "tool5_catalogue_assets/\n"
+            "    stair_catalogue.json\n"
+            "    stair_catalogue_package.zip",
+            language="text",
+        )
+    st.stop()
 
 try:
     catalogue, package_entries = load_catalogue(catalogue_source, zip_source)
 except Exception as e:
-    st.error(f"Could not load staircase catalogue assets: {e}")
+    st.error("The staircase catalogue could not be loaded. Please contact the app administrator.")
+    with st.expander("Technical error", expanded=False):
+        st.write(str(e))
     st.stop()
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Catalogue items", len(catalogue))
-c2.metric("Package files", len(package_entries))
-c3.metric("Asset ZIP size", f"{zip_size_mb:.2f} MB")
-st.caption(f"Catalogue source mode: {asset_mode}")
 
 catalogue_df = catalogue_dataframe(catalogue)
 
-st.markdown("### 2. Pick A Staircase Detail")
+st.markdown("### Choose A Design")
 
-filter_col, search_col = st.columns([1, 2])
+filter_col, search_col, page_col = st.columns([1.1, 1.7, 0.8])
 type_options = ["All"] + sorted(catalogue_df["stair_type"].dropna().unique().tolist())
-type_filter = filter_col.selectbox("Catalogue type", type_options)
-search_text = search_col.text_input("Search catalogue", value="")
+type_filter = filter_col.selectbox(
+    "Filter",
+    type_options,
+    format_func=lambda value: "All designs" if value == "All" else readable_stair_type(value),
+)
+search_text = search_col.text_input("Search", value="", placeholder="Search by ID, title, or type")
 
 filtered_items = catalogue
 if type_filter != "All":
@@ -878,18 +1001,67 @@ if not filtered_items:
     st.warning("No catalogue items match the current filter.")
     st.stop()
 
-selected_label = st.selectbox(
-    "Staircase catalogue item",
-    [
-        f"{item.get('id')} - {item.get('name')} ({item.get('stair_type')})"
-        for item in filtered_items
-    ],
+if (
+    "selected_catalogue_id" not in st.session_state
+    or not any(item.get("id") == st.session_state.selected_catalogue_id for item in catalogue)
+):
+    st.session_state.selected_catalogue_id = filtered_items[0].get("id")
+
+if not any(item.get("id") == st.session_state.selected_catalogue_id for item in filtered_items):
+    st.session_state.selected_catalogue_id = filtered_items[0].get("id")
+
+page_size = 9
+page_count = max(1, math.ceil(len(filtered_items) / page_size))
+page = int(
+    page_col.number_input(
+        "Page",
+        min_value=1,
+        max_value=page_count,
+        value=1,
+        step=1,
+        key=f"catalogue_page_{safe_filename(type_filter)}_{len(filtered_items)}",
+    )
 )
-selected_index = [
-    f"{item.get('id')} - {item.get('name')} ({item.get('stair_type')})"
-    for item in filtered_items
-].index(selected_label)
-selected_item = filtered_items[selected_index]
+start = (page - 1) * page_size
+page_items = filtered_items[start:start + page_size]
+
+for row_start in range(0, len(page_items), 3):
+    cols = st.columns(3)
+    for offset, col in enumerate(cols):
+        idx = row_start + offset
+        if idx >= len(page_items):
+            continue
+
+        item = page_items[idx]
+        item_id = item.get("id", "")
+        item_name = item.get("name", "")
+        item_type = readable_stair_type(item.get("stair_type", ""))
+        is_selected = item_id == st.session_state.selected_catalogue_id
+        item_preview_entry = find_package_entry(
+            package_entries,
+            "candidate_previews",
+            item_id,
+            item_name,
+            "svg",
+        )
+
+        with col:
+            if item_preview_entry:
+                thumb_svg = fit_source_svg(read_package_text(zip_source, item_preview_entry), height=210)
+                components.html(thumb_svg, height=225, scrolling=False)
+            else:
+                st.empty()
+
+            st.markdown(f"**{item_type}**")
+            st.caption(item_id)
+            button_label = "Selected" if is_selected else "Use this design"
+            if st.button(button_label, key=f"use_catalogue_{item_id}", use_container_width=True):
+                st.session_state.selected_catalogue_id = item_id
+
+selected_item = next(
+    item for item in catalogue
+    if item.get("id") == st.session_state.selected_catalogue_id
+)
 
 preview_entry = find_package_entry(
     package_entries,
@@ -906,40 +1078,33 @@ dxf_entry = find_package_entry(
     "dxf",
 )
 
-source_tab, table_tab = st.tabs(["Selected Source Detail", "Catalogue Table"])
+st.markdown("### Selected Design")
+selected_left, selected_right = st.columns([1.25, 0.75])
 
-with source_tab:
-    left, right = st.columns([1.15, 0.85])
+with selected_left:
+    if preview_entry:
+        source_svg = fit_source_svg(read_package_text(zip_source, preview_entry), height=420)
+        components.html(source_svg, height=440, scrolling=False)
+    else:
+        st.warning("No source preview was found for this catalogue item.")
 
-    with left:
-        st.caption("Original extracted 2D detail preview")
-        if preview_entry:
-            source_svg = read_package_text(zip_source, preview_entry)
-            components.html(source_svg, height=480, scrolling=True)
-        else:
-            st.warning("No source SVG preview was found for this catalogue item.")
+with selected_right:
+    st.metric("Design", selected_item.get("id", ""))
+    st.metric("Type", readable_stair_type(selected_item.get("stair_type", "")))
+    if dxf_entry:
+        st.download_button(
+            "Download Source DXF",
+            data=read_package_bytes(zip_source, dxf_entry),
+            file_name=f"{safe_filename(selected_item['id'] + '_' + selected_item['name'])}_source.dxf",
+            mime="application/dxf",
+            use_container_width=True,
+        )
 
-    with right:
-        st.write({
-            "id": selected_item.get("id"),
-            "name": selected_item.get("name"),
-            "stair_type": selected_item.get("stair_type"),
-            "source_title": selected_item.get("source_title"),
-        })
-        st.caption("The source crop is the reference detail. The generated model below is clean parametric geometry.")
-        if dxf_entry:
-            st.download_button(
-                "Download Original Cropped Detail DXF",
-                data=read_package_bytes(zip_source, dxf_entry),
-                file_name=f"{safe_filename(selected_item['id'] + '_' + selected_item['name'])}_source.dxf",
-                mime="application/dxf",
-            )
-
-with table_tab:
+with st.expander("Technical catalogue table", expanded=False):
     st.dataframe(catalogue_df, use_container_width=True)
 
 
-st.markdown("### 3. Generate Stair From Floor Height")
+st.markdown("### Generate Stair")
 
 default_type = default_generator_type(selected_item.get("stair_type", ""))
 generator_types = ["Straight flight", "Dog-leg stair", "L-shape stair", "Spiral stair"]
@@ -996,8 +1161,8 @@ for warning in summary.get("warnings", []):
 preview_2d, preview_3d = st.columns([1, 1])
 
 with preview_2d:
-    st.caption("Generated 2D plan preview")
-    components.html(generated_plan_svg(layout), height=480, scrolling=False)
+    st.caption("Generated 2D detail preview")
+    components.html(generated_detail_svg(layout), height=640, scrolling=False)
 
 with preview_3d:
     st.caption("Generated rotating 3D preview")
@@ -1015,9 +1180,9 @@ calc_json = build_calc_json(layout, selected_item)
 
 d1, d2, d3 = st.columns(3)
 d1.download_button(
-    "Download Generated 2D Plan DXF",
+    "Download Generated 2D Detail DXF",
     data=plan_dxf,
-    file_name=f"{base_name}_plan.dxf",
+    file_name=f"{base_name}_detail.dxf",
     mime="application/dxf",
 )
 d2.download_button(
@@ -1033,6 +1198,4 @@ d3.download_button(
     mime="application/json",
 )
 
-st.success(
-    "Tool 5 V2 is ready for review: pick a catalogue item, tune the stair rules, then download the generated 2D and 3D outputs."
-)
+st.success("Ready.")
