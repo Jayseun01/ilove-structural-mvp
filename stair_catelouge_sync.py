@@ -1,11 +1,12 @@
 import datetime
+import html
 import io
 import json
 import math
 import os
-import re
 import tempfile
 import zipfile
+from pathlib import Path
 
 import ezdxf
 import pandas as pd
@@ -18,54 +19,596 @@ import streamlit.components.v1 as components
 # =========================================================
 
 st.set_page_config(
-    page_title="iLoveStructural - Staircase Detail Catalogue",
+    page_title="iLoveStructural - Staircase Detail Generator",
     page_icon=":building_construction:",
     layout="wide",
 )
 
 st.title("iLoveStructural")
-st.subheader("Tool 5: Staircase Detail Catalogue Extractor")
+st.subheader("Tool 5 V2: Staircase Detail Catalogue and Generator")
 st.caption(
-    "DXF staircase detail library -> detected catalogue candidates -> reviewed stair templates."
+    "Reviewed staircase catalogue -> selectable stair template -> floor-height-driven 2D plan and 3D model."
 )
 
 st.info(
-    "This first version extracts staircase detail candidates from an existing DXF catalogue. "
-    "After the catalogue is clean, the next version will generate parametric 2D details and 3D stair models from floor height."
+    "This version uses the extracted catalogue as the visual source library, then creates a clean parametric stair layout "
+    "from floor height and stair rules. Final detailing, reinforcement, headroom, fire code, and site constraints still "
+    "require engineering and architectural review."
 )
 
 
 # =========================================================
-# FILE HELPERS
+# ASSET PATHS
 # =========================================================
 
-DEFAULT_LOCAL_DXF = (
-    r"C:\Users\HP\Downloads\38833FF26BA1D.UnigramPreview_g9c9v27vpyspw!App"
-    r"\STAIRCASE DETAILS.dxf"
-)
+APP_DIR = Path(__file__).resolve().parent
+ASSET_DIR = APP_DIR / "tool5_catalogue_assets"
+CATALOGUE_JSON = ASSET_DIR / "stair_catalogue.json"
+CATALOGUE_ZIP = ASSET_DIR / "stair_catalogue_package.zip"
 
 
-def safe_remove_file(path):
-    try:
-        if path and os.path.exists(path):
-            os.remove(path)
-    except Exception:
-        pass
+# =========================================================
+# BASIC HELPERS
+# =========================================================
+
+def safe_filename(value, default="stair_detail"):
+    clean = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(value or ""))
+    clean = "_".join(part for part in clean.split("_") if part)
+    return clean.strip("._") or default
 
 
-def save_bytes_to_temp_dxf(data):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp:
-        tmp.write(data)
-        return tmp.name
+def mm(value):
+    return float(value)
 
 
-def read_doc_from_bytes(data):
-    tmp_path = None
-    try:
-        tmp_path = save_bytes_to_temp_dxf(data)
-        return ezdxf.readfile(tmp_path)
-    finally:
-        safe_remove_file(tmp_path)
+def bbox_from_points(points):
+    if not points:
+        return {"min_x": 0.0, "min_y": 0.0, "max_x": 1.0, "max_y": 1.0}
+
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return {
+        "min_x": min(xs),
+        "min_y": min(ys),
+        "max_x": max(xs),
+        "max_y": max(ys),
+    }
+
+
+def expand_bbox(bbox, pad):
+    return {
+        "min_x": bbox["min_x"] - pad,
+        "min_y": bbox["min_y"] - pad,
+        "max_x": bbox["max_x"] + pad,
+        "max_y": bbox["max_y"] + pad,
+    }
+
+
+def bbox_width(bbox):
+    return max(1.0, bbox["max_x"] - bbox["min_x"])
+
+
+def bbox_height(bbox):
+    return max(1.0, bbox["max_y"] - bbox["min_y"])
+
+
+def rotate_point(x, y, cx, cy, angle_deg):
+    angle = math.radians(angle_deg)
+    dx = x - cx
+    dy = y - cy
+    return (
+        cx + dx * math.cos(angle) - dy * math.sin(angle),
+        cy + dx * math.sin(angle) + dy * math.cos(angle),
+    )
+
+
+def box_plan_corners(step):
+    x = step["x"]
+    y = step["y"]
+    dx = step["dx"]
+    dy = step["dy"]
+    rotation = float(step.get("rotation", 0.0))
+    cx = x + dx / 2.0
+    cy = y + dy / 2.0
+    corners = [
+        (x, y),
+        (x + dx, y),
+        (x + dx, y + dy),
+        (x, y + dy),
+    ]
+
+    if abs(rotation) <= 1e-9:
+        return corners
+
+    return [rotate_point(px, py, cx, cy, rotation) for px, py in corners]
+
+
+# =========================================================
+# CATALOGUE LOADING
+# =========================================================
+
+@st.cache_data(show_spinner=False)
+def load_catalogue(catalogue_path, zip_path):
+    with open(catalogue_path, "r", encoding="utf-8") as f:
+        catalogue = json.load(f)
+
+    entries = []
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        entries = zf.namelist()
+
+    return catalogue, entries
+
+
+def find_package_entry(entries, folder, item_id, item_name, extension):
+    exact_stem = safe_filename(f"{item_id}_{item_name}")
+    exact = f"{folder}/{exact_stem}.{extension}"
+    if exact in entries:
+        return exact
+
+    prefix = f"{folder}/{item_id}_"
+    suffix = f".{extension}"
+    matches = [entry for entry in entries if entry.startswith(prefix) and entry.endswith(suffix)]
+    return matches[0] if matches else None
+
+
+@st.cache_data(show_spinner=False)
+def read_package_text(zip_path, entry_name):
+    if not entry_name:
+        return ""
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        return zf.read(entry_name).decode("utf-8", errors="replace")
+
+
+@st.cache_data(show_spinner=False)
+def read_package_bytes(zip_path, entry_name):
+    if not entry_name:
+        return b""
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        return zf.read(entry_name)
+
+
+def catalogue_dataframe(catalogue):
+    rows = []
+    for item in catalogue:
+        rows.append({
+            "id": item.get("id", ""),
+            "name": item.get("name", ""),
+            "stair_type": item.get("stair_type", ""),
+            "source_title": item.get("source_title", ""),
+            "generator_status": item.get("generator_status", ""),
+        })
+    return pd.DataFrame(rows)
+
+
+def default_generator_type(stair_type):
+    if stair_type == "spiral":
+        return "Spiral stair"
+    if stair_type in {"staircase_1", "staircase_2", "staircase_detail"}:
+        return "Dog-leg stair"
+    return "Straight flight"
+
+
+# =========================================================
+# STAIR CALCULATION
+# =========================================================
+
+def choose_risers(floor_height, target_riser, min_riser, max_riser):
+    floor_height = max(1.0, float(floor_height))
+    target_riser = max(1.0, float(target_riser))
+    min_riser = max(1.0, float(min_riser))
+    max_riser = max(min_riser, float(max_riser))
+
+    low_count = max(1, int(math.ceil(floor_height / max_riser)))
+    high_count = max(low_count, int(math.floor(floor_height / min_riser)))
+
+    candidates = []
+    for count in range(low_count, high_count + 1):
+        riser = floor_height / count
+        candidates.append((abs(riser - target_riser), count, riser))
+
+    if candidates:
+        _, count, riser = min(candidates, key=lambda item: item[0])
+    else:
+        count = max(1, int(round(floor_height / target_riser)))
+        riser = floor_height / count
+
+    warnings = []
+    if riser < min_riser or riser > max_riser:
+        warnings.append(
+            f"Computed riser {round(riser, 1)} mm is outside the selected range "
+            f"{round(min_riser, 1)}-{round(max_riser, 1)} mm."
+        )
+
+    return count, riser, warnings
+
+
+def add_rect_shape(shapes, x1, y1, x2, y2, layer="outline"):
+    shapes.append({
+        "type": "polyline",
+        "points": [(x1, y1), (x2, y1), (x2, y2), (x1, y2)],
+        "closed": True,
+        "layer": layer,
+    })
+
+
+def add_line_shape(shapes, x1, y1, x2, y2, layer="treads"):
+    shapes.append({
+        "type": "line",
+        "start": (x1, y1),
+        "end": (x2, y2),
+        "layer": layer,
+    })
+
+
+def add_text_shape(shapes, text, x, y, height=180.0):
+    shapes.append({
+        "type": "text",
+        "text": text,
+        "point": (x, y),
+        "height": height,
+        "layer": "text",
+    })
+
+
+def add_step_box(steps, x, y, dx, dy, height, rotation=0.0, name="step"):
+    if dx <= 0 or dy <= 0 or height <= 0:
+        return
+    steps.append({
+        "name": name,
+        "x": float(x),
+        "y": float(y),
+        "dx": float(dx),
+        "dy": float(dy),
+        "height": float(height),
+        "rotation": float(rotation),
+    })
+
+
+def straight_layout(params):
+    floor_height = params["floor_height"]
+    width = params["stair_width"]
+    tread = params["tread_depth"]
+    risers = params["riser_count"]
+    riser = params["riser_height"]
+    treads = max(1, risers - 1)
+    run = treads * tread
+
+    shapes = []
+    steps = []
+
+    add_rect_shape(shapes, 0, 0, run, width, "outline")
+    for i in range(1, treads):
+        x = i * tread
+        add_line_shape(shapes, x, 0, x, width, "treads")
+    add_line_shape(shapes, tread * 0.5, width * 0.5, run - tread * 0.5, width * 0.5, "arrow")
+    add_text_shape(shapes, f"UP {risers}R @ {riser:.1f}", tread, width + 350)
+
+    for i in range(treads):
+        add_step_box(
+            steps,
+            x=i * tread,
+            y=0,
+            dx=tread,
+            dy=width,
+            height=(i + 1) * riser,
+            name=f"step_{i + 1}",
+        )
+
+    points = [(0, 0), (run, width), (run, 0), (0, width)]
+    bbox = expand_bbox(bbox_from_points(points), 800.0)
+    return shapes, steps, bbox, {
+        "flight_count": 1,
+        "treads": treads,
+        "total_going": run,
+        "landing_count": 0,
+    }
+
+
+def dog_leg_layout(params):
+    floor_height = params["floor_height"]
+    width = params["stair_width"]
+    tread = params["tread_depth"]
+    landing = params["landing_length"]
+    gap = params["flight_gap"]
+    risers = params["riser_count"]
+    riser = params["riser_height"]
+
+    lower_risers = max(1, risers // 2)
+    upper_risers = max(1, risers - lower_risers)
+    lower_treads = max(1, lower_risers - 1)
+    upper_treads = max(1, upper_risers - 1)
+    run1 = lower_treads * tread
+    run2 = upper_treads * tread
+
+    shapes = []
+    steps = []
+
+    upper_y = width + gap
+    min_x = min(0.0, run1 - run2)
+    max_x = run1 + landing
+    total_y = width * 2.0 + gap
+
+    add_rect_shape(shapes, 0, 0, run1, width, "outline")
+    add_rect_shape(shapes, run1, 0, run1 + landing, total_y, "landing")
+    add_rect_shape(shapes, run1 - run2, upper_y, run1, upper_y + width, "outline")
+
+    for i in range(1, lower_treads):
+        x = i * tread
+        add_line_shape(shapes, x, 0, x, width, "treads")
+
+    for i in range(1, upper_treads):
+        x = run1 - i * tread
+        add_line_shape(shapes, x, upper_y, x, upper_y + width, "treads")
+
+    add_line_shape(shapes, tread * 0.5, width * 0.5, run1 - tread * 0.5, width * 0.5, "arrow")
+    add_line_shape(shapes, run1 - tread * 0.5, upper_y + width * 0.5, run1 - run2 + tread * 0.5, upper_y + width * 0.5, "arrow")
+    add_text_shape(shapes, f"UP {risers}R @ {riser:.1f}", min_x, total_y + 350)
+
+    for i in range(lower_treads):
+        add_step_box(steps, i * tread, 0, tread, width, (i + 1) * riser, name=f"lower_step_{i + 1}")
+
+    landing_height = lower_risers * riser
+    add_step_box(steps, run1, 0, landing, total_y, landing_height, name="half_landing")
+
+    for i in range(upper_treads):
+        x = run1 - (i + 1) * tread
+        add_step_box(
+            steps,
+            x,
+            upper_y,
+            tread,
+            width,
+            (lower_risers + i + 1) * riser,
+            name=f"upper_step_{i + 1}",
+        )
+
+    bbox = expand_bbox(bbox_from_points([(min_x, 0), (max_x, total_y)]), 800.0)
+    return shapes, steps, bbox, {
+        "flight_count": 2,
+        "lower_treads": lower_treads,
+        "upper_treads": upper_treads,
+        "total_going": run1 + run2,
+        "landing_count": 1,
+    }
+
+
+def l_shape_layout(params):
+    width = params["stair_width"]
+    tread = params["tread_depth"]
+    landing = params["landing_length"]
+    risers = params["riser_count"]
+    riser = params["riser_height"]
+
+    lower_risers = max(1, risers // 2)
+    upper_risers = max(1, risers - lower_risers)
+    lower_treads = max(1, lower_risers - 1)
+    upper_treads = max(1, upper_risers - 1)
+    run1 = lower_treads * tread
+    run2 = upper_treads * tread
+
+    shapes = []
+    steps = []
+
+    add_rect_shape(shapes, 0, 0, run1, width, "outline")
+    add_rect_shape(shapes, run1, 0, run1 + landing, landing, "landing")
+    add_rect_shape(shapes, run1, landing, run1 + width, landing + run2, "outline")
+
+    for i in range(1, lower_treads):
+        x = i * tread
+        add_line_shape(shapes, x, 0, x, width, "treads")
+
+    for i in range(1, upper_treads):
+        y = landing + i * tread
+        add_line_shape(shapes, run1, y, run1 + width, y, "treads")
+
+    add_line_shape(shapes, tread * 0.5, width * 0.5, run1 - tread * 0.5, width * 0.5, "arrow")
+    add_line_shape(shapes, run1 + width * 0.5, landing + tread * 0.5, run1 + width * 0.5, landing + run2 - tread * 0.5, "arrow")
+    add_text_shape(shapes, f"UP {risers}R @ {riser:.1f}", 0, landing + run2 + 350)
+
+    for i in range(lower_treads):
+        add_step_box(steps, i * tread, 0, tread, width, (i + 1) * riser, name=f"lower_step_{i + 1}")
+
+    landing_height = lower_risers * riser
+    add_step_box(steps, run1, 0, landing, landing, landing_height, name="quarter_landing")
+
+    for i in range(upper_treads):
+        y = landing + i * tread
+        add_step_box(steps, run1, y, width, tread, (lower_risers + i + 1) * riser, name=f"upper_step_{i + 1}")
+
+    bbox = expand_bbox(bbox_from_points([(0, 0), (run1 + landing, landing + run2)]), 800.0)
+    return shapes, steps, bbox, {
+        "flight_count": 2,
+        "lower_treads": lower_treads,
+        "upper_treads": upper_treads,
+        "total_going": run1 + run2,
+        "landing_count": 1,
+    }
+
+
+def spiral_layout(params):
+    floor_height = params["floor_height"]
+    width = params["stair_width"]
+    tread = params["tread_depth"]
+    risers = params["riser_count"]
+    riser = params["riser_height"]
+    inner_radius = params["inner_radius"]
+    turn_degrees = params["turn_degrees"]
+    outer_radius = inner_radius + width
+    avg_radius = (inner_radius + outer_radius) / 2.0
+    step_angle = turn_degrees / max(1, risers)
+
+    shapes = []
+    steps = []
+
+    shapes.append({"type": "circle", "center": (0.0, 0.0), "radius": inner_radius, "layer": "outline"})
+    shapes.append({"type": "circle", "center": (0.0, 0.0), "radius": outer_radius, "layer": "outline"})
+
+    for i in range(risers + 1):
+        angle = math.radians(i * step_angle)
+        add_line_shape(
+            shapes,
+            inner_radius * math.cos(angle),
+            inner_radius * math.sin(angle),
+            outer_radius * math.cos(angle),
+            outer_radius * math.sin(angle),
+            "treads",
+        )
+
+    add_text_shape(shapes, f"SPIRAL {risers}R @ {riser:.1f}", -outer_radius, outer_radius + 350)
+
+    tangent_depth = max(tread, avg_radius * math.radians(abs(step_angle)) * 0.80)
+    for i in range(risers):
+        angle_deg = i * step_angle + step_angle * 0.5
+        angle = math.radians(angle_deg)
+        cx = avg_radius * math.cos(angle)
+        cy = avg_radius * math.sin(angle)
+        add_step_box(
+            steps,
+            cx - width / 2.0,
+            cy - tangent_depth / 2.0,
+            width,
+            tangent_depth,
+            (i + 1) * riser,
+            rotation=angle_deg + 90.0,
+            name=f"spiral_step_{i + 1}",
+        )
+
+    bbox = expand_bbox(
+        {
+            "min_x": -outer_radius,
+            "min_y": -outer_radius,
+            "max_x": outer_radius,
+            "max_y": outer_radius,
+        },
+        800.0,
+    )
+    return shapes, steps, bbox, {
+        "flight_count": 1,
+        "treads": risers,
+        "total_going": avg_radius * math.radians(abs(turn_degrees)),
+        "landing_count": 0,
+    }
+
+
+def generate_layout(generator_type, values):
+    riser_count, riser_height, warnings = choose_risers(
+        values["floor_height"],
+        values["target_riser"],
+        values["min_riser"],
+        values["max_riser"],
+    )
+
+    params = dict(values)
+    params["riser_count"] = riser_count
+    params["riser_height"] = riser_height
+
+    if generator_type == "Straight flight":
+        shapes, steps, bbox, extra = straight_layout(params)
+    elif generator_type == "L-shape stair":
+        shapes, steps, bbox, extra = l_shape_layout(params)
+    elif generator_type == "Spiral stair":
+        shapes, steps, bbox, extra = spiral_layout(params)
+    else:
+        shapes, steps, bbox, extra = dog_leg_layout(params)
+
+    tread_count = max(1, riser_count - 1)
+    summary = {
+        "generator_type": generator_type,
+        "floor_height": values["floor_height"],
+        "riser_count": riser_count,
+        "riser_height": riser_height,
+        "tread_depth": values["tread_depth"],
+        "typical_tread_count": tread_count,
+        "stair_width": values["stair_width"],
+        "warnings": warnings,
+        **extra,
+    }
+
+    return {
+        "summary": summary,
+        "params": params,
+        "shapes": shapes,
+        "steps": steps,
+        "bbox": bbox,
+        "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+# =========================================================
+# SVG / DXF / OBJ OUTPUT
+# =========================================================
+
+SHAPE_COLORS = {
+    "outline": "#f8fafc",
+    "landing": "#93c5fd",
+    "treads": "#fbbf24",
+    "arrow": "#34d399",
+    "text": "#f8fafc",
+}
+
+
+def svg_xy(x, y, bbox, width, height, pad):
+    sx = pad + (x - bbox["min_x"]) / bbox_width(bbox) * (width - pad * 2.0)
+    sy = pad + (bbox["max_y"] - y) / bbox_height(bbox) * (height - pad * 2.0)
+    return sx, sy
+
+
+def generated_plan_svg(layout, width=720, height=460):
+    bbox = layout["bbox"]
+    pad = 28.0
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        'style="background:#0f172a;border-radius:8px;">',
+        '<rect x="0" y="0" width="100%" height="100%" fill="#0f172a"/>',
+    ]
+
+    for shape in layout["shapes"]:
+        layer = shape.get("layer", "outline")
+        color = SHAPE_COLORS.get(layer, "#e5e7eb")
+
+        if shape["type"] == "line":
+            x1, y1 = svg_xy(*shape["start"], bbox, width, height, pad)
+            x2, y2 = svg_xy(*shape["end"], bbox, width, height, pad)
+            stroke_width = 2 if layer in {"outline", "arrow"} else 1
+            parts.append(
+                f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" '
+                f'stroke="{color}" stroke-width="{stroke_width}"/>'
+            )
+
+        elif shape["type"] == "polyline":
+            pts = [
+                "{:.2f},{:.2f}".format(*svg_xy(x, y, bbox, width, height, pad))
+                for x, y in shape.get("points", [])
+            ]
+            if pts:
+                fill = "rgba(147,197,253,0.18)" if layer == "landing" else "none"
+                close = " ".join(pts + [pts[0]]) if shape.get("closed") else " ".join(pts)
+                parts.append(
+                    f'<polyline points="{close}" fill="{fill}" stroke="{color}" stroke-width="2"/>'
+                )
+
+        elif shape["type"] == "circle":
+            cx, cy = svg_xy(*shape["center"], bbox, width, height, pad)
+            scale = (width - pad * 2.0) / bbox_width(bbox)
+            r = max(1.0, shape["radius"] * scale)
+            parts.append(
+                f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{r:.2f}" fill="none" stroke="{color}" stroke-width="2"/>'
+            )
+
+        elif shape["type"] == "text":
+            x, y = svg_xy(*shape["point"], bbox, width, height, pad)
+            text = html.escape(shape.get("text", ""))
+            parts.append(
+                f'<text x="{x:.2f}" y="{y:.2f}" fill="{color}" font-size="13" font-family="Arial">{text}</text>'
+            )
+
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def safe_layer(doc, name, color=7):
+    if name not in [layer.dxf.name for layer in doc.layers]:
+        doc.layers.new(name=name, dxfattribs={"color": color})
 
 
 def write_doc_to_bytes(doc):
@@ -78,888 +621,385 @@ def write_doc_to_bytes(doc):
         with open(tmp_path, "rb") as f:
             return f.read()
     finally:
-        safe_remove_file(tmp_path)
-
-
-def safe_filename(value, default="stair_detail"):
-    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
-    text = text.strip("._")
-    return text or default
-
-
-# =========================================================
-# TEXT HELPERS
-# =========================================================
-
-def clean_dxf_text(value):
-    if value is None:
-        return ""
-
-    text = str(value)
-    text = text.replace("\\P", " ")
-    text = re.sub(r"\{\\[^;{}]+;", "", text)
-    text = re.sub(r"\\[A-Za-z0-9_.|+\\-]+", "", text)
-    text = text.replace("{", "").replace("}", "")
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
-def get_entity_text(entity):
-    try:
-        if entity.dxftype() == "TEXT":
-            return clean_dxf_text(entity.dxf.text)
-        if entity.dxftype() == "MTEXT":
-            return clean_dxf_text(entity.text)
-    except Exception:
-        pass
-    return ""
-
-
-def text_point(entity):
-    try:
-        ins = entity.dxf.insert
-        return float(ins.x), float(ins.y)
-    except Exception:
-        return 0.0, 0.0
-
-
-def is_primary_stair_label(text, regex):
-    cleaned = clean_dxf_text(text).upper()
-
-    if not cleaned:
-        return False
-
-    if cleaned in {"PLAN", "DETAILS", "SECTION"}:
-        return False
-
-    try:
-        return bool(re.search(regex, cleaned, flags=re.IGNORECASE))
-    except Exception:
-        return False
-
-
-def infer_stair_type(text):
-    value = clean_dxf_text(text).upper()
-
-    if "SPIRAL" in value:
-        return "spiral"
-    if "DOG" in value:
-        return "dog_leg"
-    if "STAIRCASE 1" in value or "STAIR CASE 1" in value:
-        return "staircase_1"
-    if "STAIRCASE 2" in value or "STAIR CASE 2" in value:
-        return "staircase_2"
-    if "TREAD" in value:
-        return "tread_section"
-    if "REINFORCEMENT" in value or "REBAR" in value:
-        return "reinforcement_detail"
-    if "SECTION" in value:
-        return "section"
-    return "staircase_detail"
-
-
-# =========================================================
-# GEOMETRY HELPERS
-# =========================================================
-
-def bbox_union(bboxes):
-    clean = [b for b in bboxes if b is not None]
-
-    if not clean:
-        return None
-
-    return {
-        "min_x": min(b["min_x"] for b in clean),
-        "min_y": min(b["min_y"] for b in clean),
-        "max_x": max(b["max_x"] for b in clean),
-        "max_y": max(b["max_y"] for b in clean),
-    }
-
-
-def bbox_width(bbox):
-    return max(0.0, float(bbox["max_x"]) - float(bbox["min_x"]))
-
-
-def bbox_height(bbox):
-    return max(0.0, float(bbox["max_y"]) - float(bbox["min_y"]))
-
-
-def bbox_intersects(a, b):
-    return not (
-        a["max_x"] < b["min_x"]
-        or a["min_x"] > b["max_x"]
-        or a["max_y"] < b["min_y"]
-        or a["min_y"] > b["max_y"]
-    )
-
-
-def bbox_center(bbox):
-    return (
-        (float(bbox["min_x"]) + float(bbox["max_x"])) / 2.0,
-        (float(bbox["min_y"]) + float(bbox["max_y"])) / 2.0,
-    )
-
-
-def point_bbox(x, y, pad=1.0):
-    return {
-        "min_x": float(x) - pad,
-        "min_y": float(y) - pad,
-        "max_x": float(x) + pad,
-        "max_y": float(y) + pad,
-    }
-
-
-def entity_bbox(entity):
-    try:
-        dxftype = entity.dxftype()
-
-        if dxftype == "LINE":
-            s = entity.dxf.start
-            e = entity.dxf.end
-            return bbox_union([
-                point_bbox(float(s.x), float(s.y), 0.0),
-                point_bbox(float(e.x), float(e.y), 0.0),
-            ])
-
-        if dxftype == "LWPOLYLINE":
-            points = [(float(p[0]), float(p[1])) for p in entity.get_points()]
-            return bbox_union([point_bbox(x, y, 0.0) for x, y in points])
-
-        if dxftype == "POLYLINE":
-            points = []
-            for vertex in entity.vertices:
-                loc = vertex.dxf.location
-                points.append((float(loc.x), float(loc.y)))
-            return bbox_union([point_bbox(x, y, 0.0) for x, y in points])
-
-        if dxftype == "CIRCLE":
-            c = entity.dxf.center
-            r = float(entity.dxf.radius)
-            return {
-                "min_x": float(c.x) - r,
-                "min_y": float(c.y) - r,
-                "max_x": float(c.x) + r,
-                "max_y": float(c.y) + r,
-            }
-
-        if dxftype == "ARC":
-            c = entity.dxf.center
-            r = float(entity.dxf.radius)
-            return {
-                "min_x": float(c.x) - r,
-                "min_y": float(c.y) - r,
-                "max_x": float(c.x) + r,
-                "max_y": float(c.y) + r,
-            }
-
-        if dxftype in ("TEXT", "MTEXT"):
-            x, y = text_point(entity)
-            text = get_entity_text(entity)
-            height = float(getattr(entity.dxf, "height", 250.0) or 250.0)
-            width = max(height * 2.0, len(text) * height * 0.55)
-            return {
-                "min_x": x,
-                "min_y": y - height,
-                "max_x": x + width,
-                "max_y": y + height,
-            }
-
-        if dxftype == "INSERT":
-            ins = entity.dxf.insert
-            return point_bbox(float(ins.x), float(ins.y), 100.0)
-
-        if dxftype == "DIMENSION":
-            try:
-                p = entity.dxf.defpoint
-                return point_bbox(float(p.x), float(p.y), 500.0)
-            except Exception:
-                return None
-
-    except Exception:
-        return None
-
-    return None
-
-
-def make_region_from_label(label, left, right, down, up):
-    x = float(label["x"])
-    y = float(label["y"])
-    return {
-        "min_x": x - float(left),
-        "max_x": x + float(right),
-        "min_y": y - float(down),
-        "max_y": y + float(up),
-    }
-
-
-def region_area(region):
-    return bbox_width(region) * bbox_height(region)
-
-
-def overlap_area(a, b):
-    x1 = max(a["min_x"], b["min_x"])
-    x2 = min(a["max_x"], b["max_x"])
-    y1 = max(a["min_y"], b["min_y"])
-    y2 = min(a["max_y"], b["max_y"])
-
-    if x2 <= x1 or y2 <= y1:
-        return 0.0
-
-    return (x2 - x1) * (y2 - y1)
-
-
-def dedupe_candidates(candidates, overlap_ratio=0.80):
-    kept = []
-
-    for candidate in sorted(candidates, key=lambda c: (c["bbox"]["min_y"], c["bbox"]["min_x"])):
-        duplicate = False
-
-        for existing in kept:
-            area = min(region_area(candidate["bbox"]), region_area(existing["bbox"]))
-            if area <= 0:
-                continue
-            if overlap_area(candidate["bbox"], existing["bbox"]) / area >= overlap_ratio:
-                existing["nearby_titles"].append(candidate["title"])
-                duplicate = True
-                break
-
-        if not duplicate:
-            kept.append(candidate)
-
-    for idx, candidate in enumerate(kept, start=1):
-        candidate["id"] = f"ST-{idx:03d}"
-        candidate["name"] = f"{candidate['stair_type'].replace('_', ' ').title()} {idx:02d}"
-
-    return kept
-
-
-# =========================================================
-# DXF ANALYSIS
-# =========================================================
-
-SUPPORTED_PREVIEW_TYPES = {
-    "LINE",
-    "LWPOLYLINE",
-    "POLYLINE",
-    "CIRCLE",
-    "ARC",
-    "TEXT",
-    "MTEXT",
-}
-
-
-def entity_to_record(entity):
-    bbox = entity_bbox(entity)
-
-    if bbox is None:
-        return None
-
-    record = {
-        "type": entity.dxftype(),
-        "layer": getattr(entity.dxf, "layer", ""),
-        "bbox": bbox,
-    }
-
-    try:
-        dxftype = entity.dxftype()
-
-        if dxftype == "LINE":
-            s = entity.dxf.start
-            e = entity.dxf.end
-            record.update({
-                "start": (float(s.x), float(s.y)),
-                "end": (float(e.x), float(e.y)),
-            })
-
-        elif dxftype == "LWPOLYLINE":
-            record["points"] = [(float(p[0]), float(p[1])) for p in entity.get_points()]
-            record["closed"] = bool(entity.closed)
-
-        elif dxftype == "POLYLINE":
-            points = []
-            for vertex in entity.vertices:
-                loc = vertex.dxf.location
-                points.append((float(loc.x), float(loc.y)))
-            record["points"] = points
-            record["closed"] = bool(entity.is_closed)
-
-        elif dxftype == "CIRCLE":
-            c = entity.dxf.center
-            record.update({
-                "center": (float(c.x), float(c.y)),
-                "radius": float(entity.dxf.radius),
-            })
-
-        elif dxftype == "ARC":
-            c = entity.dxf.center
-            record.update({
-                "center": (float(c.x), float(c.y)),
-                "radius": float(entity.dxf.radius),
-                "start_angle": float(entity.dxf.start_angle),
-                "end_angle": float(entity.dxf.end_angle),
-            })
-
-        elif dxftype in ("TEXT", "MTEXT"):
-            record.update({
-                "text": get_entity_text(entity),
-                "point": text_point(entity),
-                "height": float(getattr(entity.dxf, "height", 250.0) or 250.0),
-            })
-
-    except Exception:
-        pass
-
-    return record
-
-
-@st.cache_data(show_spinner=False)
-def analyze_dxf_bytes(data, label_regex, crop_left, crop_right, crop_down, crop_up, max_candidates):
-    doc = read_doc_from_bytes(data)
-    msp = doc.modelspace()
-
-    entity_counts = {}
-    layer_counts = {}
-    labels = []
-    records = []
-
-    for entity in msp:
         try:
-            dxftype = entity.dxftype()
-            layer = getattr(entity.dxf, "layer", "")
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
         except Exception:
-            continue
-
-        entity_counts[dxftype] = entity_counts.get(dxftype, 0) + 1
-        layer_counts[layer] = layer_counts.get(layer, 0) + 1
-
-        if dxftype in SUPPORTED_PREVIEW_TYPES:
-            record = entity_to_record(entity)
-            if record:
-                records.append(record)
-
-        if dxftype in ("TEXT", "MTEXT"):
-            text = get_entity_text(entity)
-            if is_primary_stair_label(text, label_regex):
-                x, y = text_point(entity)
-                labels.append({
-                    "text": text,
-                    "x": x,
-                    "y": y,
-                    "layer": layer,
-                    "type": dxftype,
-                    "stair_type": infer_stair_type(text),
-                })
-
-    candidates = []
-
-    for label in labels:
-        bbox = make_region_from_label(
-            label,
-            left=crop_left,
-            right=crop_right,
-            down=crop_down,
-            up=crop_up,
-        )
-        entities_in_region = [r for r in records if bbox_intersects(r["bbox"], bbox)]
-        nearby_titles = [
-            l["text"]
-            for l in labels
-            if bbox["min_x"] <= l["x"] <= bbox["max_x"] and bbox["min_y"] <= l["y"] <= bbox["max_y"]
-        ]
-        candidate = {
-            "id": "",
-            "title": label["text"],
-            "name": "",
-            "stair_type": label["stair_type"],
-            "label_x": label["x"],
-            "label_y": label["y"],
-            "label_layer": label["layer"],
-            "bbox": bbox,
-            "entity_count": len(entities_in_region),
-            "nearby_titles": nearby_titles,
-        }
-        candidates.append(candidate)
-
-    candidates = dedupe_candidates(candidates)
-    candidates = candidates[: int(max_candidates)]
-
-    return {
-        "entity_counts": entity_counts,
-        "layer_counts": layer_counts,
-        "labels": labels,
-        "candidates": candidates,
-        "records": records,
-    }
+            pass
 
 
-# =========================================================
-# PREVIEW / EXPORT
-# =========================================================
-
-LAYER_COLORS = [
-    "#d8dee9",
-    "#88c0d0",
-    "#a3be8c",
-    "#ebcb8b",
-    "#bf616a",
-    "#b48ead",
-    "#5e81ac",
-    "#e5e9f0",
-]
-
-
-def color_for_layer(layer):
-    idx = abs(hash(layer or "")) % len(LAYER_COLORS)
-    return LAYER_COLORS[idx]
-
-
-def region_records(records, bbox, limit=2500):
-    selected = [r for r in records if bbox_intersects(r["bbox"], bbox)]
-    return selected[:limit]
-
-
-def svg_point(x, y, bbox, width, height, pad):
-    bw = max(1e-9, bbox_width(bbox))
-    bh = max(1e-9, bbox_height(bbox))
-    sx = pad + (float(x) - bbox["min_x"]) / bw * (width - pad * 2)
-    sy = pad + (bbox["max_y"] - float(y)) / bh * (height - pad * 2)
-    return sx, sy
-
-
-def render_svg_preview(records, bbox, width=520, height=360, max_records=1800):
-    selected = region_records(records, bbox, limit=max_records)
-    pad = 18
-    parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-        f'viewBox="0 0 {width} {height}" style="background:#111827;border-radius:8px;">',
-        '<rect x="0" y="0" width="100%" height="100%" fill="#111827"/>',
-    ]
-
-    for record in selected:
-        color = color_for_layer(record.get("layer", ""))
-        typ = record.get("type")
-
-        try:
-            if typ == "LINE":
-                x1, y1 = svg_point(*record["start"], bbox, width, height, pad)
-                x2, y2 = svg_point(*record["end"], bbox, width, height, pad)
-                parts.append(
-                    f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" '
-                    f'stroke="{color}" stroke-width="1"/>'
-                )
-
-            elif typ in ("LWPOLYLINE", "POLYLINE"):
-                points = record.get("points", [])
-                if len(points) >= 2:
-                    pts = [
-                        "{:.2f},{:.2f}".format(*svg_point(x, y, bbox, width, height, pad))
-                        for x, y in points
-                    ]
-                    close = "Z" if record.get("closed") else ""
-                    parts.append(
-                        f'<polyline points="{" ".join(pts)}" fill="none" stroke="{color}" '
-                        f'stroke-width="1"/>'
-                    )
-                    if close and len(pts) > 2:
-                        parts.append(
-                            f'<line x1="{pts[-1].split(",")[0]}" y1="{pts[-1].split(",")[1]}" '
-                            f'x2="{pts[0].split(",")[0]}" y2="{pts[0].split(",")[1]}" '
-                            f'stroke="{color}" stroke-width="1"/>'
-                        )
-
-            elif typ == "CIRCLE":
-                cx, cy = svg_point(*record["center"], bbox, width, height, pad)
-                scale = (width - pad * 2) / max(1e-9, bbox_width(bbox))
-                r = max(1.0, float(record["radius"]) * scale)
-                parts.append(
-                    f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{r:.2f}" '
-                    f'fill="none" stroke="{color}" stroke-width="1"/>'
-                )
-
-            elif typ == "ARC":
-                cx, cy = svg_point(*record["center"], bbox, width, height, pad)
-                scale = (width - pad * 2) / max(1e-9, bbox_width(bbox))
-                r = max(1.0, float(record["radius"]) * scale)
-                parts.append(
-                    f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{r:.2f}" '
-                    f'fill="none" stroke="{color}" stroke-width="1" stroke-dasharray="4 3"/>'
-                )
-
-            elif typ in ("TEXT", "MTEXT"):
-                text = record.get("text", "")
-                if text:
-                    x, y = svg_point(*record["point"], bbox, width, height, pad)
-                    safe_text = (
-                        text.replace("&", "&amp;")
-                        .replace("<", "&lt;")
-                        .replace(">", "&gt;")
-                    )
-                    parts.append(
-                        f'<text x="{x:.2f}" y="{y:.2f}" fill="#f9fafb" '
-                        f'font-size="8" font-family="Arial">{safe_text[:80]}</text>'
-                    )
-
-        except Exception:
-            continue
-
-    parts.append("</svg>")
-    return "\n".join(parts)
-
-
-def build_candidate_rows(candidates):
-    rows = []
-
-    for candidate in candidates:
-        bbox = candidate["bbox"]
-        rows.append({
-            "approve": True,
-            "id": candidate["id"],
-            "catalogue_name": candidate["name"],
-            "stair_type": candidate["stair_type"],
-            "source_title": candidate["title"],
-            "entity_count": candidate["entity_count"],
-            "label_x": round(candidate["label_x"], 3),
-            "label_y": round(candidate["label_y"], 3),
-            "min_x": round(bbox["min_x"], 3),
-            "min_y": round(bbox["min_y"], 3),
-            "max_x": round(bbox["max_x"], 3),
-            "max_y": round(bbox["max_y"], 3),
-            "nearby_titles": " | ".join(candidate.get("nearby_titles", [])[:6]),
-        })
-
-    return rows
-
-
-def approved_catalogue_from_editor(editor_rows, candidates, source_name):
-    by_id = {c["id"]: c for c in candidates}
-    catalogue = []
-
-    if isinstance(editor_rows, pd.DataFrame):
-        rows = editor_rows.to_dict("records")
-    else:
-        rows = list(editor_rows)
-
-    for row in rows:
-        if not row.get("approve"):
-            continue
-
-        candidate = by_id.get(row.get("id"))
-        if not candidate:
-            continue
-
-        item = {
-            "id": row.get("id"),
-            "name": row.get("catalogue_name") or candidate["name"],
-            "stair_type": row.get("stair_type") or candidate["stair_type"],
-            "source_title": candidate["title"],
-            "source_file": source_name,
-            "bbox": candidate["bbox"],
-            "label": {
-                "x": candidate["label_x"],
-                "y": candidate["label_y"],
-                "layer": candidate["label_layer"],
-            },
-            "nearby_titles": candidate.get("nearby_titles", []),
-            "status": "approved_for_catalogue_review",
-            "generator_status": "needs_parametric_mapping",
-        }
-        catalogue.append(item)
-
-    return catalogue
-
-
-def add_record_to_dxf(msp, record, origin_x, origin_y):
-    layer = record.get("layer") or "0"
-    typ = record.get("type")
-
-    try:
-        if typ == "LINE":
-            x1, y1 = record["start"]
-            x2, y2 = record["end"]
-            msp.add_line((x1 - origin_x, y1 - origin_y), (x2 - origin_x, y2 - origin_y), dxfattribs={"layer": layer})
-
-        elif typ in ("LWPOLYLINE", "POLYLINE"):
-            points = [(x - origin_x, y - origin_y) for x, y in record.get("points", [])]
-            if len(points) >= 2:
-                msp.add_lwpolyline(points, close=bool(record.get("closed")), dxfattribs={"layer": layer})
-
-        elif typ == "CIRCLE":
-            cx, cy = record["center"]
-            msp.add_circle((cx - origin_x, cy - origin_y), record["radius"], dxfattribs={"layer": layer})
-
-        elif typ == "ARC":
-            cx, cy = record["center"]
-            msp.add_arc(
-                (cx - origin_x, cy - origin_y),
-                record["radius"],
-                record.get("start_angle", 0.0),
-                record.get("end_angle", 360.0),
-                dxfattribs={"layer": layer},
-            )
-
-        elif typ in ("TEXT", "MTEXT"):
-            text = record.get("text", "")
-            if not text:
-                return
-            x, y = record["point"]
-            height = max(50.0, float(record.get("height", 250.0)))
-            text_entity = msp.add_text(text[:255], dxfattribs={"layer": layer, "height": height})
-            try:
-                text_entity.dxf.insert = (x - origin_x, y - origin_y)
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-
-def candidate_dxf_bytes(candidate, records):
-    bbox = candidate["bbox"]
+def build_plan_dxf(layout):
     doc = ezdxf.new()
     msp = doc.modelspace()
+    safe_layer(doc, "ILS_STAIR_OUTLINE", color=7)
+    safe_layer(doc, "ILS_STAIR_TREADS", color=2)
+    safe_layer(doc, "ILS_STAIR_LANDING", color=4)
+    safe_layer(doc, "ILS_STAIR_ARROW", color=3)
+    safe_layer(doc, "ILS_STAIR_TEXT", color=7)
 
-    for record in region_records(records, bbox, limit=5000):
-        add_record_to_dxf(msp, record, bbox["min_x"], bbox["min_y"])
+    layer_map = {
+        "outline": "ILS_STAIR_OUTLINE",
+        "treads": "ILS_STAIR_TREADS",
+        "landing": "ILS_STAIR_LANDING",
+        "arrow": "ILS_STAIR_ARROW",
+        "text": "ILS_STAIR_TEXT",
+    }
+
+    for shape in layout["shapes"]:
+        layer = layer_map.get(shape.get("layer", "outline"), "ILS_STAIR_OUTLINE")
+
+        if shape["type"] == "line":
+            msp.add_line(shape["start"], shape["end"], dxfattribs={"layer": layer})
+        elif shape["type"] == "polyline":
+            msp.add_lwpolyline(shape.get("points", []), close=bool(shape.get("closed")), dxfattribs={"layer": layer})
+        elif shape["type"] == "circle":
+            msp.add_circle(shape["center"], shape["radius"], dxfattribs={"layer": layer})
+        elif shape["type"] == "text":
+            text = str(shape.get("text", ""))[:255]
+            entity = msp.add_text(text, dxfattribs={"layer": "ILS_STAIR_TEXT", "height": shape.get("height", 180.0)})
+            try:
+                entity.dxf.insert = shape["point"]
+            except Exception:
+                pass
 
     return write_doc_to_bytes(doc)
 
 
-def build_catalogue_zip(catalogue, candidates, records):
-    candidate_by_id = {c["id"]: c for c in candidates}
-    buffer = io.BytesIO()
+def add_obj_box(lines, step, vertex_index):
+    corners = box_plan_corners(step)
+    h = step["height"]
+    vertices = []
+    for x, y in corners:
+        vertices.append((x, y, 0.0))
+    for x, y in corners:
+        vertices.append((x, y, h))
 
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("stair_catalogue.json", json.dumps(catalogue, indent=2).encode("utf-8"))
+    for x, y, z in vertices:
+        lines.append(f"v {x:.3f} {y:.3f} {z:.3f}")
 
-        for item in catalogue:
-            candidate = candidate_by_id.get(item["id"])
-            if not candidate:
-                continue
-            name = safe_filename(f"{item['id']}_{item['name']}")
-            zf.writestr(f"candidate_dxfs/{name}.dxf", candidate_dxf_bytes(candidate, records))
-            zf.writestr(
-                f"candidate_previews/{name}.svg",
-                render_svg_preview(records, candidate["bbox"], width=900, height=650).encode("utf-8"),
-            )
+    i = vertex_index
+    faces = [
+        (i, i + 1, i + 2, i + 3),
+        (i + 4, i + 7, i + 6, i + 5),
+        (i, i + 4, i + 5, i + 1),
+        (i + 1, i + 5, i + 6, i + 2),
+        (i + 2, i + 6, i + 7, i + 3),
+        (i + 3, i + 7, i + 4, i),
+    ]
+    for face in faces:
+        lines.append("f " + " ".join(str(v) for v in face))
 
-    buffer.seek(0)
-    return buffer.getvalue()
+    return vertex_index + 8
+
+
+def build_obj(layout):
+    lines = [
+        "# iLoveStructural Tool 5 generated staircase model",
+        "o ILS_Staircase",
+    ]
+    vertex_index = 1
+    for step in layout["steps"]:
+        lines.append(f"g {safe_filename(step.get('name', 'step'))}")
+        vertex_index = add_obj_box(lines, step, vertex_index)
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def build_calc_json(layout, selected_item):
+    payload = {
+        "source_catalogue_item": selected_item,
+        "generated_layout": {
+            "summary": layout["summary"],
+            "params": layout["params"],
+            "created_at": layout["created_at"],
+        },
+    }
+    return json.dumps(payload, indent=2).encode("utf-8")
+
+
+def rotating_3d_html(layout, width=720, height=520):
+    data = {
+        "steps": layout["steps"],
+        "bbox": layout["bbox"],
+        "summary": layout["summary"],
+    }
+    data_json = json.dumps(data)
+    return f"""
+<div id="stair3d" style="width:100%;height:{height}px;background:#020617;border-radius:8px;overflow:hidden;"></div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script>
+const data = {data_json};
+const container = document.getElementById("stair3d");
+const width = container.clientWidth || {width};
+const height = {height};
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x020617);
+
+const camera = new THREE.PerspectiveCamera(45, width / height, 1, 200000);
+const bw = Math.max(1, data.bbox.max_x - data.bbox.min_x);
+const bh = Math.max(1, data.bbox.max_y - data.bbox.min_y);
+const maxDim = Math.max(bw, bh, data.summary.floor_height || 3000);
+camera.position.set(maxDim * 0.85, maxDim * 0.85, maxDim * 1.05);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({{ antialias: true }});
+renderer.setSize(width, height);
+container.appendChild(renderer.domElement);
+
+const hemi = new THREE.HemisphereLight(0xffffff, 0x1f2937, 1.4);
+scene.add(hemi);
+const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+dir.position.set(maxDim, maxDim, maxDim);
+scene.add(dir);
+
+const group = new THREE.Group();
+scene.add(group);
+
+const material = new THREE.MeshStandardMaterial({{
+  color: 0x60a5fa,
+  metalness: 0.08,
+  roughness: 0.52
+}});
+const landingMaterial = new THREE.MeshStandardMaterial({{
+  color: 0x93c5fd,
+  metalness: 0.05,
+  roughness: 0.62
+}});
+
+for (const step of data.steps) {{
+  const geom = new THREE.BoxGeometry(step.dx, step.height, step.dy);
+  const mat = step.name && step.name.includes("landing") ? landingMaterial : material;
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.position.set(step.x + step.dx / 2, step.height / 2, -(step.y + step.dy / 2));
+  mesh.rotation.y = -((step.rotation || 0) * Math.PI / 180);
+  group.add(mesh);
+
+  const edge = new THREE.EdgesGeometry(geom);
+  const line = new THREE.LineSegments(edge, new THREE.LineBasicMaterial({{ color: 0xe5e7eb, transparent: true, opacity: 0.35 }}));
+  line.position.copy(mesh.position);
+  line.rotation.copy(mesh.rotation);
+  group.add(line);
+}}
+
+const centerX = (data.bbox.min_x + data.bbox.max_x) / 2;
+const centerY = (data.bbox.min_y + data.bbox.max_y) / 2;
+group.position.set(-centerX, 0, centerY);
+
+const padGeom = new THREE.CylinderGeometry(maxDim * 0.48, maxDim * 0.48, 35, 96);
+const padMat = new THREE.MeshStandardMaterial({{ color: 0x111827, roughness: 0.7 }});
+const pad = new THREE.Mesh(padGeom, padMat);
+pad.position.y = -25;
+scene.add(pad);
+
+function animate() {{
+  requestAnimationFrame(animate);
+  group.rotation.y += 0.008;
+  renderer.render(scene, camera);
+}}
+animate();
+</script>
+"""
 
 
 # =========================================================
 # UI
 # =========================================================
 
-st.markdown("### 1. Source DXF")
+st.markdown("### 1. Catalogue Source")
 
-source_mode = st.radio(
-    "Source",
-    ["Upload DXF", "Use local DXF path"],
-    horizontal=True,
-)
-
-uploaded_file = None
-local_path = DEFAULT_LOCAL_DXF
-source_name = ""
-source_bytes = None
-
-if source_mode == "Upload DXF":
-    uploaded_file = st.file_uploader("Upload staircase details DXF", type=["dxf"])
-    if uploaded_file is not None:
-        source_bytes = uploaded_file.getvalue()
-        source_name = uploaded_file.name
-else:
-    local_path = st.text_input("Local DXF path", value=DEFAULT_LOCAL_DXF)
-    if local_path and os.path.exists(local_path):
-        with open(local_path, "rb") as f:
-            source_bytes = f.read()
-        source_name = os.path.basename(local_path)
-        st.success(f"Loaded local DXF: {local_path}")
-    else:
-        st.warning("Local DXF path not found.")
-
-if source_bytes is None:
+if not CATALOGUE_JSON.exists() or not CATALOGUE_ZIP.exists():
+    st.error(
+        "Catalogue assets were not found. Put stair_catalogue.json and stair_catalogue_package.zip "
+        "inside tool5_catalogue_assets."
+    )
     st.stop()
 
-st.write({
-    "source_file": source_name,
-    "file_size_mb": round(len(source_bytes) / (1024 * 1024), 2),
-})
+catalogue, package_entries = load_catalogue(str(CATALOGUE_JSON), str(CATALOGUE_ZIP))
 
+c1, c2, c3 = st.columns(3)
+c1.metric("Catalogue items", len(catalogue))
+c2.metric("Package files", len(package_entries))
+c3.metric("Asset ZIP size", f"{CATALOGUE_ZIP.stat().st_size / (1024 * 1024):.2f} MB")
 
-st.markdown("### 2. Extraction Settings")
+catalogue_df = catalogue_dataframe(catalogue)
 
-with st.expander("Stair label detection", expanded=True):
-    d1, d2 = st.columns(2)
+st.markdown("### 2. Pick A Staircase Detail")
 
-    label_regex = d1.text_input(
-        "Candidate label regex",
-        value=r"STAIR|SPIRAL|TREAD SECTION|RISER|LANDING|WAIST|REINFORCEMENT",
-        help="The extractor uses matching text labels as catalogue anchors.",
-    )
+filter_col, search_col = st.columns([1, 2])
+type_options = ["All"] + sorted(catalogue_df["stair_type"].dropna().unique().tolist())
+type_filter = filter_col.selectbox("Catalogue type", type_options)
+search_text = search_col.text_input("Search catalogue", value="")
 
-    max_candidates = d2.number_input(
-        "Maximum candidates",
-        min_value=1,
-        value=80,
-        step=5,
-    )
+filtered_items = catalogue
+if type_filter != "All":
+    filtered_items = [item for item in filtered_items if item.get("stair_type") == type_filter]
+if search_text.strip():
+    q = search_text.strip().lower()
+    filtered_items = [
+        item for item in filtered_items
+        if q in item.get("id", "").lower()
+        or q in item.get("name", "").lower()
+        or q in item.get("source_title", "").lower()
+    ]
 
-with st.expander("Crop window around each label", expanded=True):
-    c1, c2, c3, c4 = st.columns(4)
-
-    crop_left = c1.number_input("Left of label", min_value=0.0, value=12000.0, step=500.0)
-    crop_right = c2.number_input("Right of label", min_value=0.0, value=18000.0, step=500.0)
-    crop_down = c3.number_input("Below label", min_value=0.0, value=14000.0, step=500.0)
-    crop_up = c4.number_input("Above label", min_value=0.0, value=5000.0, step=500.0)
-
-with st.expander("Preview settings", expanded=False):
-    p1, p2, p3 = st.columns(3)
-    preview_count = p1.number_input("Preview candidates", min_value=1, value=12, step=1)
-    preview_width = p2.number_input("Preview width", min_value=300, value=520, step=20)
-    preview_height = p3.number_input("Preview height", min_value=220, value=360, step=20)
-
-analyze = st.button("Extract Staircase Catalogue Candidates", type="primary")
-
-if not analyze and "tool5_analysis" not in st.session_state:
+if not filtered_items:
+    st.warning("No catalogue items match the current filter.")
     st.stop()
 
-if analyze:
-    with st.spinner("Reading DXF and detecting staircase labels..."):
-        st.session_state.tool5_analysis = analyze_dxf_bytes(
-            source_bytes,
-            label_regex,
-            crop_left,
-            crop_right,
-            crop_down,
-            crop_up,
-            max_candidates,
-        )
-        st.session_state.tool5_source_name = source_name
+selected_label = st.selectbox(
+    "Staircase catalogue item",
+    [
+        f"{item.get('id')} - {item.get('name')} ({item.get('stair_type')})"
+        for item in filtered_items
+    ],
+)
+selected_index = [
+    f"{item.get('id')} - {item.get('name')} ({item.get('stair_type')})"
+    for item in filtered_items
+].index(selected_label)
+selected_item = filtered_items[selected_index]
 
-analysis = st.session_state.tool5_analysis
-records = analysis["records"]
-candidates = analysis["candidates"]
-
-
-st.markdown("### 3. Detection Summary")
-
-s1, s2, s3, s4 = st.columns(4)
-s1.metric("Detected labels", len(analysis["labels"]))
-s2.metric("Catalogue candidates", len(candidates))
-s3.metric("Previewable entities", len(records))
-s4.metric("Modelspace entity types", len(analysis["entity_counts"]))
-
-summary_tabs = st.tabs(["Candidates", "Entity Counts", "Top Layers", "Preview"])
-
-with summary_tabs[0]:
-    candidate_rows = build_candidate_rows(candidates)
-
-    if not candidate_rows:
-        st.warning("No staircase catalogue candidates were found. Relax the regex or adjust the source file.")
-        st.stop()
-
-    edited_rows = st.data_editor(
-        candidate_rows,
-        use_container_width=True,
-        hide_index=True,
-        key="stair_catalogue_candidate_editor",
-        column_config={
-            "approve": st.column_config.CheckboxColumn("Approve?", default=True),
-            "catalogue_name": st.column_config.TextColumn("Catalogue Name"),
-            "stair_type": st.column_config.TextColumn("Stair Type"),
-        },
-        disabled=[
-            "id",
-            "source_title",
-            "entity_count",
-            "label_x",
-            "label_y",
-            "min_x",
-            "min_y",
-            "max_x",
-            "max_y",
-            "nearby_titles",
-        ],
-    )
-
-with summary_tabs[1]:
-    entity_df = pd.DataFrame(
-        [
-            {"entity_type": k, "count": v}
-            for k, v in sorted(analysis["entity_counts"].items(), key=lambda item: item[1], reverse=True)
-        ]
-    )
-    st.dataframe(entity_df, use_container_width=True)
-
-with summary_tabs[2]:
-    layer_df = pd.DataFrame(
-        [
-            {"layer": k, "count": v}
-            for k, v in sorted(analysis["layer_counts"].items(), key=lambda item: item[1], reverse=True)
-        ]
-    )
-    st.dataframe(layer_df, use_container_width=True)
-
-with summary_tabs[3]:
-    if not candidates:
-        st.info("No previews available.")
-    else:
-        for row_index in range(0, min(int(preview_count), len(candidates)), 2):
-            cols = st.columns(2)
-            for offset, col in enumerate(cols):
-                idx = row_index + offset
-                if idx >= len(candidates) or idx >= int(preview_count):
-                    continue
-                candidate = candidates[idx]
-                with col:
-                    st.write(f"**{candidate['id']} - {candidate['title']}**")
-                    st.caption(
-                        f"{candidate['stair_type']} | entities: {candidate['entity_count']} | "
-                        f"label: ({round(candidate['label_x'], 1)}, {round(candidate['label_y'], 1)})"
-                    )
-                    svg = render_svg_preview(
-                        records,
-                        candidate["bbox"],
-                        width=int(preview_width),
-                        height=int(preview_height),
-                    )
-                    components.html(svg, height=int(preview_height) + 12)
-
-
-st.markdown("### 4. Export Reviewed Catalogue")
-
-approved_catalogue = approved_catalogue_from_editor(
-    edited_rows,
-    candidates,
-    st.session_state.get("tool5_source_name", source_name),
+preview_entry = find_package_entry(
+    package_entries,
+    "candidate_previews",
+    selected_item["id"],
+    selected_item["name"],
+    "svg",
+)
+dxf_entry = find_package_entry(
+    package_entries,
+    "candidate_dxfs",
+    selected_item["id"],
+    selected_item["name"],
+    "dxf",
 )
 
-e1, e2, e3 = st.columns(3)
-e1.metric("Approved catalogue items", len(approved_catalogue))
-e2.metric("Needs parametric mapping", len(approved_catalogue))
-e3.metric("Generated at", datetime.datetime.now().strftime("%H:%M"))
+source_tab, table_tab = st.tabs(["Selected Source Detail", "Catalogue Table"])
 
-catalogue_json = json.dumps(approved_catalogue, indent=2).encode("utf-8")
+with source_tab:
+    left, right = st.columns([1.15, 0.85])
 
-st.download_button(
-    "Download Stair Catalogue JSON",
-    data=catalogue_json,
-    file_name="stair_catalogue.json",
+    with left:
+        st.caption("Original extracted 2D detail preview")
+        if preview_entry:
+            source_svg = read_package_text(str(CATALOGUE_ZIP), preview_entry)
+            components.html(source_svg, height=480, scrolling=True)
+        else:
+            st.warning("No source SVG preview was found for this catalogue item.")
+
+    with right:
+        st.write({
+            "id": selected_item.get("id"),
+            "name": selected_item.get("name"),
+            "stair_type": selected_item.get("stair_type"),
+            "source_title": selected_item.get("source_title"),
+        })
+        st.caption("The source crop is the reference detail. The generated model below is clean parametric geometry.")
+        if dxf_entry:
+            st.download_button(
+                "Download Original Cropped Detail DXF",
+                data=read_package_bytes(str(CATALOGUE_ZIP), dxf_entry),
+                file_name=f"{safe_filename(selected_item['id'] + '_' + selected_item['name'])}_source.dxf",
+                mime="application/dxf",
+            )
+
+with table_tab:
+    st.dataframe(catalogue_df, use_container_width=True)
+
+
+st.markdown("### 3. Generate Stair From Floor Height")
+
+default_type = default_generator_type(selected_item.get("stair_type", ""))
+generator_types = ["Straight flight", "Dog-leg stair", "L-shape stair", "Spiral stair"]
+default_type_index = generator_types.index(default_type) if default_type in generator_types else 1
+
+settings_a, settings_b, settings_c = st.columns(3)
+
+generator_type = settings_a.selectbox(
+    "Generator type",
+    generator_types,
+    index=default_type_index,
+)
+floor_height = settings_a.number_input("Floor-to-floor height", min_value=300.0, value=3000.0, step=25.0)
+stair_width = settings_a.number_input("Stair width", min_value=600.0, value=1200.0, step=50.0)
+
+target_riser = settings_b.number_input("Target riser", min_value=100.0, value=175.0, step=5.0)
+min_riser = settings_b.number_input("Minimum riser", min_value=80.0, value=150.0, step=5.0)
+max_riser = settings_b.number_input("Maximum riser", min_value=100.0, value=190.0, step=5.0)
+
+tread_depth = settings_c.number_input("Tread/going depth", min_value=150.0, value=300.0, step=10.0)
+landing_length = settings_c.number_input("Landing length", min_value=600.0, value=1200.0, step=50.0)
+flight_gap = settings_c.number_input("Dog-leg flight gap", min_value=0.0, value=200.0, step=25.0)
+
+spiral_col1, spiral_col2 = st.columns(2)
+inner_radius = spiral_col1.number_input("Spiral inner radius", min_value=100.0, value=450.0, step=50.0)
+turn_degrees = spiral_col2.number_input("Spiral total turn degrees", min_value=90.0, value=360.0, step=15.0)
+
+values = {
+    "floor_height": mm(floor_height),
+    "stair_width": mm(stair_width),
+    "target_riser": mm(target_riser),
+    "min_riser": mm(min_riser),
+    "max_riser": mm(max_riser),
+    "tread_depth": mm(tread_depth),
+    "landing_length": mm(landing_length),
+    "flight_gap": mm(flight_gap),
+    "inner_radius": mm(inner_radius),
+    "turn_degrees": mm(turn_degrees),
+}
+
+layout = generate_layout(generator_type, values)
+summary = layout["summary"]
+
+s1, s2, s3, s4, s5 = st.columns(5)
+s1.metric("Risers", summary["riser_count"])
+s2.metric("Riser height", f"{summary['riser_height']:.1f} mm")
+s3.metric("Tread depth", f"{summary['tread_depth']:.0f} mm")
+s4.metric("Total going", f"{summary['total_going']:.0f} mm")
+s5.metric("Flights", summary["flight_count"])
+
+for warning in summary.get("warnings", []):
+    st.warning(warning)
+
+preview_2d, preview_3d = st.columns([1, 1])
+
+with preview_2d:
+    st.caption("Generated 2D plan preview")
+    components.html(generated_plan_svg(layout), height=480, scrolling=False)
+
+with preview_3d:
+    st.caption("Generated rotating 3D preview")
+    components.html(rotating_3d_html(layout), height=540, scrolling=False)
+
+
+st.markdown("### 4. Download Generated Outputs")
+
+timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+base_name = safe_filename(f"{selected_item.get('id')}_{generator_type}_{int(floor_height)}mm_{timestamp}")
+
+plan_dxf = build_plan_dxf(layout)
+obj_model = build_obj(layout)
+calc_json = build_calc_json(layout, selected_item)
+
+d1, d2, d3 = st.columns(3)
+d1.download_button(
+    "Download Generated 2D Plan DXF",
+    data=plan_dxf,
+    file_name=f"{base_name}_plan.dxf",
+    mime="application/dxf",
+)
+d2.download_button(
+    "Download Generated 3D OBJ",
+    data=obj_model,
+    file_name=f"{base_name}_model.obj",
+    mime="text/plain",
+)
+d3.download_button(
+    "Download Stair Calculation JSON",
+    data=calc_json,
+    file_name=f"{base_name}_calculation.json",
     mime="application/json",
 )
 
-if approved_catalogue:
-    with st.spinner("Preparing approved candidate DXF/SVG ZIP..."):
-        zip_bytes = build_catalogue_zip(approved_catalogue, candidates, records)
-
-    st.download_button(
-        "Download Catalogue Package ZIP",
-        data=zip_bytes,
-        file_name="stair_catalogue_package.zip",
-        mime="application/zip",
-    )
-
 st.success(
-    "Catalogue extraction is ready. The next build will map approved catalogue items to parametric stair generators for floor-height-driven 2D and 3D output."
+    "Tool 5 V2 is ready for review: pick a catalogue item, tune the stair rules, then download the generated 2D and 3D outputs."
 )
-
