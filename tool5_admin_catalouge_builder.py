@@ -19,7 +19,9 @@ st.set_page_config(
 )
 
 st.title("Staircase Catalogue Builder")
-st.caption("Admin tool for turning clean individual staircase DXFs into a visual family catalogue.")
+st.caption(
+    "Admin tool for turning clean individual staircase DXFs into layer-aware, dimension-aware parametric templates."
+)
 
 
 FAMILY_OPTIONS = {
@@ -40,6 +42,50 @@ GENERATOR_BY_FAMILY = {
     "winder": "Dog-leg stair",
     "reinforcement": "Dog-leg stair",
     "tread_section": "Straight flight",
+}
+
+LAYER_ROLE_OPTIONS = [
+    "geometry",
+    "dimension",
+    "reinforcement",
+    "landing",
+    "tread_riser",
+    "section",
+    "annotation",
+    "hidden",
+]
+
+LAYER_ROLE_KEYWORDS = {
+    "dimension": ["dim", "dimension", "measure"],
+    "reinforcement": ["rebar", "rein", "reinforcement", "bar", "steel", "mesh", "link", "stirrup"],
+    "landing": ["landing", "waist", "slab"],
+    "tread_riser": ["tread", "riser", "going", "step", "stair"],
+    "section": ["section", "sec", "cut", "profile"],
+    "annotation": ["text", "note", "anno", "label", "tag"],
+    "hidden": ["hidden", "dash", "center", "centre"],
+}
+
+DIMENSION_PARAMETER_PATTERNS = [
+    ("floor_height", ["floor height", "floor to floor", "f.f", "ffl", "height", "rise total"]),
+    ("stair_width", ["stair width", "flight width", "width"]),
+    ("tread_depth", ["tread", "going", "goings"]),
+    ("riser_height", ["riser", "rise"]),
+    ("landing_length", ["landing"]),
+    ("flight_gap", ["gap", "well", "void"]),
+    ("waist_thickness", ["waist", "slab thickness", "thickness"]),
+    ("bar_spacing", ["spacing", "c/c", "ctc", "@"]),
+    ("bar_diameter", ["y", "t", "dia", "diameter", "bar"]),
+]
+
+ROLE_COLORS = {
+    "geometry": "#e5e7eb",
+    "dimension": "#fde047",
+    "reinforcement": "#fb7185",
+    "landing": "#38bdf8",
+    "tread_riser": "#34d399",
+    "section": "#c084fc",
+    "annotation": "#f8fafc",
+    "hidden": "#94a3b8",
 }
 
 
@@ -71,6 +117,7 @@ def read_doc_from_bytes(data):
 def clean_dxf_text(value):
     if value is None:
         return ""
+
     text = str(value)
     text = text.replace("\\P", " ")
     text = re.sub(r"\{\\[^;{}]+;", "", text)
@@ -119,12 +166,43 @@ def expand_bbox(bbox, ratio=0.05):
     }
 
 
-def text_point(entity):
+def dxf_get(entity, name, default=None):
     try:
-        ins = entity.dxf.insert
-        return float(ins.x), float(ins.y)
+        return entity.dxf.get(name, default)
     except Exception:
-        return 0.0, 0.0
+        try:
+            return getattr(entity.dxf, name)
+        except Exception:
+            return default
+
+
+def point_tuple(value):
+    try:
+        return float(value.x), float(value.y)
+    except Exception:
+        try:
+            return float(value[0]), float(value[1])
+        except Exception:
+            return None
+
+
+def text_height(entity):
+    for name in ["height", "char_height"]:
+        value = dxf_get(entity, name, None)
+        if value:
+            try:
+                return float(value)
+            except Exception:
+                pass
+    return 250.0
+
+
+def text_point(entity):
+    for name in ["insert", "location", "align_point"]:
+        point = point_tuple(dxf_get(entity, name, None))
+        if point:
+            return point
+    return 0.0, 0.0
 
 
 def get_entity_text(entity):
@@ -136,6 +214,106 @@ def get_entity_text(entity):
     except Exception:
         pass
     return ""
+
+
+def dimension_defpoints(entity):
+    points = []
+    for name in ["defpoint", "defpoint2", "defpoint3", "defpoint4", "defpoint5"]:
+        point = point_tuple(dxf_get(entity, name, None))
+        if point and point not in points:
+            points.append(point)
+    return points
+
+
+def dimension_measurement(entity):
+    for method_name in ["get_measurement", "get_actual_measurement"]:
+        try:
+            method = getattr(entity, method_name)
+            value = method()
+            if value is not None:
+                return float(value)
+        except Exception:
+            pass
+
+    for name in ["actual_measurement", "measurement"]:
+        try:
+            value = dxf_get(entity, name, None)
+            if value is not None:
+                return float(value)
+        except Exception:
+            pass
+
+    return None
+
+
+def dimension_display_text(entity):
+    raw = clean_dxf_text(dxf_get(entity, "text", ""))
+    measurement = dimension_measurement(entity)
+
+    if raw and raw != "<>":
+        return raw
+
+    if measurement is not None:
+        return f"{measurement:.0f}"
+
+    return raw
+
+
+def infer_dimension_parameter(text, measurement=None):
+    clean = str(text or "").lower()
+
+    for parameter, keywords in DIMENSION_PARAMETER_PATTERNS:
+        if any(keyword in clean for keyword in keywords):
+            return parameter
+
+    if measurement is None:
+        return "unclassified_dimension"
+
+    try:
+        value = abs(float(measurement))
+    except Exception:
+        return "unclassified_dimension"
+
+    if 120.0 <= value <= 220.0:
+        return "riser_height"
+    if 220.0 <= value <= 400.0:
+        return "tread_depth"
+    if 850.0 <= value <= 1800.0:
+        return "stair_width_or_landing"
+    if 2400.0 <= value <= 4500.0:
+        return "floor_height_or_flight_length"
+
+    return "unclassified_dimension"
+
+
+def classify_layer_role(layer_name):
+    lower = str(layer_name or "").lower()
+
+    for role, keywords in LAYER_ROLE_KEYWORDS.items():
+        if any(keyword in lower for keyword in keywords):
+            return role
+
+    return "geometry"
+
+
+def layer_table(doc):
+    rows = []
+
+    try:
+        layers = list(doc.layers)
+    except Exception:
+        layers = []
+
+    for layer in layers:
+        name = layer.dxf.name
+        rows.append({
+            "layer": name,
+            "detected_role": classify_layer_role(name),
+            "dxf_color": int(getattr(layer.dxf, "color", 7) or 7),
+            "linetype": str(getattr(layer.dxf, "linetype", "") or ""),
+        })
+
+    return rows
 
 
 def entity_bbox(entity):
@@ -171,9 +349,23 @@ def entity_bbox(entity):
         if typ in {"TEXT", "MTEXT"}:
             x, y = text_point(entity)
             text = get_entity_text(entity)
-            height = float(getattr(entity.dxf, "height", 250.0) or 250.0)
+            height = text_height(entity)
             width = max(height * 2.0, len(text) * height * 0.55)
             return {"min_x": x, "min_y": y - height, "max_x": x + width, "max_y": y + height}
+
+        if typ in {"DIMENSION", "INSERT"}:
+            bboxes = []
+            try:
+                for virtual_entity in entity.virtual_entities():
+                    bboxes.append(entity_bbox(virtual_entity))
+            except Exception:
+                pass
+
+            if bboxes:
+                return bbox_union(bboxes)
+
+            points = dimension_defpoints(entity) if typ == "DIMENSION" else []
+            return bbox_union([point_bbox(x, y, 0) for x, y in points])
 
     except Exception:
         return None
@@ -181,19 +373,26 @@ def entity_bbox(entity):
     return None
 
 
-def entity_to_record(entity):
+def entity_to_record(entity, source_type="", source_layer=""):
     bbox = entity_bbox(entity)
     if bbox is None:
         return None
 
+    typ = entity.dxftype()
+    layer = str(dxf_get(entity, "layer", "") or "")
+
+    if source_layer and layer in {"", "0"}:
+        layer = source_layer
+
     record = {
-        "type": entity.dxftype(),
-        "layer": getattr(entity.dxf, "layer", ""),
+        "type": typ,
+        "source_type": source_type or typ,
+        "source_layer": source_layer or layer,
+        "layer": layer,
         "bbox": bbox,
     }
 
     try:
-        typ = entity.dxftype()
         if typ == "LINE":
             s = entity.dxf.start
             e = entity.dxf.end
@@ -222,51 +421,143 @@ def entity_to_record(entity):
         elif typ in {"TEXT", "MTEXT"}:
             record["text"] = get_entity_text(entity)
             record["point"] = text_point(entity)
-            record["height"] = float(getattr(entity.dxf, "height", 250.0) or 250.0)
+            record["height"] = text_height(entity)
+        elif typ == "DIMENSION":
+            measurement = dimension_measurement(entity)
+            text = dimension_display_text(entity)
+            record["text"] = text
+            record["measurement"] = measurement
+            record["points"] = dimension_defpoints(entity)
+            record["parameter_hint"] = infer_dimension_parameter(text, measurement)
     except Exception:
         pass
 
     return record
 
 
+def virtual_entity_records(entity, source_type, source_layer, depth=0):
+    if depth > 2:
+        return []
+
+    records = []
+
+    try:
+        virtual_entities = list(entity.virtual_entities())
+    except Exception:
+        return records
+
+    for virtual_entity in virtual_entities:
+        try:
+            typ = virtual_entity.dxftype()
+        except Exception:
+            continue
+
+        if typ in {"DIMENSION", "INSERT"}:
+            records.extend(
+                virtual_entity_records(
+                    virtual_entity,
+                    source_type=source_type,
+                    source_layer=source_layer,
+                    depth=depth + 1,
+                )
+            )
+            continue
+
+        record = entity_to_record(
+            virtual_entity,
+            source_type=source_type,
+            source_layer=source_layer,
+        )
+        if record:
+            records.append(record)
+
+    return records
+
+
 def analyse_dxf(data):
     doc = read_doc_from_bytes(data)
     msp = doc.modelspace()
-    supported = {"LINE", "LWPOLYLINE", "POLYLINE", "CIRCLE", "ARC", "TEXT", "MTEXT"}
+    supported = {"LINE", "LWPOLYLINE", "POLYLINE", "CIRCLE", "ARC", "TEXT", "MTEXT", "DIMENSION", "INSERT"}
     records = []
+    dimension_records = []
     entity_counts = {}
     layer_counts = {}
+    layers = layer_table(doc)
+    layer_roles = {row["layer"]: row["detected_role"] for row in layers}
 
     for entity in msp:
         try:
             typ = entity.dxftype()
-            layer = getattr(entity.dxf, "layer", "")
+            layer = str(dxf_get(entity, "layer", "") or "")
         except Exception:
             continue
 
         entity_counts[typ] = entity_counts.get(typ, 0) + 1
         layer_counts[layer] = layer_counts.get(layer, 0) + 1
 
-        if typ in supported:
-            record = entity_to_record(entity)
-            if record:
-                records.append(record)
+        if typ not in supported:
+            continue
+
+        record = entity_to_record(entity)
+        if record:
+            records.append(record)
+
+        if typ == "DIMENSION" and record:
+            dimension_records.append(record)
+
+        if typ in {"DIMENSION", "INSERT"}:
+            records.extend(
+                virtual_entity_records(
+                    entity,
+                    source_type=typ,
+                    source_layer=layer,
+                )
+            )
 
     bbox = bbox_union([record["bbox"] for record in records])
     if bbox:
         bbox = expand_bbox(bbox, ratio=0.04)
+
+    dimension_parameters = {}
+    for dim in dimension_records:
+        parameter = dim.get("parameter_hint", "unclassified_dimension")
+        dimension_parameters.setdefault(parameter, []).append({
+            "text": dim.get("text", ""),
+            "measurement": dim.get("measurement", None),
+            "layer": dim.get("layer", ""),
+            "bbox": dim.get("bbox", {}),
+        })
 
     return {
         "records": records,
         "bbox": bbox,
         "entity_counts": entity_counts,
         "layer_counts": layer_counts,
+        "layers": layers,
+        "layer_roles": layer_roles,
+        "dimension_records": dimension_records,
+        "dimension_parameters": dimension_parameters,
     }
 
 
-def color_for_layer(layer):
+def stable_palette_index(value, length):
+    total = sum(ord(ch) for ch in str(value or ""))
+    return total % max(length, 1)
+
+
+def color_for_record(record, layer_roles):
+    layer = record.get("layer", "")
+    source_type = record.get("source_type", "")
+    role = layer_roles.get(layer, classify_layer_role(layer))
+
+    if source_type == "DIMENSION" or record.get("type") == "DIMENSION":
+        return ROLE_COLORS["dimension"]
+
+    if role in ROLE_COLORS:
+        return ROLE_COLORS[role]
+
     palette = ["#f8fafc", "#93c5fd", "#fbbf24", "#34d399", "#fb7185", "#c084fc", "#67e8f9"]
-    return palette[abs(hash(layer or "")) % len(palette)]
+    return palette[stable_palette_index(layer, len(palette))]
 
 
 def svg_xy(x, y, bbox, width, height, pad):
@@ -275,11 +566,18 @@ def svg_xy(x, y, bbox, width, height, pad):
     return sx, sy
 
 
-def render_svg(records, bbox, width=1000, height=700, max_records=6000):
+def svg_escape(text):
+    return str(text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def render_svg(records, bbox, layer_roles, width=1000, height=700, max_records=9000):
     if not bbox:
         return ""
 
     pad = 24
+    scale_x = (width - pad * 2) / bbox_width(bbox)
+    scale_y = (height - pad * 2) / bbox_height(bbox)
+    radius_scale = min(scale_x, scale_y)
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
         f'viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMid meet" '
@@ -289,33 +587,64 @@ def render_svg(records, bbox, width=1000, height=700, max_records=6000):
 
     for record in records[:max_records]:
         typ = record.get("type")
-        color = color_for_layer(record.get("layer", ""))
+        color = color_for_record(record, layer_roles)
+        source_type = record.get("source_type", "")
+        stroke_width = 1.5 if source_type == "DIMENSION" or typ == "DIMENSION" else 1.0
 
         try:
             if typ == "LINE":
                 x1, y1 = svg_xy(*record["start"], bbox, width, height, pad)
                 x2, y2 = svg_xy(*record["end"], bbox, width, height, pad)
-                parts.append(f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" stroke="{color}" stroke-width="1"/>')
+                parts.append(
+                    f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" '
+                    f'stroke="{color}" stroke-width="{stroke_width}"/>'
+                )
             elif typ in {"LWPOLYLINE", "POLYLINE"}:
                 pts = ["{:.2f},{:.2f}".format(*svg_xy(x, y, bbox, width, height, pad)) for x, y in record.get("points", [])]
                 if len(pts) >= 2:
                     if record.get("closed"):
                         pts.append(pts[0])
-                    parts.append(f'<polyline points="{" ".join(pts)}" fill="none" stroke="{color}" stroke-width="1"/>')
+                    parts.append(
+                        f'<polyline points="{" ".join(pts)}" fill="none" stroke="{color}" stroke-width="{stroke_width}"/>'
+                    )
             elif typ == "CIRCLE":
                 cx, cy = svg_xy(*record["center"], bbox, width, height, pad)
-                scale = (width - pad * 2) / bbox_width(bbox)
-                parts.append(f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{record["radius"] * scale:.2f}" fill="none" stroke="{color}" stroke-width="1"/>')
+                parts.append(
+                    f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{record["radius"] * radius_scale:.2f}" '
+                    f'fill="none" stroke="{color}" stroke-width="{stroke_width}"/>'
+                )
             elif typ == "ARC":
                 cx, cy = svg_xy(*record["center"], bbox, width, height, pad)
-                scale = (width - pad * 2) / bbox_width(bbox)
-                parts.append(f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{record["radius"] * scale:.2f}" fill="none" stroke="{color}" stroke-width="1" stroke-dasharray="4 4"/>')
+                parts.append(
+                    f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{record["radius"] * radius_scale:.2f}" '
+                    f'fill="none" stroke="{color}" stroke-width="{stroke_width}" stroke-dasharray="4 4"/>'
+                )
             elif typ in {"TEXT", "MTEXT"}:
                 text = record.get("text", "")
                 if text:
                     x, y = svg_xy(*record["point"], bbox, width, height, pad)
-                    safe = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                    parts.append(f'<text x="{x:.2f}" y="{y:.2f}" fill="#e5e7eb" font-size="9" font-family="Arial">{safe[:90]}</text>')
+                    font_size = 11 if source_type == "DIMENSION" else 9
+                    parts.append(
+                        f'<text x="{x:.2f}" y="{y:.2f}" fill="{color}" '
+                        f'font-size="{font_size}" font-family="Arial">{svg_escape(text)[:120]}</text>'
+                    )
+            elif typ == "DIMENSION":
+                points = record.get("points", [])
+                if len(points) >= 2:
+                    p1 = svg_xy(*points[0], bbox, width, height, pad)
+                    p2 = svg_xy(*points[-1], bbox, width, height, pad)
+                    parts.append(
+                        f'<line x1="{p1[0]:.2f}" y1="{p1[1]:.2f}" x2="{p2[0]:.2f}" y2="{p2[1]:.2f}" '
+                        f'stroke="{color}" stroke-width="1.2" stroke-dasharray="3 3"/>'
+                    )
+                if record.get("text"):
+                    bx = (record["bbox"]["min_x"] + record["bbox"]["max_x"]) / 2.0
+                    by = (record["bbox"]["min_y"] + record["bbox"]["max_y"]) / 2.0
+                    x, y = svg_xy(bx, by, bbox, width, height, pad)
+                    parts.append(
+                        f'<text x="{x:.2f}" y="{y:.2f}" fill="{color}" '
+                        f'font-size="11" font-family="Arial">{svg_escape(record.get("text"))[:120]}</text>'
+                    )
         except Exception:
             continue
 
@@ -323,7 +652,49 @@ def render_svg(records, bbox, width=1000, height=700, max_records=6000):
     return "\n".join(parts)
 
 
-def build_template_record(template_id, name, family_id, source_filename, preview_filename):
+def layers_to_dataframe(analysis):
+    rows = []
+    layer_counts = analysis.get("layer_counts", {})
+    for row in analysis.get("layers", []):
+        rows.append({
+            "layer": row["layer"],
+            "detected_role": row["detected_role"],
+            "entity_count": layer_counts.get(row["layer"], 0),
+            "dxf_color": row.get("dxf_color", ""),
+            "linetype": row.get("linetype", ""),
+        })
+    return pd.DataFrame(rows)
+
+
+def dimensions_to_dataframe(analysis):
+    rows = []
+    for idx, dim in enumerate(analysis.get("dimension_records", []), start=1):
+        rows.append({
+            "id": idx,
+            "parameter_hint": dim.get("parameter_hint", ""),
+            "text": dim.get("text", ""),
+            "measurement": dim.get("measurement", ""),
+            "layer": dim.get("layer", ""),
+            "min_x": round(dim.get("bbox", {}).get("min_x", 0.0), 3),
+            "min_y": round(dim.get("bbox", {}).get("min_y", 0.0), 3),
+            "max_x": round(dim.get("bbox", {}).get("max_x", 0.0), 3),
+            "max_y": round(dim.get("bbox", {}).get("max_y", 0.0), 3),
+        })
+    return pd.DataFrame(rows)
+
+
+def compact_analysis_summary(analysis):
+    return {
+        "entity_counts": analysis.get("entity_counts", {}),
+        "layer_counts": analysis.get("layer_counts", {}),
+        "layers": analysis.get("layers", []),
+        "layer_roles": analysis.get("layer_roles", {}),
+        "dimension_count": len(analysis.get("dimension_records", [])),
+        "dimension_parameters": analysis.get("dimension_parameters", {}),
+    }
+
+
+def build_template_record(template_id, name, family_id, source_filename, preview_filename, analysis_summary):
     return {
         "id": template_id,
         "name": name,
@@ -332,7 +703,16 @@ def build_template_record(template_id, name, family_id, source_filename, preview
         "generator_type": GENERATOR_BY_FAMILY.get(family_id, "Dog-leg stair"),
         "source_dxf": f"curated_stair_assets/{family_id}/{template_id}/{source_filename}",
         "preview_svg": f"curated_stair_assets/{family_id}/{template_id}/{preview_filename}",
+        "analysis_json": f"curated_stair_assets/{family_id}/{template_id}/analysis.json",
         "tags": [family_id],
+        "layer_roles": analysis_summary.get("layer_roles", {}),
+        "dimension_parameters": analysis_summary.get("dimension_parameters", {}),
+        "parametric_intent": {
+            "geometry_layers_scale_from_dimensions": True,
+            "reinforcement_layers_recalculate_from_span": True,
+            "dimension_layers_preserve_as_annotation": True,
+            "notes": "Layer roles and detected dimensions are stored so the future calculator can resize geometry and regenerate reinforcement rules separately.",
+        },
         "default_inputs": {
             "floor_height": 3000,
             "stair_width": 1200,
@@ -341,13 +721,13 @@ def build_template_record(template_id, name, family_id, source_filename, preview
             "max_riser": 190,
             "tread_depth": 300,
             "landing_length": 1200,
-            "flight_gap": 200
+            "flight_gap": 200,
         },
         "detailing_rules": {
             "riser_strategy": "auto_count_from_floor_height",
-            "reinforcement_strategy": "family_rule_based",
-            "notes": "Curated source template. Generated detail must be verified by a qualified engineer."
-        }
+            "reinforcement_strategy": "layer_role_and_family_rule_based",
+            "notes": "Curated source template. Generated detail must be verified by a qualified engineer.",
+        },
     }
 
 
@@ -364,7 +744,8 @@ def build_curated_package(items):
         families[item["family_id"]]["templates"].append(item["record"])
 
     manifest = {
-        "version": "1.0",
+        "version": "1.1",
+        "purpose": "dimension_and_layer_aware_stair_template_catalogue",
         "families": list(families.values()),
     }
 
@@ -374,6 +755,7 @@ def build_curated_package(items):
             base = f"curated_stair_assets/{item['family_id']}/{item['template_id']}"
             zf.writestr(f"{base}/source.dxf", item["dxf_bytes"])
             zf.writestr(f"{base}/preview.svg", item["preview_svg"].encode("utf-8"))
+            zf.writestr(f"{base}/analysis.json", json.dumps(item["analysis_summary"], indent=2).encode("utf-8"))
 
     buffer.seek(0)
     return buffer.getvalue()
@@ -402,6 +784,11 @@ with left:
         help="Use a stable ID like dog_leg_residential_01.",
     )
 
+    st.info(
+        "Best catalogue DXF: one stair detail only, with dimension layers kept, reinforcement on its own layers, "
+        "and geometry separated from notes/text where possible."
+    )
+
     add_template = st.button("Add To Catalogue", type="primary", use_container_width=True)
 
 with right:
@@ -414,7 +801,13 @@ with right:
         try:
             dxf_bytes = uploaded_dxf.getvalue()
             analysis = analyse_dxf(dxf_bytes)
-            preview_svg = render_svg(analysis["records"], analysis["bbox"], width=1000, height=700)
+            preview_svg = render_svg(
+                analysis["records"],
+                analysis["bbox"],
+                analysis["layer_roles"],
+                width=1000,
+                height=700,
+            )
             components.html(preview_svg, height=720, scrolling=False)
         except Exception as e:
             st.error(f"Could not read DXF: {e}")
@@ -422,23 +815,79 @@ with right:
     if uploaded_dxf is None:
         st.info("Upload a clean single-stair DXF to preview it here.")
 
+if analysis:
+    st.markdown("### Template Intelligence")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Renderable records", len(analysis.get("records", [])))
+    m2.metric("DXF dimensions", len(analysis.get("dimension_records", [])))
+    m3.metric("Layers", len(analysis.get("layer_counts", {})))
+    m4.metric("Parameter groups", len(analysis.get("dimension_parameters", {})))
+
+    with st.expander("Layer roles for future calculator", expanded=True):
+        layer_df = layers_to_dataframe(analysis)
+        if layer_df.empty:
+            st.info("No layer data found.")
+        else:
+            edited_layer_df = st.data_editor(
+                layer_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "detected_role": st.column_config.SelectboxColumn(
+                        "layer_role",
+                        options=LAYER_ROLE_OPTIONS,
+                        required=True,
+                    )
+                },
+                disabled=["layer", "entity_count", "dxf_color", "linetype"],
+                key="stair_layer_role_editor",
+            )
+            analysis["layer_roles"] = {
+                str(row["layer"]): str(row["detected_role"])
+                for _, row in edited_layer_df.iterrows()
+            }
+            st.download_button(
+                "Download Layer Role CSV",
+                data=edited_layer_df.to_csv(index=False).encode("utf-8"),
+                file_name="ILS_STAIR_LAYER_ROLES.csv",
+                mime="text/csv",
+            )
+
+    with st.expander("Detected dimensions and parameter hints", expanded=True):
+        dimension_df = dimensions_to_dataframe(analysis)
+        if dimension_df.empty:
+            st.warning(
+                "No DIMENSION entities were detected. If the dimensions are exploded into lines/text, they will preview, "
+                "but the future calculator will not know their measurements automatically."
+            )
+        else:
+            st.dataframe(dimension_df, use_container_width=True)
+            st.download_button(
+                "Download Dimension Parameters CSV",
+                data=dimension_df.to_csv(index=False).encode("utf-8"),
+                file_name="ILS_STAIR_DIMENSION_PARAMETERS.csv",
+                mime="text/csv",
+            )
+
 if add_template:
     if uploaded_dxf is None:
         st.error("Upload a DXF first.")
     elif not template_name.strip() or not template_id.strip():
         st.error("Enter both display name and template ID.")
-    elif not preview_svg:
+    elif not preview_svg or not analysis:
         st.error("Preview could not be generated.")
     else:
         template_id_clean = safe_filename(template_id)
         source_name = "source.dxf"
         preview_name = "preview.svg"
+        analysis_summary = compact_analysis_summary(analysis)
         record = build_template_record(
             template_id=template_id_clean,
             name=template_name.strip(),
             family_id=family_id,
             source_filename=source_name,
             preview_filename=preview_name,
+            analysis_summary=analysis_summary,
         )
         st.session_state.curated_items.append({
             "template_id": template_id_clean,
@@ -446,6 +895,7 @@ if add_template:
             "record": record,
             "dxf_bytes": uploaded_dxf.getvalue(),
             "preview_svg": preview_svg,
+            "analysis_summary": analysis_summary,
         })
         st.success(f"Added {template_name.strip()} to {FAMILY_OPTIONS[family_id]}.")
 
@@ -457,11 +907,14 @@ if not st.session_state.curated_items:
 else:
     rows = []
     for item in st.session_state.curated_items:
+        summary = item.get("analysis_summary", {})
         rows.append({
             "template_id": item["template_id"],
             "family": FAMILY_OPTIONS[item["family_id"]],
             "name": item["record"]["name"],
             "generator_type": item["record"]["generator_type"],
+            "dimension_count": summary.get("dimension_count", 0),
+            "layer_count": len(summary.get("layer_counts", {})),
         })
 
     st.dataframe(pd.DataFrame(rows), use_container_width=True)
