@@ -422,6 +422,7 @@ def entity_to_record(entity, source_type="", source_layer=""):
             record["text"] = get_entity_text(entity)
             record["point"] = text_point(entity)
             record["height"] = text_height(entity)
+            record["rotation"] = float(dxf_get(entity, "rotation", 0.0) or 0.0)
         elif typ == "DIMENSION":
             measurement = dimension_measurement(entity)
             text = dimension_display_text(entity)
@@ -498,21 +499,27 @@ def analyse_dxf(data):
         if typ not in supported:
             continue
 
+        if typ in {"DIMENSION", "INSERT"}:
+            record = entity_to_record(entity)
+            virtual_records = virtual_entity_records(
+                entity,
+                source_type=typ,
+                source_layer=layer,
+            )
+
+            if typ == "DIMENSION" and record:
+                dimension_records.append(record)
+
+            if virtual_records:
+                records.extend(virtual_records)
+            elif record:
+                records.append(record)
+
+            continue
+
         record = entity_to_record(entity)
         if record:
             records.append(record)
-
-        if typ == "DIMENSION" and record:
-            dimension_records.append(record)
-
-        if typ in {"DIMENSION", "INSERT"}:
-            records.extend(
-                virtual_entity_records(
-                    entity,
-                    source_type=typ,
-                    source_layer=layer,
-                )
-            )
 
     bbox = bbox_union([record["bbox"] for record in records])
     if bbox:
@@ -570,6 +577,23 @@ def svg_escape(text):
     return str(text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def svg_text_element(x, y, text, color, font_size, rotation=0.0):
+    clean = svg_escape(text)[:140]
+    rotate = float(rotation or 0.0)
+    transform = ""
+
+    if abs(rotate) > 1e-6:
+        # SVG has a downward Y axis after our coordinate conversion, so AutoCAD
+        # text rotation must be inverted to keep vertical labels readable.
+        transform = f' transform="rotate({-rotate:.3f} {x:.2f} {y:.2f})"'
+
+    return (
+        f'<text x="{x:.2f}" y="{y:.2f}" fill="{color}" '
+        f'font-size="{font_size:.2f}" font-family="Arial" '
+        f'text-anchor="start" dominant-baseline="middle"{transform}>{clean}</text>'
+    )
+
+
 def render_svg(records, bbox, layer_roles, width=1000, height=700, max_records=9000):
     if not bbox:
         return ""
@@ -623,10 +647,19 @@ def render_svg(records, bbox, layer_roles, width=1000, height=700, max_records=9
                 text = record.get("text", "")
                 if text:
                     x, y = svg_xy(*record["point"], bbox, width, height, pad)
-                    font_size = 11 if source_type == "DIMENSION" else 9
+                    raw_height = float(record.get("height", 250.0) or 250.0)
+                    font_size = max(7.0, min(22.0, raw_height * radius_scale))
+                    if source_type == "DIMENSION":
+                        font_size = max(7.0, min(18.0, font_size))
                     parts.append(
-                        f'<text x="{x:.2f}" y="{y:.2f}" fill="{color}" '
-                        f'font-size="{font_size}" font-family="Arial">{svg_escape(text)[:120]}</text>'
+                        svg_text_element(
+                            x,
+                            y,
+                            text,
+                            color,
+                            font_size,
+                            rotation=record.get("rotation", 0.0),
+                        )
                     )
             elif typ == "DIMENSION":
                 points = record.get("points", [])
@@ -641,10 +674,7 @@ def render_svg(records, bbox, layer_roles, width=1000, height=700, max_records=9
                     bx = (record["bbox"]["min_x"] + record["bbox"]["max_x"]) / 2.0
                     by = (record["bbox"]["min_y"] + record["bbox"]["max_y"]) / 2.0
                     x, y = svg_xy(bx, by, bbox, width, height, pad)
-                    parts.append(
-                        f'<text x="{x:.2f}" y="{y:.2f}" fill="{color}" '
-                        f'font-size="11" font-family="Arial">{svg_escape(record.get("text"))[:120]}</text>'
-                    )
+                    parts.append(svg_text_element(x, y, record.get("text"), color, 10.0))
         except Exception:
             continue
 
@@ -761,8 +791,79 @@ def build_curated_package(items):
     return buffer.getvalue()
 
 
+def load_curated_package(data):
+    items = []
+
+    with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
+        manifest = json.loads(zf.read("curated_stair_catalogue.json").decode("utf-8"))
+
+        for family in manifest.get("families", []):
+            family_id = family.get("id", "")
+            for record in family.get("templates", []):
+                template_id = record.get("id", "")
+                base = f"curated_stair_assets/{family_id}/{template_id}"
+                preview_svg = ""
+                dxf_bytes = b""
+                analysis_summary = {}
+
+                preview_path = record.get("preview_svg", f"{base}/preview.svg")
+                source_path = record.get("source_dxf", f"{base}/source.dxf")
+                analysis_path = record.get("analysis_json", f"{base}/analysis.json")
+
+                try:
+                    preview_svg = zf.read(preview_path).decode("utf-8")
+                except Exception:
+                    pass
+
+                try:
+                    dxf_bytes = zf.read(source_path)
+                except Exception:
+                    pass
+
+                try:
+                    analysis_summary = json.loads(zf.read(analysis_path).decode("utf-8"))
+                except Exception:
+                    analysis_summary = {
+                        "dimension_count": len(record.get("dimension_parameters", {})),
+                        "layer_counts": {},
+                        "layer_roles": record.get("layer_roles", {}),
+                        "dimension_parameters": record.get("dimension_parameters", {}),
+                    }
+
+                items.append({
+                    "template_id": template_id,
+                    "family_id": family_id,
+                    "record": record,
+                    "dxf_bytes": dxf_bytes,
+                    "preview_svg": preview_svg,
+                    "analysis_summary": analysis_summary,
+                })
+
+    return items
+
+
 if "curated_items" not in st.session_state:
     st.session_state.curated_items = []
+
+
+with st.expander("Open Existing Catalogue Package", expanded=False):
+    catalogue_package = st.file_uploader(
+        "Upload curated_stair_catalogue_package.zip",
+        type=["zip"],
+        key="catalogue_package_upload",
+        help="Use this to view or continue a catalogue package that was downloaded earlier.",
+    )
+
+    if catalogue_package is not None:
+        try:
+            loaded_items = load_curated_package(catalogue_package.getvalue())
+            if loaded_items:
+                st.session_state.curated_items = loaded_items
+                st.success(f"Loaded {len(loaded_items)} template(s) from catalogue package.")
+            else:
+                st.warning("The package was readable, but no templates were found.")
+        except Exception as e:
+            st.error(f"Could not open catalogue package: {e}")
 
 
 left, right = st.columns([0.85, 1.15])
@@ -846,6 +947,13 @@ if analysis:
                 str(row["layer"]): str(row["detected_role"])
                 for _, row in edited_layer_df.iterrows()
             }
+            preview_svg = render_svg(
+                analysis["records"],
+                analysis["bbox"],
+                analysis["layer_roles"],
+                width=1000,
+                height=700,
+            )
             st.download_button(
                 "Download Layer Role CSV",
                 data=edited_layer_df.to_csv(index=False).encode("utf-8"),
@@ -917,13 +1025,71 @@ else:
             "layer_count": len(summary.get("layer_counts", {})),
         })
 
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    table_tab, visual_tab, download_tab = st.tabs(["Catalogue Table", "Visual Catalogue", "Package"])
 
-    package_bytes = build_curated_package(st.session_state.curated_items)
-    st.download_button(
-        "Download Curated Stair Catalogue Package",
-        data=package_bytes,
-        file_name="curated_stair_catalogue_package.zip",
-        mime="application/zip",
-        use_container_width=True,
-    )
+    with table_tab:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+    with visual_tab:
+        available_families = sorted(set(item["family_id"] for item in st.session_state.curated_items))
+        selected_family = st.selectbox(
+            "View family",
+            ["All"] + available_families,
+            format_func=lambda key: "All Families" if key == "All" else FAMILY_OPTIONS.get(key, key),
+            key="catalogue_view_family",
+        )
+
+        visible_items = [
+            item for item in st.session_state.curated_items
+            if selected_family == "All" or item["family_id"] == selected_family
+        ]
+
+        if not visible_items:
+            st.info("No templates in this family yet.")
+        else:
+            for start in range(0, len(visible_items), 2):
+                cols = st.columns(2)
+                for col, item in zip(cols, visible_items[start:start + 2]):
+                    with col:
+                        record = item.get("record", {})
+                        summary = item.get("analysis_summary", {})
+                        st.markdown(f"#### {record.get('name', item['template_id'])}")
+                        st.caption(
+                            f"{FAMILY_OPTIONS.get(item['family_id'], item['family_id'])} | "
+                            f"{summary.get('dimension_count', 0)} dimensions | "
+                            f"{len(summary.get('layer_roles', {}))} layer roles"
+                        )
+
+                        if item.get("preview_svg"):
+                            components.html(item["preview_svg"], height=360, scrolling=False)
+                        else:
+                            st.info("No preview SVG saved for this template.")
+
+                        c1, c2 = st.columns(2)
+                        if item.get("dxf_bytes"):
+                            c1.download_button(
+                                "Download source DXF",
+                                data=item["dxf_bytes"],
+                                file_name=f"{item['template_id']}.dxf",
+                                mime="application/dxf",
+                                key=f"source_{item['family_id']}_{item['template_id']}",
+                                use_container_width=True,
+                            )
+                        c2.download_button(
+                            "Download analysis JSON",
+                            data=json.dumps(summary, indent=2).encode("utf-8"),
+                            file_name=f"{item['template_id']}_analysis.json",
+                            mime="application/json",
+                            key=f"analysis_{item['family_id']}_{item['template_id']}",
+                            use_container_width=True,
+                        )
+
+    with download_tab:
+        package_bytes = build_curated_package(st.session_state.curated_items)
+        st.download_button(
+            "Download Curated Stair Catalogue Package",
+            data=package_bytes,
+            file_name="curated_stair_catalogue_package.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
