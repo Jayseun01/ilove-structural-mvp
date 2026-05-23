@@ -24,24 +24,71 @@ st.caption(
 )
 
 
-FAMILY_OPTIONS = {
-    "dog_leg": "Dog-leg Staircases",
-    "straight": "Straight Flight Staircases",
-    "l_shape": "L-shape Staircases",
-    "spiral": "Spiral Staircases",
-    "winder": "Winder Staircases",
-    "reinforcement": "Reinforcement Details",
-    "tread_section": "Tread Sections",
+STAIRCASE_TAXONOMY = {
+    "Materials": ["Reinforced Concrete (RC)", "Structural Steel", "Timber", "Composite"],
+    "Families": {
+        "Half-Turn (U-Shape)": {
+            "Types": ["Dog-Leg", "Open-Well"],
+            "Symmetry": ["Symmetrical", "Asymmetrical"],
+        },
+        "Quarter-Turn (L-Shape)": {
+            "Types": ["Quarter-Space Landing", "Winder"],
+            "Symmetry": ["N/A"],
+        },
+        "Straight": {
+            "Types": ["Single Flight", "With Intermediate Landing"],
+            "Symmetry": ["N/A"],
+        },
+        "Spiral": {
+            "Types": ["Circular Spiral", "Helical"],
+            "Symmetry": ["N/A"],
+        },
+        "Detail Components": {
+            "Types": ["Reinforcement Detail", "Tread Section", "Landing Section"],
+            "Symmetry": ["N/A"],
+        },
+    },
+    "Structural_Classes": [
+        "Solid Waist Slab",
+        "Folded Plate",
+        "Side Stringer",
+        "Central Spine Beam",
+        "Cantilever",
+    ],
 }
 
+
+def taxonomy_family_id(family_name, stair_type):
+    value = f"{family_name}_{stair_type}".lower()
+    clean = re.sub(r"[^a-z0-9_.-]+", "_", value).strip("._")
+    return clean or "stair_family"
+
+
+def build_family_options_from_taxonomy():
+    options = {}
+
+    for family_name, family_data in STAIRCASE_TAXONOMY["Families"].items():
+        for stair_type in family_data.get("Types", []):
+            family_id = taxonomy_family_id(family_name, stair_type)
+            options[family_id] = f"{family_name} - {stair_type}"
+
+    return options
+
+
+FAMILY_OPTIONS = build_family_options_from_taxonomy()
+
 GENERATOR_BY_FAMILY = {
-    "dog_leg": "Dog-leg stair",
-    "straight": "Straight flight",
-    "l_shape": "L-shape stair",
-    "spiral": "Spiral stair",
-    "winder": "Dog-leg stair",
-    "reinforcement": "Dog-leg stair",
-    "tread_section": "Straight flight",
+    taxonomy_family_id("Half-Turn (U-Shape)", "Dog-Leg"): "Dog-leg stair",
+    taxonomy_family_id("Half-Turn (U-Shape)", "Open-Well"): "Open-well stair",
+    taxonomy_family_id("Quarter-Turn (L-Shape)", "Quarter-Space Landing"): "L-shape stair",
+    taxonomy_family_id("Quarter-Turn (L-Shape)", "Winder"): "Winder stair",
+    taxonomy_family_id("Straight", "Single Flight"): "Straight flight",
+    taxonomy_family_id("Straight", "With Intermediate Landing"): "Straight flight with landing",
+    taxonomy_family_id("Spiral", "Circular Spiral"): "Spiral stair",
+    taxonomy_family_id("Spiral", "Helical"): "Helical stair",
+    taxonomy_family_id("Detail Components", "Reinforcement Detail"): "Reinforcement detail",
+    taxonomy_family_id("Detail Components", "Tread Section"): "Tread section",
+    taxonomy_family_id("Detail Components", "Landing Section"): "Landing section",
 }
 
 LAYER_ROLE_OPTIONS = [
@@ -724,17 +771,41 @@ def compact_analysis_summary(analysis):
     }
 
 
-def build_template_record(template_id, name, family_id, source_filename, preview_filename, analysis_summary):
+def family_display_name(family_id, record=None):
+    if record and record.get("family_name"):
+        return record["family_name"]
+    return FAMILY_OPTIONS.get(family_id, str(family_id or "Unclassified stair"))
+
+
+def build_template_record(
+    template_id,
+    name,
+    family_id,
+    source_filename,
+    preview_filename,
+    analysis_summary,
+    taxonomy_metadata,
+):
     return {
         "id": template_id,
         "name": name,
         "family_id": family_id,
-        "family_name": FAMILY_OPTIONS[family_id],
+        "family_name": FAMILY_OPTIONS.get(family_id, taxonomy_metadata.get("family", family_id)),
         "generator_type": GENERATOR_BY_FAMILY.get(family_id, "Dog-leg stair"),
         "source_dxf": f"curated_stair_assets/{family_id}/{template_id}/{source_filename}",
         "preview_svg": f"curated_stair_assets/{family_id}/{template_id}/{preview_filename}",
         "analysis_json": f"curated_stair_assets/{family_id}/{template_id}/analysis.json",
-        "tags": [family_id],
+        "taxonomy": taxonomy_metadata,
+        "material": taxonomy_metadata.get("material", ""),
+        "stair_family": taxonomy_metadata.get("family", ""),
+        "stair_type": taxonomy_metadata.get("type", ""),
+        "symmetry": taxonomy_metadata.get("symmetry", ""),
+        "structural_class": taxonomy_metadata.get("structural_class", ""),
+        "tags": [
+            family_id,
+            taxonomy_family_id("material", taxonomy_metadata.get("material", "")),
+            taxonomy_family_id("structural", taxonomy_metadata.get("structural_class", "")),
+        ],
         "layer_roles": analysis_summary.get("layer_roles", {}),
         "dimension_parameters": analysis_summary.get("dimension_parameters", {}),
         "parametric_intent": {
@@ -768,14 +839,15 @@ def build_curated_package(items):
     for item in items:
         families.setdefault(item["family_id"], {
             "id": item["family_id"],
-            "name": FAMILY_OPTIONS[item["family_id"]],
+            "name": family_display_name(item["family_id"], item.get("record", {})),
             "templates": [],
         })
         families[item["family_id"]]["templates"].append(item["record"])
 
     manifest = {
-        "version": "1.1",
+        "version": "1.2",
         "purpose": "dimension_and_layer_aware_stair_template_catalogue",
+        "taxonomy": STAIRCASE_TAXONOMY,
         "families": list(families.values()),
     }
 
@@ -872,11 +944,53 @@ with left:
     st.markdown("### Add Stair Template")
     uploaded_dxf = st.file_uploader("Clean individual stair DXF", type=["dxf"])
 
-    family_id = st.selectbox(
-        "Family",
-        list(FAMILY_OPTIONS.keys()),
-        format_func=lambda key: FAMILY_OPTIONS[key],
+    tax_1, tax_2 = st.columns(2)
+
+    material = tax_1.selectbox(
+        "Material",
+        STAIRCASE_TAXONOMY["Materials"],
+        index=0,
     )
+
+    taxonomy_family = tax_2.selectbox(
+        "Stair family",
+        list(STAIRCASE_TAXONOMY["Families"].keys()),
+        index=0,
+    )
+
+    family_data = STAIRCASE_TAXONOMY["Families"][taxonomy_family]
+
+    tax_3, tax_4 = st.columns(2)
+
+    stair_type = tax_3.selectbox(
+        "Type",
+        family_data["Types"],
+        index=0,
+    )
+
+    symmetry = tax_4.selectbox(
+        "Symmetry",
+        family_data["Symmetry"],
+        index=0,
+    )
+
+    structural_class = st.selectbox(
+        "Structural class",
+        STAIRCASE_TAXONOMY["Structural_Classes"],
+        index=0,
+    )
+
+    family_id = taxonomy_family_id(taxonomy_family, stair_type)
+
+    taxonomy_metadata = {
+        "material": material,
+        "family": taxonomy_family,
+        "type": stair_type,
+        "symmetry": symmetry,
+        "structural_class": structural_class,
+    }
+
+    st.caption(f"Catalogue class: {FAMILY_OPTIONS.get(family_id, family_id)} | {structural_class}")
 
     template_name = st.text_input("Display name", value="")
     template_id = st.text_input(
@@ -996,6 +1110,7 @@ if add_template:
             source_filename=source_name,
             preview_filename=preview_name,
             analysis_summary=analysis_summary,
+            taxonomy_metadata=taxonomy_metadata,
         )
         st.session_state.curated_items.append({
             "template_id": template_id_clean,
@@ -1005,7 +1120,7 @@ if add_template:
             "preview_svg": preview_svg,
             "analysis_summary": analysis_summary,
         })
-        st.success(f"Added {template_name.strip()} to {FAMILY_OPTIONS[family_id]}.")
+        st.success(f"Added {template_name.strip()} to {family_display_name(family_id, record)}.")
 
 
 st.markdown("### Current Catalogue")
@@ -1016,11 +1131,17 @@ else:
     rows = []
     for item in st.session_state.curated_items:
         summary = item.get("analysis_summary", {})
+        record = item.get("record", {})
+        taxonomy = record.get("taxonomy", {})
         rows.append({
             "template_id": item["template_id"],
-            "family": FAMILY_OPTIONS[item["family_id"]],
-            "name": item["record"]["name"],
-            "generator_type": item["record"]["generator_type"],
+            "family": family_display_name(item["family_id"], record),
+            "type": taxonomy.get("type", record.get("stair_type", "")),
+            "material": taxonomy.get("material", record.get("material", "")),
+            "structural_class": taxonomy.get("structural_class", record.get("structural_class", "")),
+            "symmetry": taxonomy.get("symmetry", record.get("symmetry", "")),
+            "name": record["name"],
+            "generator_type": record["generator_type"],
             "dimension_count": summary.get("dimension_count", 0),
             "layer_count": len(summary.get("layer_counts", {})),
         })
@@ -1032,16 +1153,51 @@ else:
 
     with visual_tab:
         available_families = sorted(set(item["family_id"] for item in st.session_state.curated_items))
-        selected_family = st.selectbox(
+        available_materials = sorted(set(
+            item.get("record", {}).get("taxonomy", {}).get("material", item.get("record", {}).get("material", ""))
+            for item in st.session_state.curated_items
+            if item.get("record", {}).get("taxonomy", {}).get("material", item.get("record", {}).get("material", ""))
+        ))
+        available_structural_classes = sorted(set(
+            item.get("record", {}).get("taxonomy", {}).get("structural_class", item.get("record", {}).get("structural_class", ""))
+            for item in st.session_state.curated_items
+            if item.get("record", {}).get("taxonomy", {}).get("structural_class", item.get("record", {}).get("structural_class", ""))
+        ))
+
+        v1, v2, v3 = st.columns(3)
+
+        selected_family = v1.selectbox(
             "View family",
             ["All"] + available_families,
-            format_func=lambda key: "All Families" if key == "All" else FAMILY_OPTIONS.get(key, key),
+            format_func=lambda key: "All Families" if key == "All" else family_display_name(key),
             key="catalogue_view_family",
+        )
+
+        selected_material = v2.selectbox(
+            "View material",
+            ["All"] + available_materials,
+            key="catalogue_view_material",
+        )
+
+        selected_structural_class = v3.selectbox(
+            "View structural class",
+            ["All"] + available_structural_classes,
+            key="catalogue_view_structural_class",
         )
 
         visible_items = [
             item for item in st.session_state.curated_items
-            if selected_family == "All" or item["family_id"] == selected_family
+            if (
+                (selected_family == "All" or item["family_id"] == selected_family)
+                and (
+                    selected_material == "All"
+                    or item.get("record", {}).get("taxonomy", {}).get("material", item.get("record", {}).get("material", "")) == selected_material
+                )
+                and (
+                    selected_structural_class == "All"
+                    or item.get("record", {}).get("taxonomy", {}).get("structural_class", item.get("record", {}).get("structural_class", "")) == selected_structural_class
+                )
+            )
         ]
 
         if not visible_items:
@@ -1053,9 +1209,12 @@ else:
                     with col:
                         record = item.get("record", {})
                         summary = item.get("analysis_summary", {})
+                        taxonomy = record.get("taxonomy", {})
                         st.markdown(f"#### {record.get('name', item['template_id'])}")
                         st.caption(
-                            f"{FAMILY_OPTIONS.get(item['family_id'], item['family_id'])} | "
+                            f"{family_display_name(item['family_id'], record)} | "
+                            f"{taxonomy.get('material', record.get('material', ''))} | "
+                            f"{taxonomy.get('structural_class', record.get('structural_class', ''))} | "
                             f"{summary.get('dimension_count', 0)} dimensions | "
                             f"{len(summary.get('layer_roles', {}))} layer roles"
                         )
