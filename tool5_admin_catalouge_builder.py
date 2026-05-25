@@ -135,6 +135,38 @@ ROLE_COLORS = {
     "hidden": "#94a3b8",
 }
 
+PARAMETRIC_PARAMETER_OPTIONS = [
+    "annotation_only",
+    "floor_height",
+    "flight_rise",
+    "riser_height",
+    "riser_count",
+    "tread_depth",
+    "tread_count",
+    "stair_width",
+    "landing_length",
+    "flight_length",
+    "flight_gap",
+    "waist_thickness",
+    "bar_spacing",
+    "bar_diameter",
+    "bar_mark",
+    "reinforcement_callout",
+    "section_reference",
+    "do_not_scale",
+]
+
+PARAMETRIC_ACTION_OPTIONS = [
+    "preserve_annotation",
+    "drives_geometry",
+    "update_dimension_label",
+    "recalculate_reinforcement",
+    "reference_only",
+    "ignore",
+]
+
+CORE_GENERATOR_PARAMETERS = ["floor_height_or_flight_rise", "stair_width", "tread_depth_or_count"]
+
 
 def safe_filename(value, default="stair_template"):
     clean = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
@@ -910,6 +942,144 @@ def dimensions_to_dataframe(analysis):
     return pd.DataFrame(rows)
 
 
+def suggested_parametric_parameter(parameter_hint):
+    hint = str(parameter_hint or "").lower()
+    if hint in PARAMETRIC_PARAMETER_OPTIONS:
+        return hint
+    if hint == "stair_width_or_landing":
+        return "stair_width"
+    if hint == "floor_height_or_flight_length":
+        return "flight_rise"
+    if hint in {"bar_spacing", "bar_diameter"}:
+        return hint
+    return "annotation_only"
+
+
+def default_parametric_action(mapped_parameter):
+    if mapped_parameter in {"floor_height", "flight_rise", "riser_height", "riser_count", "tread_depth", "tread_count", "stair_width", "landing_length", "flight_length", "flight_gap", "waist_thickness"}:
+        return "drives_geometry"
+    if mapped_parameter in {"bar_spacing", "bar_diameter", "bar_mark", "reinforcement_callout"}:
+        return "recalculate_reinforcement"
+    if mapped_parameter in {"section_reference", "do_not_scale"}:
+        return "reference_only"
+    return "preserve_annotation"
+
+
+def dimension_mapping_to_dataframe(analysis):
+    rows = []
+    for idx, dim in enumerate(analysis.get("dimension_records", []), start=1):
+        hint = dim.get("parameter_hint", "")
+        mapped_parameter = suggested_parametric_parameter(hint)
+        rows.append({
+            "dimension_id": idx,
+            "mapped_parameter": mapped_parameter,
+            "parametric_action": default_parametric_action(mapped_parameter),
+            "parameter_hint": hint,
+            "text": dim.get("text", ""),
+            "measurement": dim.get("measurement", ""),
+            "layer": dim.get("layer", ""),
+            "min_x": round(dim.get("bbox", {}).get("min_x", 0.0), 3),
+            "min_y": round(dim.get("bbox", {}).get("min_y", 0.0), 3),
+            "max_x": round(dim.get("bbox", {}).get("max_x", 0.0), 3),
+            "max_y": round(dim.get("bbox", {}).get("max_y", 0.0), 3),
+        })
+    return pd.DataFrame(rows)
+
+
+def json_safe_cell(value, default=""):
+    try:
+        if pd.isna(value):
+            return default
+    except Exception:
+        pass
+    return value
+
+
+def clean_mapping_rows(mapping_df):
+    rows = []
+    if mapping_df is None or mapping_df.empty:
+        return rows
+
+    for _, row in mapping_df.iterrows():
+        mapped_parameter = str(row.get("mapped_parameter", "annotation_only") or "annotation_only")
+        parametric_action = str(row.get("parametric_action", default_parametric_action(mapped_parameter)) or default_parametric_action(mapped_parameter))
+        rows.append({
+            "dimension_id": int(row.get("dimension_id", 0) or 0),
+            "mapped_parameter": mapped_parameter,
+            "parametric_action": parametric_action,
+            "parameter_hint": str(json_safe_cell(row.get("parameter_hint", ""), "") or ""),
+            "text": str(json_safe_cell(row.get("text", ""), "") or ""),
+            "measurement": json_safe_cell(row.get("measurement", ""), ""),
+            "layer": str(json_safe_cell(row.get("layer", ""), "") or ""),
+            "bbox": {
+                "min_x": float(json_safe_cell(row.get("min_x", 0.0), 0.0) or 0.0),
+                "min_y": float(json_safe_cell(row.get("min_y", 0.0), 0.0) or 0.0),
+                "max_x": float(json_safe_cell(row.get("max_x", 0.0), 0.0) or 0.0),
+                "max_y": float(json_safe_cell(row.get("max_y", 0.0), 0.0) or 0.0),
+            },
+        })
+
+    return rows
+
+
+def evaluate_template_readiness(mapping_rows):
+    mapped = {
+        row.get("mapped_parameter")
+        for row in mapping_rows
+        if row.get("mapped_parameter") not in {"annotation_only", "do_not_scale", ""}
+    }
+
+    missing = []
+    if not ({"floor_height", "flight_rise"} & mapped):
+        missing.append("floor height / flight rise")
+    if "stair_width" not in mapped:
+        missing.append("stair width")
+    if not ({"tread_depth", "tread_count"} & mapped):
+        missing.append("tread depth / tread count")
+
+    reinforcement_mapped = bool({"bar_spacing", "bar_diameter", "bar_mark", "reinforcement_callout"} & mapped)
+
+    if not mapping_rows:
+        status = "Preview only - no detected dimensions"
+        ready = False
+    elif missing:
+        status = "Needs mapping: " + ", ".join(missing)
+        ready = False
+    elif not reinforcement_mapped:
+        status = "Geometry-ready; reinforcement mapping pending"
+        ready = True
+    else:
+        status = "Ready for generator"
+        ready = True
+
+    return {
+        "status": status,
+        "is_generator_ready": bool(ready),
+        "missing_core_parameters": missing,
+        "has_reinforcement_mapping": reinforcement_mapped,
+        "mapped_parameter_count": len(mapped),
+        "core_requirements": CORE_GENERATOR_PARAMETERS,
+    }
+
+
+def build_parametric_mapping(mapping_df):
+    mapping_rows = clean_mapping_rows(mapping_df)
+    parameter_index = {}
+    for row in mapping_rows:
+        parameter = row.get("mapped_parameter", "annotation_only")
+        if parameter in {"annotation_only", "do_not_scale", ""}:
+            continue
+        parameter_index.setdefault(parameter, []).append(row["dimension_id"])
+
+    readiness = evaluate_template_readiness(mapping_rows)
+    return {
+        "version": "1.0",
+        "dimension_mappings": mapping_rows,
+        "parameter_index": parameter_index,
+        "readiness": readiness,
+    }
+
+
 def compact_analysis_summary(analysis):
     return {
         "entity_counts": analysis.get("entity_counts", {}),
@@ -918,6 +1088,8 @@ def compact_analysis_summary(analysis):
         "layer_roles": analysis.get("layer_roles", {}),
         "dimension_count": len(analysis.get("dimension_records", [])),
         "dimension_parameters": analysis.get("dimension_parameters", {}),
+        "parametric_mapping": analysis.get("parametric_mapping", {}),
+        "template_readiness": analysis.get("template_readiness", {}),
     }
 
 
@@ -935,7 +1107,11 @@ def build_template_record(
     preview_filename,
     analysis_summary,
     taxonomy_metadata,
+    parametric_mapping=None,
 ):
+    parametric_mapping = parametric_mapping or analysis_summary.get("parametric_mapping", {})
+    readiness = parametric_mapping.get("readiness", analysis_summary.get("template_readiness", {}))
+
     return {
         "id": template_id,
         "name": name,
@@ -958,6 +1134,8 @@ def build_template_record(
         ],
         "layer_roles": analysis_summary.get("layer_roles", {}),
         "dimension_parameters": analysis_summary.get("dimension_parameters", {}),
+        "parametric_mapping": parametric_mapping,
+        "template_readiness": readiness,
         "parametric_intent": {
             "geometry_layers_scale_from_dimensions": True,
             "reinforcement_layers_recalculate_from_span": True,
@@ -995,8 +1173,8 @@ def build_curated_package(items):
         families[item["family_id"]]["templates"].append(item["record"])
 
     manifest = {
-        "version": "1.2",
-        "purpose": "dimension_and_layer_aware_stair_template_catalogue",
+        "version": "1.3",
+        "purpose": "dimension_layer_and_parametric_mapping_aware_stair_template_catalogue",
         "taxonomy": STAIRCASE_TAXONOMY,
         "families": list(families.values()),
     }
@@ -1050,7 +1228,12 @@ def load_curated_package(data):
                         "layer_counts": {},
                         "layer_roles": record.get("layer_roles", {}),
                         "dimension_parameters": record.get("dimension_parameters", {}),
+                        "parametric_mapping": record.get("parametric_mapping", {}),
+                        "template_readiness": record.get("template_readiness", {}),
                     }
+
+                analysis_summary.setdefault("parametric_mapping", record.get("parametric_mapping", {}))
+                analysis_summary.setdefault("template_readiness", record.get("template_readiness", {}))
 
                 items.append({
                     "template_id": template_id,
@@ -1161,6 +1344,7 @@ with right:
 
     analysis = None
     preview_svg = ""
+    parametric_mapping = {}
 
     if uploaded_dxf is not None:
         try:
@@ -1241,6 +1425,76 @@ if analysis:
                 mime="text/csv",
             )
 
+    with st.expander("Parametric mapping for generator", expanded=True):
+        mapping_df = dimension_mapping_to_dataframe(analysis)
+        if mapping_df.empty:
+            st.warning(
+                "No editable dimension mappings are available yet. Keep this template as preview-only, "
+                "or upload a DXF with real DIMENSION entities."
+            )
+            parametric_mapping = build_parametric_mapping(mapping_df)
+            analysis["parametric_mapping"] = parametric_mapping
+            analysis["template_readiness"] = parametric_mapping.get("readiness", {})
+        else:
+            st.caption(
+                "Map each detected dimension to what it means in the stair template. "
+                "This is the step that teaches the generator how to resize and relabel the detail later."
+            )
+            edited_mapping_df = st.data_editor(
+                mapping_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "mapped_parameter": st.column_config.SelectboxColumn(
+                        "mapped_parameter",
+                        options=PARAMETRIC_PARAMETER_OPTIONS,
+                        required=True,
+                    ),
+                    "parametric_action": st.column_config.SelectboxColumn(
+                        "parametric_action",
+                        options=PARAMETRIC_ACTION_OPTIONS,
+                        required=True,
+                    ),
+                },
+                disabled=[
+                    "dimension_id",
+                    "parameter_hint",
+                    "text",
+                    "measurement",
+                    "layer",
+                    "min_x",
+                    "min_y",
+                    "max_x",
+                    "max_y",
+                ],
+                key="stair_parametric_mapping_editor",
+            )
+            parametric_mapping = build_parametric_mapping(edited_mapping_df)
+            readiness = parametric_mapping.get("readiness", {})
+            analysis["parametric_mapping"] = parametric_mapping
+            analysis["template_readiness"] = readiness
+
+            if readiness.get("is_generator_ready"):
+                st.success(readiness.get("status", "Ready for generator"))
+            else:
+                st.warning(readiness.get("status", "Needs parametric mapping"))
+
+            c1, c2 = st.columns(2)
+            c1.download_button(
+                "Download Parametric Mapping CSV",
+                data=edited_mapping_df.to_csv(index=False).encode("utf-8"),
+                file_name="ILS_STAIR_PARAMETRIC_MAPPING.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+            c2.download_button(
+                "Download Parametric Mapping JSON",
+                data=json.dumps(parametric_mapping, indent=2).encode("utf-8"),
+                file_name="ILS_STAIR_PARAMETRIC_MAPPING.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+
 if add_template:
     if uploaded_dxf is None:
         st.error("Upload a DXF first.")
@@ -1261,6 +1515,7 @@ if add_template:
             preview_filename=preview_name,
             analysis_summary=analysis_summary,
             taxonomy_metadata=taxonomy_metadata,
+            parametric_mapping=parametric_mapping,
         )
         st.session_state.curated_items.append({
             "template_id": template_id_clean,
@@ -1283,6 +1538,8 @@ else:
         summary = item.get("analysis_summary", {})
         record = item.get("record", {})
         taxonomy = record.get("taxonomy", {})
+        readiness = record.get("template_readiness", summary.get("template_readiness", {})) or {}
+        parametric_mapping = record.get("parametric_mapping", summary.get("parametric_mapping", {})) or {}
         rows.append({
             "template_id": item["template_id"],
             "family": family_display_name(item["family_id"], record),
@@ -1292,6 +1549,11 @@ else:
             "symmetry": taxonomy.get("symmetry", record.get("symmetry", "")),
             "name": record["name"],
             "generator_type": record["generator_type"],
+            "readiness": readiness.get("status", ""),
+            "mapped_parameters": readiness.get(
+                "mapped_parameter_count",
+                len(parametric_mapping.get("parameter_index", {})),
+            ),
             "dimension_count": summary.get("dimension_count", 0),
             "layer_count": len(summary.get("layer_counts", {})),
         })
@@ -1360,13 +1622,15 @@ else:
                         record = item.get("record", {})
                         summary = item.get("analysis_summary", {})
                         taxonomy = record.get("taxonomy", {})
+                        readiness = record.get("template_readiness", summary.get("template_readiness", {})) or {}
                         st.markdown(f"#### {record.get('name', item['template_id'])}")
                         st.caption(
                             f"{family_display_name(item['family_id'], record)} | "
                             f"{taxonomy.get('material', record.get('material', ''))} | "
                             f"{taxonomy.get('structural_class', record.get('structural_class', ''))} | "
                             f"{summary.get('dimension_count', 0)} dimensions | "
-                            f"{len(summary.get('layer_roles', {}))} layer roles"
+                            f"{len(summary.get('layer_roles', {}))} layer roles | "
+                            f"{readiness.get('status', 'Mapping not reviewed')}"
                         )
 
                         if item.get("preview_svg"):
