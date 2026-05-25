@@ -165,6 +165,12 @@ def text_rotation(entity):
     text_direction vector; INSERT/DIMENSION virtual text can use either.
     """
 
+    direction = point_tuple(dxf_get(entity, "text_direction", None))
+    if direction:
+        dx, dy = direction
+        if abs(dx) > 1e-9 or abs(dy) > 1e-9:
+            return math.degrees(math.atan2(dy, dx))
+
     for method_name in ["get_rotation"]:
         try:
             method = getattr(entity, method_name)
@@ -180,12 +186,6 @@ def text_rotation(entity):
             return float(value)
         except Exception:
             pass
-
-    direction = point_tuple(dxf_get(entity, "text_direction", None))
-    if direction:
-        dx, dy = direction
-        if abs(dx) > 1e-9 or abs(dy) > 1e-9:
-            return math.degrees(math.atan2(dy, dx))
 
     return 0.0
 
@@ -474,7 +474,9 @@ def svg_escape(text):
 
 def svg_text_element(x, y, text, color, font_size, rotation=0.0):
     clean = svg_escape(text)[:140]
-    rotation = float(rotation or 0.0)
+    rotation = float(rotation or 0.0) % 360.0
+    if rotation > 180.0:
+        rotation -= 360.0
     transform = ""
 
     if abs(rotation) > 1e-6:
@@ -555,7 +557,22 @@ def render_svg(records, bbox, width=1000, height=700, max_records=6000):
                     bx = (record["bbox"]["min_x"] + record["bbox"]["max_x"]) / 2.0
                     by = (record["bbox"]["min_y"] + record["bbox"]["max_y"]) / 2.0
                     x, y = svg_xy(bx, by, bbox, width, height, pad)
-                    parts.append(svg_text_element(x, y, record.get("text"), color, 10.0))
+                    rotation = 0.0
+                    if len(points) >= 2:
+                        dx = points[-1][0] - points[0][0]
+                        dy = points[-1][1] - points[0][1]
+                        if abs(dx) > 1e-9 or abs(dy) > 1e-9:
+                            rotation = math.degrees(math.atan2(dy, dx))
+                    parts.append(
+                        svg_text_element(
+                            x,
+                            y,
+                            record.get("text"),
+                            color,
+                            10.0,
+                            rotation=rotation,
+                        )
+                    )
         except Exception:
             continue
 
