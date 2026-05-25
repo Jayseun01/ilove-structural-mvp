@@ -165,7 +165,19 @@ PARAMETRIC_ACTION_OPTIONS = [
     "ignore",
 ]
 
+VALUE_SOURCE_OPTIONS = [
+    "display_text",
+    "dxf_measurement",
+    "manual_override",
+]
+
 CORE_GENERATOR_PARAMETERS = ["floor_height_or_flight_rise", "stair_width", "tread_depth_or_count"]
+
+CORE_GENERATOR_GROUPS = {
+    "floor_height_or_flight_rise": {"floor_height", "flight_rise"},
+    "stair_width": {"stair_width"},
+    "tread_depth_or_count": {"tread_depth", "tread_count"},
+}
 
 
 def safe_filename(value, default="stair_template"):
@@ -965,18 +977,80 @@ def default_parametric_action(mapped_parameter):
     return "preserve_annotation"
 
 
+def numeric_values_from_text(text):
+    clean = str(text or "").replace(",", "")
+    values = []
+
+    for match in re.findall(r"[-+]?\d*\.?\d+", clean):
+        try:
+            values.append(float(match))
+        except Exception:
+            pass
+
+    return values
+
+
+def display_text_numeric_value(text):
+    values = numeric_values_from_text(text)
+    if not values:
+        return None
+
+    clean = str(text or "")
+    if "=" in clean:
+        right_side_values = numeric_values_from_text(clean.split("=")[-1])
+        if right_side_values:
+            return right_side_values[-1]
+
+    stripped = clean.strip().replace(",", "")
+    if re.fullmatch(r"[-+]?\d*\.?\d+", stripped):
+        return values[0]
+
+    return values[-1]
+
+
+def safe_float(value, default=None):
+    value = json_safe_cell(value, default)
+    if value in [None, ""]:
+        return default
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def default_template_value(text, measurement):
+    text_value = display_text_numeric_value(text)
+    if text_value is not None:
+        return text_value
+
+    return safe_float(measurement, None)
+
+
+def default_value_source(text, measurement):
+    if display_text_numeric_value(text) is not None:
+        return "display_text"
+    if safe_float(measurement, None) is not None:
+        return "dxf_measurement"
+    return "manual_override"
+
+
 def dimension_mapping_to_dataframe(analysis):
     rows = []
     for idx, dim in enumerate(analysis.get("dimension_records", []), start=1):
         hint = dim.get("parameter_hint", "")
         mapped_parameter = suggested_parametric_parameter(hint)
+        text = dim.get("text", "")
+        measurement = dim.get("measurement", "")
         rows.append({
             "dimension_id": idx,
+            "governing": False,
             "mapped_parameter": mapped_parameter,
             "parametric_action": default_parametric_action(mapped_parameter),
+            "template_value": default_template_value(text, measurement),
+            "value_source": default_value_source(text, measurement),
             "parameter_hint": hint,
-            "text": dim.get("text", ""),
-            "measurement": dim.get("measurement", ""),
+            "text": text,
+            "measurement": measurement,
             "layer": dim.get("layer", ""),
             "min_x": round(dim.get("bbox", {}).get("min_x", 0.0), 3),
             "min_y": round(dim.get("bbox", {}).get("min_y", 0.0), 3),
@@ -995,6 +1069,13 @@ def json_safe_cell(value, default=""):
     return value
 
 
+def bool_cell(value):
+    value = json_safe_cell(value, False)
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y", "on"}
+    return bool(value)
+
+
 def clean_mapping_rows(mapping_df):
     rows = []
     if mapping_df is None or mapping_df.empty:
@@ -1003,13 +1084,24 @@ def clean_mapping_rows(mapping_df):
     for _, row in mapping_df.iterrows():
         mapped_parameter = str(row.get("mapped_parameter", "annotation_only") or "annotation_only")
         parametric_action = str(row.get("parametric_action", default_parametric_action(mapped_parameter)) or default_parametric_action(mapped_parameter))
+        text = str(json_safe_cell(row.get("text", ""), "") or "")
+        measurement = json_safe_cell(row.get("measurement", ""), "")
+        value_source = str(json_safe_cell(row.get("value_source", default_value_source(text, measurement)), "manual_override") or "manual_override")
+        if value_source not in VALUE_SOURCE_OPTIONS:
+            value_source = default_value_source(text, measurement)
+
         rows.append({
             "dimension_id": int(row.get("dimension_id", 0) or 0),
+            "governing": bool_cell(row.get("governing", False)),
             "mapped_parameter": mapped_parameter,
             "parametric_action": parametric_action,
             "parameter_hint": str(json_safe_cell(row.get("parameter_hint", ""), "") or ""),
-            "text": str(json_safe_cell(row.get("text", ""), "") or ""),
-            "measurement": json_safe_cell(row.get("measurement", ""), ""),
+            "text": text,
+            "template_value": safe_float(row.get("template_value", ""), None),
+            "value_source": value_source,
+            "display_text_value": display_text_numeric_value(text),
+            "measurement": measurement,
+            "dxf_measurement_value": safe_float(measurement, None),
             "layer": str(json_safe_cell(row.get("layer", ""), "") or ""),
             "bbox": {
                 "min_x": float(json_safe_cell(row.get("min_x", 0.0), 0.0) or 0.0),
@@ -1028,22 +1120,45 @@ def evaluate_template_readiness(mapping_rows):
         for row in mapping_rows
         if row.get("mapped_parameter") not in {"annotation_only", "do_not_scale", ""}
     }
+    governing_rows = [
+        row for row in mapping_rows
+        if row.get("governing") and row.get("mapped_parameter") not in {"annotation_only", "do_not_scale", ""}
+    ]
+    governing_mapped = {row.get("mapped_parameter") for row in governing_rows}
 
     missing = []
-    if not ({"floor_height", "flight_rise"} & mapped):
-        missing.append("floor height / flight rise")
-    if "stair_width" not in mapped:
-        missing.append("stair width")
-    if not ({"tread_depth", "tread_count"} & mapped):
-        missing.append("tread depth / tread count")
+    for requirement, options in CORE_GENERATOR_GROUPS.items():
+        if not (options & governing_mapped):
+            missing.append(requirement.replace("_", " "))
+
+    missing_values = []
+    for row in governing_rows:
+        if safe_float(row.get("template_value", ""), None) is None:
+            missing_values.append(row.get("dimension_id"))
 
     reinforcement_mapped = bool({"bar_spacing", "bar_diameter", "bar_mark", "reinforcement_callout"} & mapped)
+
+    value_discrepancies = []
+    for row in mapping_rows:
+        display_value = safe_float(row.get("display_text_value", None), None)
+        measurement_value = safe_float(row.get("dxf_measurement_value", None), None)
+        if display_value is None or measurement_value is None:
+            continue
+        tolerance = max(1.0, abs(display_value) * 0.02)
+        if abs(display_value - measurement_value) > tolerance:
+            value_discrepancies.append(row.get("dimension_id"))
 
     if not mapping_rows:
         status = "Preview only - no detected dimensions"
         ready = False
+    elif not governing_rows:
+        status = "Needs governing dimensions"
+        ready = False
     elif missing:
-        status = "Needs mapping: " + ", ".join(missing)
+        status = "Needs governing mapping: " + ", ".join(missing)
+        ready = False
+    elif missing_values:
+        status = "Needs template values for governing dimensions"
         ready = False
     elif not reinforcement_mapped:
         status = "Geometry-ready; reinforcement mapping pending"
@@ -1056,8 +1171,12 @@ def evaluate_template_readiness(mapping_rows):
         "status": status,
         "is_generator_ready": bool(ready),
         "missing_core_parameters": missing,
+        "missing_value_dimension_ids": missing_values,
         "has_reinforcement_mapping": reinforcement_mapped,
         "mapped_parameter_count": len(mapped),
+        "governing_parameter_count": len(governing_mapped),
+        "governing_dimension_ids": [row.get("dimension_id") for row in governing_rows],
+        "value_discrepancy_dimension_ids": value_discrepancies,
         "core_requirements": CORE_GENERATOR_PARAMETERS,
     }
 
@@ -1065,17 +1184,28 @@ def evaluate_template_readiness(mapping_rows):
 def build_parametric_mapping(mapping_df):
     mapping_rows = clean_mapping_rows(mapping_df)
     parameter_index = {}
+    governing_parameter_index = {}
+    governing_values = {}
     for row in mapping_rows:
         parameter = row.get("mapped_parameter", "annotation_only")
         if parameter in {"annotation_only", "do_not_scale", ""}:
             continue
         parameter_index.setdefault(parameter, []).append(row["dimension_id"])
+        if row.get("governing"):
+            governing_parameter_index.setdefault(parameter, []).append(row["dimension_id"])
+            governing_values.setdefault(parameter, []).append({
+                "dimension_id": row["dimension_id"],
+                "value": row.get("template_value", ""),
+                "value_source": row.get("value_source", ""),
+            })
 
     readiness = evaluate_template_readiness(mapping_rows)
     return {
         "version": "1.0",
         "dimension_mappings": mapping_rows,
         "parameter_index": parameter_index,
+        "governing_parameter_index": governing_parameter_index,
+        "governing_values": governing_values,
         "readiness": readiness,
     }
 
@@ -1173,8 +1303,8 @@ def build_curated_package(items):
         families[item["family_id"]]["templates"].append(item["record"])
 
     manifest = {
-        "version": "1.3",
-        "purpose": "dimension_layer_and_parametric_mapping_aware_stair_template_catalogue",
+        "version": "1.4",
+        "purpose": "dimension_layer_value_and_governing_mapping_aware_stair_template_catalogue",
         "taxonomy": STAIRCASE_TAXONOMY,
         "families": list(families.values()),
     }
@@ -1445,6 +1575,10 @@ if analysis:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
+                    "governing": st.column_config.CheckboxColumn(
+                        "governing",
+                        help="Only checked rows are allowed to drive generated geometry.",
+                    ),
                     "mapped_parameter": st.column_config.SelectboxColumn(
                         "mapped_parameter",
                         options=PARAMETRIC_PARAMETER_OPTIONS,
@@ -1453,6 +1587,16 @@ if analysis:
                     "parametric_action": st.column_config.SelectboxColumn(
                         "parametric_action",
                         options=PARAMETRIC_ACTION_OPTIONS,
+                        required=True,
+                    ),
+                    "template_value": st.column_config.NumberColumn(
+                        "template_value",
+                        help="The value the generator should trust. Use the visible text value unless you override it.",
+                        format="%.3f",
+                    ),
+                    "value_source": st.column_config.SelectboxColumn(
+                        "value_source",
+                        options=VALUE_SOURCE_OPTIONS,
                         required=True,
                     ),
                 },
@@ -1478,6 +1622,12 @@ if analysis:
                 st.success(readiness.get("status", "Ready for generator"))
             else:
                 st.warning(readiness.get("status", "Needs parametric mapping"))
+
+            if readiness.get("value_discrepancy_dimension_ids"):
+                st.info(
+                    "Some visible dimension text differs from the raw DXF measurement. "
+                    "The generator will use template_value according to value_source for checked governing rows."
+                )
 
             c1, c2 = st.columns(2)
             c1.download_button(
@@ -1554,6 +1704,11 @@ else:
                 "mapped_parameter_count",
                 len(parametric_mapping.get("parameter_index", {})),
             ),
+            "governing_parameters": readiness.get(
+                "governing_parameter_count",
+                len(parametric_mapping.get("governing_parameter_index", {})),
+            ),
+            "value_discrepancies": len(readiness.get("value_discrepancy_dimension_ids", [])),
             "dimension_count": summary.get("dimension_count", 0),
             "layer_count": len(summary.get("layer_counts", {})),
         })
