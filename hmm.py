@@ -695,8 +695,9 @@ def structural_column_seed_points(axes, slab, axis_tol):
             if on_h and on_v:
                 points.append((x, y))
 
-    if len(points) < 4:
-        points.extend(fallback_corner_columns(slab))
+    # Always include floor-plate corners as editable starter columns. They are
+    # easy to delete later and give the 3D model a stable structural frame.
+    points.extend(fallback_corner_columns(slab))
 
     return dedupe_points(points, tol=max(axis_tol * 2.0, 1.0))
 
@@ -736,7 +737,7 @@ def snap_floor_points_to_global_grid(floor_points, all_axes_by_floor, slabs, axi
     return out
 
 
-def build_column_groups(floor_points, floors, width, depth, grouping_tol):
+def build_column_groups(floor_points, floors, width, depth, grouping_tol, force_full_stack=False):
     groups = []
 
     for floor in floors:
@@ -772,7 +773,17 @@ def build_column_groups(floor_points, floors, width, depth, grouping_tol):
             if floors[i]["label"] not in present
         ]
 
-        if len(present) == len(floors) and first_i == 0:
+        source = "wall_axis_intersections"
+
+        if force_full_stack and floors:
+            present = [floor["label"] for floor in floors]
+            present_indices = list(range(len(floors)))
+            first_i = 0
+            last_i = len(floors) - 1
+            missing_between = []
+            status = "continuous"
+            source = "projected_full_stack_model_line"
+        elif len(present) == len(floors) and first_i == 0:
             status = "continuous"
         elif missing_between:
             status = "misaligned_review"
@@ -799,7 +810,7 @@ def build_column_groups(floor_points, floors, width, depth, grouping_tol):
             "floors_present": ", ".join(present),
             "missing_between": ", ".join(missing_between),
             "status": status,
-            "source": "wall_axis_intersections",
+            "source": source,
         })
 
     return columns
@@ -1186,6 +1197,7 @@ def build_model_from_uploads(uploaded_floors, settings):
         width=settings["column_width"],
         depth=settings["column_depth"],
         grouping_tol=settings["column_grouping_tol"],
+        force_full_stack=settings["force_full_stack_columns"],
     )
     primary_beams = build_primary_beams(
         columns,
@@ -1206,7 +1218,7 @@ def build_model_from_uploads(uploaded_floors, settings):
     cantilevers = build_cantilevers(slabs, floors, tolerance=settings["cantilever_tolerance"])
 
     return {
-        "version": "3d_model_builder_mvp_2_grid_snap",
+        "version": "3d_model_builder_mvp_3_floor_slots_orbit_colors",
         "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
         "units": "mm",
         "floors": floors,
@@ -1289,6 +1301,10 @@ def render_three_viewer(model, height=740):
       width: 100%;
       height: {int(height)}px;
       position: relative;
+      cursor: grab;
+    }}
+    #viewer:active {{
+      cursor: grabbing;
     }}
     #hud {{
       position: absolute;
@@ -1329,6 +1345,27 @@ def render_three_viewer(model, height=740):
       color: #bae6fd;
       margin-top: 6px;
     }}
+    #viewButtons {{
+      position: absolute;
+      left: 12px;
+      bottom: 12px;
+      z-index: 10;
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }}
+    #viewButtons button {{
+      border: 1px solid rgba(148,163,184,0.45);
+      background: rgba(15,23,42,0.82);
+      color: #e5e7eb;
+      border-radius: 6px;
+      padding: 7px 9px;
+      font-size: 12px;
+      cursor: pointer;
+    }}
+    #viewButtons button:hover {{
+      background: rgba(30,41,59,0.95);
+    }}
   </style>
   <script type="importmap">
     {{
@@ -1344,7 +1381,7 @@ def render_three_viewer(model, height=740):
     <div id="hud">
       <strong>3D Structural Model</strong><br/>
       Orbit: left mouse | Pan: right mouse | Zoom: wheel<br/>
-      Click an object to inspect. Press W/E/R for move/rotate/scale handles.
+      Double-click object to inspect/edit handle. Press W/E/R for move/rotate/scale handles.
       <div id="selected">Selected: none</div>
     </div>
     <div id="legend">
@@ -1358,6 +1395,13 @@ def render_three_viewer(model, height=740):
       <span class="swatch" style="background:#1d4ed8"></span>primary<br/>
       <span class="swatch" style="background:#38bdf8"></span>secondary<br/>
       <span class="swatch" style="background:#ef4444"></span>cantilever review
+    </div>
+    <div id="viewButtons">
+      <button id="isoView" type="button">Iso</button>
+      <button id="topView" type="button">Top</button>
+      <button id="frontView" type="button">Front</button>
+      <button id="sideView" type="button">Side</button>
+      <button id="clearPick" type="button">Clear</button>
     </div>
   </div>
 
@@ -1390,6 +1434,15 @@ def render_three_viewer(model, height=740):
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.target.set(bounds.cx * scale, bounds.cz * scale, -bounds.cy * scale);
     controls.enableDamping = true;
+    controls.mouseButtons = {{
+      LEFT: THREE.MOUSE.ROTATE,
+      MIDDLE: THREE.MOUSE.DOLLY,
+      RIGHT: THREE.MOUSE.PAN
+    }};
+    controls.touches = {{
+      ONE: THREE.TOUCH.ROTATE,
+      TWO: THREE.TOUCH.DOLLY_PAN
+    }};
     controls.update();
 
     const transform = new TransformControls(camera, renderer.domElement);
@@ -1417,8 +1470,8 @@ def render_three_viewer(model, height=740):
       }});
     }}
 
-    const wallMat = mat(0xcbd5e1, 0.58);
-    const slabMat = mat(0x94a3b8, 0.28);
+    const wallMat = mat(0xe2e8f0, 0.24);
+    const slabPalette = [0x0284c7, 0x16a34a, 0xa855f7, 0xf59e0b, 0x14b8a6, 0xf43f5e];
     const cantileverMat = mat(0xef4444, 0.38);
     const edgeMat = new THREE.LineBasicMaterial({{ color: 0xf8fafc, transparent: true, opacity: 0.35 }});
     const pickables = [];
@@ -1454,12 +1507,15 @@ def render_three_viewer(model, height=740):
       addBox(wall.id, 'wall', mx, wall.z + wall.height / 2, my, len, wall.height, wall.thickness, yaw, wallMat, wall);
     }}
 
+    const floorIndex = new Map((model.floors || []).map((floor, idx) => [floor.label, idx]));
+
     for (const slab of model.slabs || []) {{
       const w = Math.abs(slab.x2 - slab.x1);
       const d = Math.abs(slab.y2 - slab.y1);
       const mx = (slab.x1 + slab.x2) / 2;
       const my = (slab.y1 + slab.y2) / 2;
-      addBox(slab.id, 'slab', mx, slab.z + slab.thickness / 2, my, w, slab.thickness, d, 0, slabMat, slab);
+      const slabColor = slabPalette[(floorIndex.get(slab.floor) || 0) % slabPalette.length];
+      addBox(slab.id, 'slab', mx, slab.z + slab.thickness / 2, my, w, slab.thickness, d, 0, mat(slabColor, 0.36), slab);
     }}
 
     for (const col of model.columns || []) {{
@@ -1477,7 +1533,7 @@ def render_three_viewer(model, height=740):
       const my = (beam.y1 + beam.y2) / 2;
       const yaw = Math.atan2(dy, dx);
       const color = beamColors[beam.role] || beamColors.primary;
-      addBox(beam.id, 'beam', mx, beam.z - beam.depth / 2, my, len, beam.depth, beam.width, yaw, mat(color, 0.92), beam);
+      addBox(beam.id, 'beam', mx, beam.z - beam.depth / 2, my, len, beam.depth, beam.width, yaw, mat(color, 1.0), beam);
     }}
 
     for (const cantilever of model.cantilevers || []) {{
@@ -1503,8 +1559,7 @@ def render_three_viewer(model, height=740):
       selectedText.textContent = `Selected: ${{object.userData.type}} / ${{object.userData.id}}`;
     }}
 
-    renderer.domElement.addEventListener('pointerdown', event => {{
-      if (event.button !== 0) return;
+    renderer.domElement.addEventListener('dblclick', event => {{
       const rect = renderer.domElement.getBoundingClientRect();
       pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -1512,6 +1567,24 @@ def render_three_viewer(model, height=740):
       const hits = raycaster.intersectObjects(pickables, false);
       if (hits.length) setSelected(hits[0].object);
     }});
+
+    function setCameraView(kind) {{
+      const target = new THREE.Vector3(bounds.cx * scale, bounds.cz * scale, -bounds.cy * scale);
+      const dist = Math.max(bounds.radius * scale, 8);
+      if (kind === 'top') camera.position.set(target.x, target.y + dist * 1.35, target.z + 0.001);
+      else if (kind === 'front') camera.position.set(target.x, target.y + dist * 0.25, target.z + dist * 1.35);
+      else if (kind === 'side') camera.position.set(target.x + dist * 1.35, target.y + dist * 0.25, target.z);
+      else camera.position.set(target.x + dist * 0.75, target.y + dist * 0.70, target.z + dist * 1.05);
+      controls.target.copy(target);
+      camera.lookAt(target);
+      controls.update();
+    }}
+
+    document.getElementById('isoView').addEventListener('click', () => setCameraView('iso'));
+    document.getElementById('topView').addEventListener('click', () => setCameraView('top'));
+    document.getElementById('frontView').addEventListener('click', () => setCameraView('front'));
+    document.getElementById('sideView').addEventListener('click', () => setCameraView('side'));
+    document.getElementById('clearPick').addEventListener('click', () => setSelected(null));
 
     window.addEventListener('keydown', event => {{
       if (event.key.toLowerCase() === 'w') transform.setMode('translate');
@@ -1660,7 +1733,12 @@ with st.sidebar:
     st.markdown("### Columns")
     column_width = st.number_input("Column width", min_value=100.0, value=300.0, step=25.0)
     column_depth = st.number_input("Column depth", min_value=100.0, value=300.0, step=25.0)
-    column_grouping_tol = st.number_input("Column continuity tolerance", min_value=10.0, value=350.0, step=25.0)
+    column_grouping_tol = st.number_input("Column continuity tolerance", min_value=10.0, value=750.0, step=25.0)
+    force_full_stack_columns = st.checkbox(
+        "Start with proposed columns continuous through full stack",
+        value=True,
+        help="Recommended for modelling. It makes detected/proposed column lines green first, then you can edit exceptions manually.",
+    )
 
     st.markdown("### Beams")
     beam_axis_tol = st.number_input("Beam axis grouping tolerance", min_value=10.0, value=350.0, step=25.0)
@@ -1676,41 +1754,66 @@ with st.sidebar:
 
 
 st.markdown("### 1. Upload Floors In Real Order")
-st.caption("Upload GF first, then FF, then upper/typical floors, then roof if needed. The order controls the 3D stack.")
+st.caption("Use fixed floor slots so the model stack is unambiguous: GF, FF, other upper floors, then roof.")
 
-floor_files = st.file_uploader(
-    "Floor DXFs",
+upload_1, upload_2 = st.columns(2)
+gf_dxf = upload_1.file_uploader(
+    "1. Ground floor (GF) DXF - required",
     type=["dxf"],
-    accept_multiple_files=True,
-    help="Select files in floor order. You can edit the labels below before building.",
+    key="gf_dxf",
+)
+ff_dxf = upload_2.file_uploader(
+    "2. First floor (FF) DXF - optional",
+    type=["dxf"],
+    key="ff_dxf",
 )
 
-if not floor_files:
+upload_3, upload_4 = st.columns(2)
+other_floor_dxfs = upload_3.file_uploader(
+    "3. Other upper floors DXF - optional",
+    type=["dxf"],
+    accept_multiple_files=True,
+    key="other_floor_dxfs",
+    help="Upload only floors that are different from FF. They will be stacked after FF.",
+)
+roof_dxf = upload_4.file_uploader(
+    "4. Roof DXF - optional",
+    type=["dxf"],
+    key="roof_dxf",
+)
+
+uploaded_floors = []
+if gf_dxf is not None:
+    uploaded_floors.append({"label": "GF", "file": gf_dxf, "filename": gf_dxf.name})
+if ff_dxf is not None:
+    uploaded_floors.append({"label": "FF", "file": ff_dxf, "filename": ff_dxf.name})
+if ff_dxf is not None:
+    for idx, floor_file in enumerate(other_floor_dxfs or [], start=2):
+        uploaded_floors.append({"label": f"F{idx}", "file": floor_file, "filename": floor_file.name})
+elif other_floor_dxfs:
+    st.warning("Other floors were uploaded without FF. Upload FF first so the stack remains logical.")
+if roof_dxf is not None:
+    uploaded_floors.append({"label": "ROOF", "file": roof_dxf, "filename": roof_dxf.name})
+
+if not uploaded_floors:
     st.stop()
 
-default_labels = []
-for i, uploaded in enumerate(floor_files):
-    if i == 0:
-        label = "GF"
-    elif i == 1:
-        label = "FF"
-    else:
-        label = f"F{i}"
-    default_labels.append({"order": i + 1, "label": label, "filename": uploaded.name})
+floor_order_df = pd.DataFrame([
+    {"order": idx + 1, "label": item["label"], "filename": item["filename"]}
+    for idx, item in enumerate(uploaded_floors)
+])
 
-label_df = st.data_editor(
-    pd.DataFrame(default_labels),
+st.dataframe(
+    floor_order_df,
     use_container_width=True,
     hide_index=True,
-    disabled=["order", "filename"],
-    key="floor_label_editor",
 )
 
 first_doc = None
 layer_summary = []
 layers = []
 try:
-    first_doc = read_uploaded_dxf(floor_files[0])
+    first_doc = read_uploaded_dxf(uploaded_floors[0]["file"])
     layers = get_layer_names(first_doc)
     layer_summary = get_layer_entity_summary(first_doc)
 except Exception as exc:
@@ -1748,12 +1851,6 @@ with st.expander("Layer Isolation", expanded=True):
 build = st.button("Build 3D Structural Model", type="primary")
 
 if build:
-    labels = [str(row.get("label") or f"F{i + 1}") for i, row in enumerate(dataframe_records(label_df))]
-    uploaded_floors = [
-        {"label": labels[i], "file": floor_files[i]}
-        for i in range(len(floor_files))
-    ]
-
     settings = {
         "floor_height": floor_height,
         "wall_height": wall_height,
@@ -1771,6 +1868,7 @@ if build:
         "column_width": column_width,
         "column_depth": column_depth,
         "column_grouping_tol": column_grouping_tol,
+        "force_full_stack_columns": force_full_stack_columns,
         "beam_axis_tol": beam_axis_tol,
         "max_primary_beam_span": max_primary_beam_span,
         "primary_beam_width": primary_beam_width,
