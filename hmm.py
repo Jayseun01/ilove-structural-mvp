@@ -616,12 +616,124 @@ def wall_intersection_candidates(axes, axis_tol):
 
 
 def fallback_corner_columns(slab):
+    if not slab_is_valid(slab):
+        return []
+
     return [
         (slab["x1"], slab["y1"]),
         (slab["x2"], slab["y1"]),
         (slab["x1"], slab["y2"]),
         (slab["x2"], slab["y2"]),
     ]
+
+
+def slab_is_valid(slab, min_size=100.0):
+    if not slab:
+        return False
+    width = abs(float(slab.get("x2", 0.0)) - float(slab.get("x1", 0.0)))
+    height = abs(float(slab.get("y2", 0.0)) - float(slab.get("y1", 0.0)))
+    return width >= min_size and height >= min_size
+
+
+def dedupe_points(points, tol):
+    out = []
+    for x, y in points:
+        exists = False
+        for px, py in out:
+            if distance((x, y), (px, py)) <= tol:
+                exists = True
+                break
+        if not exists:
+            out.append((float(x), float(y)))
+    return out
+
+
+def structural_column_seed_points(axes, slab, axis_tol):
+    """
+    Column seeds are taken from major wall-axis intersections and slab corners.
+    This is deliberately structural-model friendly: it prefers stable vertical
+    grid lines over tiny partition intersections.
+    """
+
+    if not axes:
+        return fallback_corner_columns(slab)
+
+    bounds = bounds_from_segments(axes)
+    width = max(float(bounds.get("width", 0.0)), 1.0)
+    height = max(float(bounds.get("height", 0.0)), 1.0)
+    min_v_axis_len = max(1500.0, height * 0.22)
+    min_h_axis_len = max(1500.0, width * 0.22)
+
+    h_axes = [axis for axis in axes if axis["orientation"] == "H"]
+    v_axes = [axis for axis in axes if axis["orientation"] == "V"]
+
+    major_h = [
+        axis for axis in h_axes
+        if segment_length(axis) >= min_h_axis_len
+        or abs(axis["c"] - bounds["min_y"]) <= axis_tol * 2.0
+        or abs(axis["c"] - bounds["max_y"]) <= axis_tol * 2.0
+    ]
+    major_v = [
+        axis for axis in v_axes
+        if segment_length(axis) >= min_v_axis_len
+        or abs(axis["c"] - bounds["min_x"]) <= axis_tol * 2.0
+        or abs(axis["c"] - bounds["max_x"]) <= axis_tol * 2.0
+    ]
+
+    if not major_h:
+        major_h = h_axes
+    if not major_v:
+        major_v = v_axes
+
+    points = []
+    for h in major_h:
+        for v in major_v:
+            x = float(v["c"])
+            y = float(h["c"])
+            on_h = h["a"] - axis_tol <= x <= h["b"] + axis_tol
+            on_v = v["a"] - axis_tol <= y <= v["b"] + axis_tol
+            if on_h and on_v:
+                points.append((x, y))
+
+    if len(points) < 4:
+        points.extend(fallback_corner_columns(slab))
+
+    return dedupe_points(points, tol=max(axis_tol * 2.0, 1.0))
+
+
+def global_axis_values(all_axes_by_floor, slabs, axis_tol):
+    x_values = []
+    y_values = []
+
+    for axes in all_axes_by_floor.values():
+        for axis in axes:
+            if axis["orientation"] == "V":
+                x_values.append(float(axis["c"]))
+            elif axis["orientation"] == "H":
+                y_values.append(float(axis["c"]))
+
+    for slab in slabs:
+        if slab_is_valid(slab):
+            x_values.extend([float(slab["x1"]), float(slab["x2"])])
+            y_values.extend([float(slab["y1"]), float(slab["y2"])])
+
+    return cluster_values(x_values, axis_tol * 3.0), cluster_values(y_values, axis_tol * 3.0)
+
+
+def snap_floor_points_to_global_grid(floor_points, all_axes_by_floor, slabs, axis_tol):
+    global_x, global_y = global_axis_values(all_axes_by_floor, slabs, axis_tol)
+    snap_tol = max(axis_tol * 5.0, 250.0)
+    out = {}
+
+    for label, points in floor_points.items():
+        snapped = []
+        for x, y in points:
+            sx = nearest_value(float(x), global_x, tol=snap_tol)
+            sy = nearest_value(float(y), global_y, tol=snap_tol)
+            snapped.append((float(sx if sx is not None else x), float(sy if sy is not None else y)))
+        out[label] = dedupe_points(snapped, tol=max(axis_tol * 2.0, 1.0))
+
+    return out
 
 
 def build_column_groups(floor_points, floors, width, depth, grouping_tol):
@@ -1003,6 +1115,21 @@ def build_model_from_uploads(uploaded_floors, settings):
             ortho_tol=settings["ortho_tol"],
             min_line_length=settings["min_line_length"],
         )
+        extraction_mode = "all_layers" if settings["use_all_layers"] else "selected_wall_layers"
+
+        if not faces and not settings["use_all_layers"]:
+            fallback_faces, fallback_ignored = extract_wall_faces(
+                doc,
+                selected_layers=[],
+                use_all_layers=True,
+                ortho_tol=settings["ortho_tol"],
+                min_line_length=settings["min_line_length"],
+            )
+            if fallback_faces:
+                faces = fallback_faces
+                ignored = fallback_ignored
+                extraction_mode = "all_layers_fallback"
+
         axes = detect_wall_axes_from_faces(
             faces,
             floor_label=label,
@@ -1032,18 +1159,26 @@ def build_model_from_uploads(uploaded_floors, settings):
         )
         slabs.append(slab)
 
-        points = wall_intersection_candidates(axes, settings["axis_tol"])
-        if not points:
-            points = fallback_corner_columns(slab)
+        points = structural_column_seed_points(axes, slab, settings["axis_tol"])
         floor_points[label] = points
 
         summaries.append({
             "floor": label,
+            "extraction_mode": extraction_mode,
             "wall_faces": len(faces),
             "wall_axes": len(axes),
+            "slab_width": round(abs(float(slab["x2"]) - float(slab["x1"])), 3),
+            "slab_height": round(abs(float(slab["y2"]) - float(slab["y1"])), 3),
             "column_seed_points": len(points),
             "ignored_entities": ignored,
         })
+
+    floor_points = snap_floor_points_to_global_grid(
+        floor_points,
+        all_axes_by_floor,
+        slabs,
+        axis_tol=settings["axis_tol"],
+    )
 
     columns = build_column_groups(
         floor_points,
@@ -1071,7 +1206,7 @@ def build_model_from_uploads(uploaded_floors, settings):
     cantilevers = build_cantilevers(slabs, floors, tolerance=settings["cantilever_tolerance"])
 
     return {
-        "version": "3d_model_builder_mvp_1",
+        "version": "3d_model_builder_mvp_2_grid_snap",
         "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
         "units": "mm",
         "floors": floors,
