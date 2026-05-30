@@ -25,7 +25,7 @@ st.set_page_config(
 st.title("iLoveStructural")
 st.subheader("3D Structural Model Builder")
 st.caption(
-    "Upload ordered floor DXFs -> turn wall layers into 3D wall solids -> fill the spaces as slabs -> edit columns/beams -> export clean model data and DXF."
+    "Upload ordered floor DXFs -> turn wall layers into 3D wall solids -> create beam-bounded slab panels -> edit columns/beams -> export clean model data and DXF."
 )
 
 st.info(
@@ -605,83 +605,6 @@ def wall_rect_bounds(wall):
     }
 
 
-def rects_intersect(a, b, tol=0.0):
-    return not (
-        a["x2"] <= b["x1"] + tol
-        or b["x2"] <= a["x1"] + tol
-        or a["y2"] <= b["y1"] + tol
-        or b["y2"] <= a["y1"] + tol
-    )
-
-
-def slab_cells_between_wall_solids(
-    floor,
-    walls,
-    floor_plate,
-    slab_thickness,
-    min_cell_width,
-    min_cell_height,
-    axis_tol,
-    max_cells=500,
-):
-    """
-    Creates slab zones as open rectangular spaces between wall solids.
-    This is intentionally model-first: walls occupy space, slabs fill the voids.
-    """
-
-    if not slab_is_valid(floor_plate):
-        return []
-
-    wall_rects = [wall_rect_bounds(w) for w in walls if w.get("floor") == floor["label"]]
-
-    x_values = [float(floor_plate["x1"]), float(floor_plate["x2"])]
-    y_values = [float(floor_plate["y1"]), float(floor_plate["y2"])]
-
-    for rect in wall_rects:
-        x_values.extend([rect["x1"], rect["x2"]])
-        y_values.extend([rect["y1"], rect["y2"]])
-
-    xs = cluster_values(x_values, max(axis_tol, 1.0))
-    ys = cluster_values(y_values, max(axis_tol, 1.0))
-
-    cells = []
-    idx = 1
-    for i in range(len(xs) - 1):
-        x1 = xs[i]
-        x2 = xs[i + 1]
-        width = abs(x2 - x1)
-        if width < min_cell_width:
-            continue
-
-        for j in range(len(ys) - 1):
-            y1 = ys[j]
-            y2 = ys[j + 1]
-            height = abs(y2 - y1)
-            if height < min_cell_height:
-                continue
-
-            cell = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
-            if any(rects_intersect(cell, rect, tol=max(axis_tol, 1.0)) for rect in wall_rects):
-                continue
-
-            cells.append({
-                "id": f"S_{floor['label']}_{idx:04d}",
-                "floor": floor["label"],
-                "x1": float(x1),
-                "y1": float(y1),
-                "x2": float(x2),
-                "y2": float(y2),
-                "z": floor["z"],
-                "thickness": slab_thickness,
-                "status": "space_between_wall_solids",
-            })
-            idx += 1
-            if len(cells) >= max_cells:
-                return cells
-
-    return cells
-
-
 def floor_plate_bounds_from_slabs(slabs, floor_label):
     related = [s for s in slabs if s.get("floor") == floor_label and slab_is_valid(s)]
     if not related:
@@ -698,6 +621,176 @@ def floor_plate_bounds_from_slabs(slabs, floor_label):
         "thickness": float(related[0].get("thickness", 150.0)),
         "status": "computed_floor_plate_envelope",
     }
+
+
+def merge_intervals(intervals, gap_tol=0.0):
+    clean = []
+    for a, b in intervals:
+        aa = min(float(a), float(b))
+        bb = max(float(a), float(b))
+        if bb > aa:
+            clean.append((aa, bb))
+
+    if not clean:
+        return []
+
+    clean = sorted(clean, key=lambda item: item[0])
+    merged = [clean[0]]
+
+    for a, b in clean[1:]:
+        cur_a, cur_b = merged[-1]
+        if a <= cur_b + gap_tol:
+            merged[-1] = (cur_a, max(cur_b, b))
+        else:
+            merged.append((a, b))
+
+    return merged
+
+
+def total_interval_length(intervals):
+    return sum(max(0.0, float(b) - float(a)) for a, b in intervals)
+
+
+def grouped_axis_segments(segments, axis_tol):
+    if not segments:
+        return []
+
+    axes = cluster_values([s["axis"] for s in segments], max(axis_tol * 2.0, 1.0))
+    groups = []
+
+    for axis in axes:
+        members = [s for s in segments if abs(float(s["axis"]) - float(axis)) <= max(axis_tol * 2.0, 1.0)]
+        intervals = merge_intervals([(m["a"], m["b"]) for m in members], gap_tol=max(axis_tol * 2.0, 1.0))
+        groups.append({
+            "axis": float(axis),
+            "intervals": intervals,
+            "coverage": total_interval_length(intervals),
+            "count": len(members),
+            "statuses": sorted(set(str(m.get("status", "")) for m in members)),
+        })
+
+    return groups
+
+
+def beam_grid_axes(floor_plate, beams, floor_label, axis_tol, min_coverage_ratio):
+    if not slab_is_valid(floor_plate):
+        return [], []
+
+    min_x = float(floor_plate["x1"])
+    max_x = float(floor_plate["x2"])
+    min_y = float(floor_plate["y1"])
+    max_y = float(floor_plate["y2"])
+    width = max(max_x - min_x, 1.0)
+    height = max(max_y - min_y, 1.0)
+
+    h_segments = []
+    v_segments = []
+
+    for beam in beams:
+        if beam.get("floor") != floor_label:
+            continue
+        if beam.get("role") != "primary":
+            continue
+
+        x1 = float(beam.get("x1", 0.0))
+        y1 = float(beam.get("y1", 0.0))
+        x2 = float(beam.get("x2", 0.0))
+        y2 = float(beam.get("y2", 0.0))
+
+        if is_horizontal(x1, y1, x2, y2, axis_tol):
+            h_segments.append({
+                "axis": (y1 + y2) / 2.0,
+                "a": min(x1, x2),
+                "b": max(x1, x2),
+                "status": beam.get("status", ""),
+            })
+        elif is_vertical(x1, y1, x2, y2, axis_tol):
+            v_segments.append({
+                "axis": (x1 + x2) / 2.0,
+                "a": min(y1, y2),
+                "b": max(y1, y2),
+                "status": beam.get("status", ""),
+            })
+
+    xs = [min_x, max_x]
+    ys = [min_y, max_y]
+    min_ratio = max(0.01, float(min_coverage_ratio))
+    min_h_coverage = max(width * min_ratio, 1000.0)
+    min_v_coverage = max(height * min_ratio, 1000.0)
+
+    for group in grouped_axis_segments(h_segments, axis_tol):
+        is_column_line = "detected_column_line" in group["statuses"]
+        if group["coverage"] >= min_h_coverage or is_column_line:
+            if min_y - axis_tol <= group["axis"] <= max_y + axis_tol:
+                ys.append(group["axis"])
+
+    for group in grouped_axis_segments(v_segments, axis_tol):
+        is_column_line = "detected_column_line" in group["statuses"]
+        if group["coverage"] >= min_v_coverage or is_column_line:
+            if min_x - axis_tol <= group["axis"] <= max_x + axis_tol:
+                xs.append(group["axis"])
+
+    return (
+        cluster_values(xs, max(axis_tol * 3.0, 1.0)),
+        cluster_values(ys, max(axis_tol * 3.0, 1.0)),
+    )
+
+
+def slab_panels_from_beam_grid(
+    floor,
+    beams,
+    floor_plate,
+    slab_thickness,
+    min_panel_width,
+    min_panel_height,
+    axis_tol,
+    min_coverage_ratio,
+    max_panels=250,
+):
+    xs, ys = beam_grid_axes(
+        floor_plate=floor_plate,
+        beams=beams,
+        floor_label=floor["label"],
+        axis_tol=axis_tol,
+        min_coverage_ratio=min_coverage_ratio,
+    )
+
+    if len(xs) < 2 or len(ys) < 2:
+        return []
+
+    panels = []
+    idx = 1
+
+    for i in range(len(xs) - 1):
+        x1 = float(xs[i])
+        x2 = float(xs[i + 1])
+        width = abs(x2 - x1)
+        if width < min_panel_width:
+            continue
+
+        for j in range(len(ys) - 1):
+            y1 = float(ys[j])
+            y2 = float(ys[j + 1])
+            height = abs(y2 - y1)
+            if height < min_panel_height:
+                continue
+
+            panels.append({
+                "id": f"S_{floor['label']}_{idx:04d}",
+                "floor": floor["label"],
+                "x1": min(x1, x2),
+                "y1": min(y1, y2),
+                "x2": max(x1, x2),
+                "y2": max(y1, y2),
+                "z": floor["z"],
+                "thickness": slab_thickness,
+                "status": "beam_grid_panel",
+            })
+            idx += 1
+            if len(panels) >= max_panels:
+                return panels
+
+    return panels
 
 
 def wall_intersection_candidates(axes, axis_tol):
@@ -1272,6 +1365,7 @@ def build_model_from_uploads(uploaded_floors, settings):
     floor_points = {}
     slabs = []
     floor_plates = []
+    floor_plate_by_label = {}
     summaries = []
 
     for index, item in enumerate(uploaded_floors):
@@ -1331,20 +1425,7 @@ def build_model_from_uploads(uploaded_floors, settings):
             overhang=settings["slab_overhang"],
         )
         floor_plates.append(floor_plate)
-
-        floor_slabs = slab_cells_between_wall_solids(
-            floor=floor,
-            walls=floor_walls,
-            floor_plate=floor_plate,
-            slab_thickness=settings["slab_thickness"],
-            min_cell_width=settings["slab_min_cell_width"],
-            min_cell_height=settings["slab_min_cell_height"],
-            axis_tol=settings["axis_tol"],
-        )
-        if not floor_slabs:
-            floor_slabs = [floor_plate]
-
-        slabs.extend(floor_slabs)
+        floor_plate_by_label[label] = floor_plate
 
         points = structural_column_seed_points(axes, floor_plate, settings["axis_tol"])
         floor_points[label] = points
@@ -1354,7 +1435,8 @@ def build_model_from_uploads(uploaded_floors, settings):
             "extraction_mode": extraction_mode,
             "wall_faces": len(faces),
             "wall_solid_paths": len(axes),
-            "slab_cells": len(floor_slabs),
+            "slab_panels": 0,
+            "slab_method": "beam_grid_pending",
             "floor_plate_width": round(abs(float(floor_plate["x2"]) - float(floor_plate["x1"])), 3),
             "floor_plate_height": round(abs(float(floor_plate["y2"]) - float(floor_plate["y1"])), 3),
             "column_seed_points": len(points),
@@ -1390,6 +1472,30 @@ def build_model_from_uploads(uploaded_floors, settings):
         beam_depth=settings["primary_beam_depth"],
         max_segment_length=settings["max_primary_beam_span"],
     )
+    primary_support_beams = wall_beams + primary_beams
+
+    for floor in floors:
+        floor_plate = floor_plate_by_label.get(floor["label"])
+        floor_slabs = slab_panels_from_beam_grid(
+            floor=floor,
+            beams=primary_support_beams,
+            floor_plate=floor_plate,
+            slab_thickness=settings["slab_thickness"],
+            min_panel_width=settings["slab_min_cell_width"],
+            min_panel_height=settings["slab_min_cell_height"],
+            axis_tol=settings["axis_tol"],
+            min_coverage_ratio=settings["slab_grid_min_coverage_ratio"],
+        )
+        if not floor_slabs and floor_plate:
+            floor_slabs = [floor_plate]
+
+        slabs.extend(floor_slabs)
+
+        for summary in summaries:
+            if summary.get("floor") == floor["label"]:
+                summary["slab_panels"] = len(floor_slabs)
+                summary["slab_method"] = "beam_grid_panel"
+
     secondary_beams = build_secondary_beams(
         slabs,
         floors,
@@ -1397,11 +1503,11 @@ def build_model_from_uploads(uploaded_floors, settings):
         beam_width=settings["secondary_beam_width"],
         beam_depth=settings["secondary_beam_depth"],
     )
-    beams = wall_beams + primary_beams + secondary_beams
+    beams = primary_support_beams + secondary_beams
     cantilevers = build_cantilevers(slabs, floors, tolerance=settings["cantilever_tolerance"])
 
     return {
-        "version": "3d_model_builder_mvp_4_wall_solids_space_slabs",
+        "version": "3d_model_builder_mvp_5_beam_grid_slabs",
         "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
         "units": "mm",
         "floors": floors,
@@ -1908,8 +2014,16 @@ with st.sidebar:
     wall_height = st.number_input("Wall display height", min_value=500.0, value=3000.0, step=100.0)
     slab_thickness = st.number_input("Slab thickness", min_value=50.0, value=150.0, step=25.0)
     slab_overhang = st.number_input("Slab edge overhang from wall bounds", min_value=0.0, value=0.0, step=50.0)
-    slab_min_cell_width = st.number_input("Minimum generated slab cell width", min_value=100.0, value=600.0, step=100.0)
-    slab_min_cell_height = st.number_input("Minimum generated slab cell height", min_value=100.0, value=600.0, step=100.0)
+    slab_min_cell_width = st.number_input("Minimum generated slab panel width", min_value=100.0, value=1200.0, step=100.0)
+    slab_min_cell_height = st.number_input("Minimum generated slab panel height", min_value=100.0, value=1200.0, step=100.0)
+    slab_grid_min_coverage_ratio = st.number_input(
+        "Slab grid beam coverage ratio",
+        min_value=0.05,
+        max_value=1.00,
+        value=0.35,
+        step=0.05,
+        help="Higher values ignore short partition beams when creating slab panels.",
+    )
 
     st.markdown("### Extraction")
     wall_thickness_text = st.text_input("Wall thicknesses to build", value="225,150")
@@ -2051,6 +2165,7 @@ if build:
         "slab_overhang": slab_overhang,
         "slab_min_cell_width": slab_min_cell_width,
         "slab_min_cell_height": slab_min_cell_height,
+        "slab_grid_min_coverage_ratio": slab_grid_min_coverage_ratio,
         "selected_layers": selected_layers,
         "use_all_layers": use_all_layers,
         "ortho_tol": ortho_tol,
@@ -2221,5 +2336,5 @@ with tabs[5]:
     )
 
 st.success(
-    "3D model ready. Wall-layer geometry is now modelled as wall solids, slab cells are generated from the open spaces, and columns/beams remain editable from the tables."
+    "3D model ready. Wall-layer geometry is modelled as wall solids, slab panels are generated from the beam/support grid, and columns/beams remain editable from the tables."
 )
