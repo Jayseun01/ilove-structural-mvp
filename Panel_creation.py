@@ -18,12 +18,9 @@ def run():
     st.caption(
         "Architectural DXF -> accurate wall centerlines -> structural grid -> economical columns -> slab panel review."
     )
-
-st.title("iLoveStructural")
-st.subheader("Tool 4: Architectural Wall Centerline and Structural Layout Agent")
-st.caption(
-    "Architectural DXF -> accurate wall centerlines -> structural grid -> economical columns -> slab panel review."
-)
+    
+    # YOUR REST OF THE TOOL CODE CONTINUES HERE
+    # (all indented inside the function)
 
 
 # =========================================================
