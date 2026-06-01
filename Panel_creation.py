@@ -1,3 +1,5 @@
+def run():
+    """Main function that runs this tool"""
 import datetime
 import math
 import os
@@ -12,7 +14,6 @@ import streamlit as st
 # STREAMLIT CONFIG
 # =========================================================
 
-st.set_page_config(
     page_title="iLoveStructural - Structural Layout Agent",
     page_icon=":building_construction:",
     layout="wide",
@@ -3354,3 +3355,6 @@ st.download_button(
 st.success(
     "Analysis complete. The DXF now exports a repaired centerline graph, support-grid columns, and closed room/slab panel polylines for modelling review."
 )
+
+if __name__ == "__main__":
+    run()
