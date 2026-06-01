@@ -1,23 +1,23 @@
 def run():
     """Main function that runs this tool"""
-import datetime
-import math
-import os
-import tempfile
-
-import ezdxf
-import pandas as pd
-import streamlit as st
-
-
-# =========================================================
-# STREAMLIT CONFIG
-# =========================================================
-
-    page_title="iLoveStructural - Structural Layout Agent",
-    page_icon=":building_construction:",
-    layout="wide",
-)
+    import datetime
+    import math
+    import os
+    import tempfile
+    
+    import ezdxf
+    import pandas as pd
+    import streamlit as st
+    
+    # ============================================================
+    # TOOL CONTENT STARTS HERE
+    # ============================================================
+    
+    st.title("iLoveStructural - Structural Layout Agent")
+    st.subheader("Tool 4: Architectural Wall Centerline and Structural Layout Agent")
+    st.caption(
+        "Architectural DXF -> accurate wall centerlines -> structural grid -> economical columns -> slab panel review."
+    )
 
 st.title("iLoveStructural")
 st.subheader("Tool 4: Architectural Wall Centerline and Structural Layout Agent")
